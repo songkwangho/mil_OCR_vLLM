@@ -1,0 +1,164 @@
+# mil_OCR_v2 Docker Compose — 서비스 구성
+#
+# 서비스 구조:
+#   vllm-server     : Gemma4 VLM 추론 서버 (주 추론 엔진)
+#   pipeline        : P1~P6 파이프라인 (vllm-server에 API 호출)
+#   fallback        : v1 PP-OCRv5 기반 경량 fallback (T1~T5)
+#
+# SPOF 대비:
+#   수준 A — vLLM healthcheck + 자동 재시작
+#   수준 B — fallback 서비스 (VLM 완전 불가 시 PP-OCRv5 기초 파이프라인)
+
+services:
+  # ─────────────────────────────────────────────
+  # vLLM 서버 — Gemma4 26B-A4B 추론 (주 엔진)
+  # ─────────────────────────────────────────────
+  vllm-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.vllm
+    container_name: mil-ocr-v2-vllm
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models/gemma4:/models/gemma4:ro
+    environment:
+      - HF_HUB_OFFLINE=1
+      - VLLM_NO_USAGE_STATS=1
+    command: >
+      vllm serve /models/gemma4/gemma-4-26b-a4b-it/
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 1
+      --max-model-len 8192
+      --trust-remote-code
+      --disable-log-requests
+      --guided-decoding-backend outlines
+    # ── 수준 A: 헬스체크 + 자동 재시작 ──
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s    # 모델 로드 대기 (Gemma4 ~60-90초)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "4g"
+
+  # ─────────────────────────────────────────────
+  # 파이프라인 — P1~P6 (주 처리 경로)
+  # ─────────────────────────────────────────────
+  pipeline:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.pipeline
+    container_name: mil-ocr-v2-pipeline
+    restart: unless-stopped
+    depends_on:
+      vllm-server:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./models/t1_sr:/models/t1_sr:ro
+      - ./models/t2_layout:/models/t2_layout:ro
+      - ./data:/data
+      - ./configs:/configs:ro
+    environment:
+      - HF_HUB_OFFLINE=1
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+      # ── vLLM 연결 설정 ──
+      - VLLM_BASE_URL=http://vllm-server:8000/v1
+      # ── 수준 A: 오케스트레이터 헬스체크 설정 ──
+      - VLLM_HEALTH_URL=http://vllm-server:8000/health
+      - VLLM_HEALTH_CHECK_INTERVAL=30
+      - VLLM_HEALTH_CHECK_TIMEOUT=10
+      # ── 수준 B: fallback 연결 설정 ──
+      - FALLBACK_ENABLED=true
+      - FALLBACK_BASE_URL=http://fallback:8081
+      # ── 수동 검토 큐 설정 ──
+      - REVIEW_QUEUE_ENABLED=true
+      - REVIEW_QUEUE_DB_PATH=/data/review_queue.db
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "8g"
+
+  # ─────────────────────────────────────────────
+  # 수준 B: 경량 Fallback — v1 PP-OCRv5 (T1~T5)
+  # ─────────────────────────────────────────────
+  fallback:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.fallback
+    container_name: mil-ocr-v2-fallback
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./models/t1_sr:/models/t1_sr:ro
+      - ./models/t2_layout:/models/t2_layout:ro
+      - ./models/fallback:/models/fallback:ro   # PP-OCRv5 + SLANeXt 가중치
+      - ./data:/data
+    environment:
+      - HF_HUB_OFFLINE=1
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+      - FALLBACK_MODE=true
+      - FALLBACK_PORT=8081
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "4g"
+
+  # ─────────────────────────────────────────────
+  # Fine-tuning 환경 (필요 시만 기동)
+  # ─────────────────────────────────────────────
+  train:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.train
+    container_name: mil-ocr-v2-train
+    profiles:
+      - training
+    volumes:
+      - ./models:/models
+      - ./data:/data
+      - ./training:/training
+      - ./configs:/configs:ro
+    environment:
+      - HF_HUB_OFFLINE=1
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "8g"

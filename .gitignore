@@ -1,0 +1,36 @@
+# Models (large files)
+models/
+!models/.gitkeep
+
+# Data
+data/raw/
+data/pipeline_outputs/
+data/training/
+data/ocr_results.db
+data/db_fallback/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+.docker/
+
+# Env
+.env
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
