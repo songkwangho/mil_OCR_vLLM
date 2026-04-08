@@ -20,21 +20,27 @@ services:
     container_name: mil-ocr-v2-vllm
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8100:8000"
     volumes:
       - ./models/gemma4:/models/gemma4:ro
     environment:
       - HF_HUB_OFFLINE=1
       - VLLM_NO_USAGE_STATS=1
-    command: >
-      vllm serve /models/gemma4/gemma-4-26b-a4b-it/
-      --host 0.0.0.0
-      --port 8000
-      --tensor-parallel-size 1
-      --max-model-len 8192
-      --trust-remote-code
-      --disable-log-requests
-      --guided-decoding-backend outlines
+    command:
+      - "/models/gemma4/gemma-4-26b-a4b-it/"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--tensor-parallel-size"
+      - "1"
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-seqs"
+      - "128"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.90"
     # ── 수준 A: 헬스체크 + 자동 재시작 ──
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
@@ -47,7 +53,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ["2"]
               capabilities: [gpu]
     shm_size: "4g"
 

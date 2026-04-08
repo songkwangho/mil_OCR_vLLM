@@ -1,0 +1,43 @@
+# ═══════════════════════════════════════════════════════════
+#  mil_OCR_v2 — vLLM 추론 서버
+#
+#  Gemma4 26B-A4B (MoE, 활성 4B)를 vLLM으로 서빙.
+#  guided_json + logprobs 활성화.
+#
+#  베이스: vLLM 공식 이미지 (CUDA 12.x + PyTorch)
+#  기능: OpenAI 호환 API (:8000), /health 헬스체크
+# ═══════════════════════════════════════════════════════════
+
+FROM vllm/vllm-openai:v0.19.0
+
+LABEL maintainer="mil-ocr-team"
+LABEL description="Gemma4 26B-A4B vLLM 추론 서버 (guided_json + logprobs)"
+
+# ─── Gemma4 아키텍처 지원: transformers 5.5.0+ 필수 ──
+# vLLM v0.19.0은 transformers<5 핀이므로 강제 업그레이드
+# huggingface_hub도 함께 업그레이드 (transformers 5.x가 신규 API 요구)
+RUN pip install --no-cache-dir "transformers>=5.5.0" "huggingface_hub>=0.30.0"
+
+# ─── 폐쇄망 환경 변수 ─────────────────────────
+ENV HF_HUB_OFFLINE=1
+ENV VLLM_NO_USAGE_STATS=1
+ENV TRANSFORMERS_OFFLINE=1
+
+# ─── 헬스체크용 curl 설치 ─────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ─── 모델 마운트 포인트 ───────────────────────
+# 실제 모델은 docker-compose에서 volume mount
+VOLUME ["/models/gemma4"]
+
+EXPOSE 8000
+
+# ─── 기본 실행 명령 (docker-compose에서 오버라이드 가능) ──
+CMD ["/models/gemma4/gemma-4-26b-a4b-it/", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--tensor-parallel-size", "1", \
+     "--max-model-len", "8192", \
+     "--max-num-seqs", "128", \
+     "--trust-remote-code"]

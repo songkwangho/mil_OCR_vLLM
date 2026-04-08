@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supply_request",
+  "title": "보급청구서",
+  "description": "군수 보급청구서 필드 추출 스키마 (guided_json용)",
+  "type": "object",
+  "properties": {
+    "form_type": {
+      "type": "string",
+      "enum": ["supply_request"]
+    },
+    "unit_code": {
+      "type": "string",
+      "description": "청구부대 코드 (예: 1232부대)"
+    },
+    "unit_name": {
+      "type": "string",
+      "description": "청구부대 명칭"
+    },
+    "request_date": {
+      "type": "string",
+      "description": "청구일자 (YYYY-MM-DD)"
+    },
+    "approval_date": {
+      "type": "string",
+      "description": "승인일자 (YYYY-MM-DD)"
+    },
+    "approver_name": {
+      "type": "string",
+      "description": "결재권자 성명"
+    },
+    "approver_rank": {
+      "type": "string",
+      "description": "결재권자 직급/계급"
+    },
+    "items": {
+      "type": "array",
+      "description": "청구 품목 목록",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_no": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "품목 번호"
+          },
+          "nsn": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{3}-\\d{4}$",
+            "description": "NATO Stock Number (NNNN-NN-NNN-NNNN)"
+          },
+          "item_name": {
+            "type": "string",
+            "description": "품목명"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "수량"
+          },
+          "unit": {
+            "type": "string",
+            "description": "단위 (정, 개, EA 등)"
+          },
+          "unit_price": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "단가 (원)"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "합계 = 수량 × 단가"
+          }
+        },
+        "required": ["nsn", "item_name", "quantity", "unit_price", "total"]
+      }
+    },
+    "grand_total": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "총계 = SUM(품목별 합계)"
+    },
+    "remarks": {
+      "type": "string",
+      "description": "비고"
+    }
+  },
+  "required": ["form_type", "unit_code", "request_date", "items"]
+}

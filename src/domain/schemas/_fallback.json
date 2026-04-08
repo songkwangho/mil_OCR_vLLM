@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "_fallback",
+  "title": "범용 문서 (미분류)",
+  "description": "서식 유형 미분류 시 범용 key-value 추출 스키마",
+  "type": "object",
+  "properties": {
+    "form_type": {
+      "type": "string",
+      "enum": ["unknown"]
+    },
+    "title": {
+      "type": "string",
+      "description": "문서 제목"
+    },
+    "date": {
+      "type": "string",
+      "description": "문서 날짜 (YYYY-MM-DD)"
+    },
+    "author": {
+      "type": "string",
+      "description": "작성자"
+    },
+    "unit_code": {
+      "type": "string",
+      "description": "부대 코드"
+    },
+    "fields": {
+      "type": "array",
+      "description": "추출된 key-value 쌍",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "필드명"
+          },
+          "value": {
+            "type": "string",
+            "description": "필드값"
+          }
+        },
+        "required": ["key", "value"]
+      }
+    },
+    "tables": {
+      "type": "array",
+      "description": "표 데이터",
+      "items": {
+        "type": "object",
+        "properties": {
+          "headers": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "remarks": {
+      "type": "string",
+      "description": "비고"
+    }
+  },
+  "required": ["form_type"]
+}

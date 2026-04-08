@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inspection_report",
+  "title": "검사보고서",
+  "description": "군수 검사보고서 필드 추출 스키마 (guided_json용)",
+  "type": "object",
+  "properties": {
+    "form_type": {
+      "type": "string",
+      "enum": ["inspection_report"]
+    },
+    "inspection_date": {
+      "type": "string",
+      "description": "검사일자 (YYYY-MM-DD)"
+    },
+    "inspector_name": {
+      "type": "string",
+      "description": "검사자 성명"
+    },
+    "inspector_rank": {
+      "type": "string",
+      "description": "검사자 직급/계급"
+    },
+    "unit_code": {
+      "type": "string",
+      "description": "대상 부대 코드"
+    },
+    "inspection_type": {
+      "type": "string",
+      "description": "검사 유형 (정기, 특별, 수시 등)"
+    },
+    "target_description": {
+      "type": "string",
+      "description": "검사 대상 설명"
+    },
+    "findings": {
+      "type": "array",
+      "description": "검사 결과 항목",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_name": {
+            "type": "string",
+            "description": "점검 항목"
+          },
+          "result": {
+            "type": "string",
+            "description": "결과 (적합, 부적합, 해당없음)"
+          },
+          "detail": {
+            "type": "string",
+            "description": "상세 내용"
+          }
+        },
+        "required": ["item_name", "result"]
+      }
+    },
+    "overall_result": {
+      "type": "string",
+      "description": "종합 판정 (적합, 부적합, 조건부 적합)"
+    },
+    "corrective_actions": {
+      "type": "string",
+      "description": "시정 조치 사항"
+    },
+    "remarks": {
+      "type": "string",
+      "description": "비고"
+    }
+  },
+  "required": ["form_type", "inspection_date", "inspector_name", "overall_result"]
+}

@@ -21,7 +21,7 @@
 |------|------|------|------|------|------|
 | Real-ESRGAN x2plus | `models/t1_sr/RealESRGAN_x2plus.pth` | 64MB | PyTorch (.pth) | xinntao/Real-ESRGAN | v1에서 이관 예정 |
 | PP-DocLayout_plus-L | `models/t2_layout/PP-DocLayout_plus-L/` | 124MB | PaddlePaddle | PaddleOCR 3.0 | v1에서 이관 예정 |
-| Gemma4 26B-A4B | `models/gemma4/gemma-4-26b-a4b-it/` | ~16GB (Q4) | GGUF / SafeTensors | google/gemma-4-26b-a4b-it | ❌ 미배치 |
+| Gemma4 26B-A4B | `models/gemma4/gemma-4-26b-a4b-it/` | ~48GB (BF16) | SafeTensors | google/gemma-4-26b-a4b-it | ✅ 배치 완료 |
 
 ---
 
@@ -85,19 +85,25 @@ TASK_PROMPTS = {
 | 비전 입력 | 가변 해상도, 70~1120 토큰/이미지 |
 | 한국어 지원 | ✅ (40+ 언어) |
 | 라이선스 | Apache 2.0 |
-| 추론 VRAM | 8~14GB (Q4 양자화 시 ~8GB) |
+| 추론 VRAM (BF16) | **~48GB** (실측) |
+| 추론 VRAM (AWQ 4-bit) | ~16GB (Phase 3 양자화 실험 예정) |
+| 추론 VRAM (FP8 Dynamic) | ~27GB (Phase 3 양자화 실험 예정) |
 
 **서빙 방식**: vLLM 로컬 서버
 
-```python
-# vLLM 서버 시작 (오프라인, guided decoding + logprobs 활성화)
+```bash
+# vLLM v0.19.0+ 서버 시작 (오프라인, guided decoding + logprobs 활성화)
+# Gemma4 지원: vLLM >= v0.19.0 + transformers >= 5.5.0 필수
+# 주의: 기본 max_num_seqs=1024는 warmup 시 OOM 발생 → 128로 제한 필수
 vllm serve models/gemma4/gemma-4-26b-a4b-it/ \
     --tensor-parallel-size 1 \
     --max-model-len 8192 \
-    --trust-remote-code \
+    --max-num-seqs 128 \
     --disable-log-requests \
-    --guided-decoding-backend outlines
+    --gpu-memory-utilization 0.90
 ```
+
+> **운영 환경 (2026-04-08 검증 완료)**: vLLM v0.19.0 / H100 80GB (GPU #2) / BF16 / 모델 로드 48.5 GiB / 기동 ~120초
 
 **Guided Decoding — JSON Schema 기반 출력 구조 보장**
 
@@ -257,7 +263,7 @@ VLM이 완전히 불가할 때 v1의 PP-OCRv5 기반 T1~T5를 별도 컨테이�
 
 | 항목 | VLM (주 경로) | Fallback |
 |------|-------------|----------|
-| VRAM | 12~16GB | 2~4GB |
+| VRAM | ~48GB (BF16) | 2~4GB |
 | 추론 속도 | ~3-5초/문서 | ~1-2초/문서 |
 | 텍스트 교정 | VLM 문맥 교정 | ❌ 없음 |
 | 서식 분류 | instruction 기반 | DiT 모델 기반 |
@@ -278,7 +284,7 @@ VLM이 완전히 불가할 때 v1의 PP-OCRv5 기반 T1~T5를 별도 컨테이�
 
 | 서비스 | 용도 | 프레임워크 | 헬스체크 |
 |--------|------|-----------|---------|
-| `vllm-server` | Gemma4 vLLM 서버 (guided decoding + logprobs) | vLLM + PyTorch | `/health` (30s) |
+| `vllm-server` | Gemma4 vLLM v0.19.0 서버 (guided decoding + logprobs) | vLLM + PyTorch + transformers 5.5.0 | `/health` (30s) |
 | `pipeline` | P1~P6 파이프라인 (vLLM 서버에 API 호출) | PaddlePaddle + PyTorch | `/health` (30s) |
 | `fallback` | v1 PP-OCRv5 기반 경량 파이프라인 (T1~T5) | PaddlePaddle + PyTorch | `/health` (30s) |
 | `train` | Fine-tuning 환경 (profiles: training) | PyTorch + PaddlePaddle + PEFT | — |
@@ -303,10 +309,19 @@ VLM이 완전히 불가할 때 v1의 PP-OCRv5 기반 T1~T5를 별도 컨테이�
 
 ## 7. 하드웨어 요구사항
 
-| 용도 | 최소 GPU | 권장 GPU |
-|------|---------|---------|
-| Gemma4 추론 (Q4) | RTX 3060 12GB | RTX 4090 24GB |
-| Gemma4 추론 (BF16) | RTX 3090 24GB | A100 40GB |
-| PP-DocLayout 추론 | CPU 가능 | GPU 4GB |
-| Real-ESRGAN SR | GPU 2GB | GPU 4GB |
-| Fallback (T3+T4+T5) | GPU 2GB | GPU 4GB |
+| 용도 | VRAM | 권장 GPU | 비고 |
+|------|------|---------|------|
+| Gemma4 추론 (BF16) | **~48GB** | H100 80GB / A100 80GB | 현재 운영 구성 |
+| Gemma4 추론 (AWQ 4-bit) | **~16GB** | RTX 4090 24GB | Phase 3 실험 예정 |
+| Gemma4 추론 (FP8 Dynamic) | **~27GB** | A100 40GB | Phase 3 실험 예정 (vLLM 버그 해소 후) |
+| PP-DocLayout 추론 | 4GB | GPU 4GB+ | PaddlePaddle |
+| Real-ESRGAN SR | 2GB | GPU 4GB+ | 타일 기반 |
+| Fallback (T3+T4+T5) | 2~4GB | GPU 4GB+ | v1 PP-OCRv5 기반 |
+
+### 양자화 옵션 상세 (Phase 3 실험 계획)
+
+| 양자화 | 모델 | VRAM | 양자화 대상 | 품질 손실 | vLLM 호환 |
+|--------|------|------|-----------|----------|----------|
+| BF16 (현재) | google/gemma-4-26b-a4b-it | ~48GB | — | 기준 | v0.19.0 ✅ |
+| AWQ 4-bit | cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit | ~16GB | 어텐션만 INT4 (MoE 전문가 BF16 유지) | 최소 (~1-2%) | v0.19.0 ✅ |
+| FP8 Dynamic | RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic | ~27GB | 가중치 + 활성화 FP8 | ~0.3% | 주의: gibberish 버그 #39049 |

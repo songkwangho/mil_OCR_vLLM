@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "handover_doc",
+  "title": "인수인계서",
+  "description": "군수 인수인계서 필드 추출 스키마 (guided_json용)",
+  "type": "object",
+  "properties": {
+    "form_type": {
+      "type": "string",
+      "enum": ["handover_doc"]
+    },
+    "from_person": {
+      "type": "string",
+      "description": "인계자 성명"
+    },
+    "from_rank": {
+      "type": "string",
+      "description": "인계자 직급/계급"
+    },
+    "from_unit": {
+      "type": "string",
+      "description": "인계자 소속 부대"
+    },
+    "to_person": {
+      "type": "string",
+      "description": "인수자 성명"
+    },
+    "to_rank": {
+      "type": "string",
+      "description": "인수자 직급/계급"
+    },
+    "to_unit": {
+      "type": "string",
+      "description": "인수자 소속 부대"
+    },
+    "handover_date": {
+      "type": "string",
+      "description": "인수인계일자 (YYYY-MM-DD)"
+    },
+    "items": {
+      "type": "array",
+      "description": "인수인계 품목 목록",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "item_name": {
+            "type": "string",
+            "description": "품목명"
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "수량"
+          },
+          "condition": {
+            "type": "string",
+            "description": "상태 (양호, 수리요, 불용 등)"
+          },
+          "serial_number": {
+            "type": "string",
+            "description": "일련번호/장비번호"
+          }
+        },
+        "required": ["item_name", "quantity"]
+      }
+    },
+    "witness_name": {
+      "type": "string",
+      "description": "입회자 성명"
+    },
+    "remarks": {
+      "type": "string",
+      "description": "비고"
+    }
+  },
+  "required": ["form_type", "from_person", "to_person", "handover_date", "items"]
+}

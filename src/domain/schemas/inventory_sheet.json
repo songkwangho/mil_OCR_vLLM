@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inventory_sheet",
+  "title": "물자현황표",
+  "description": "군수 물자현황표 필드 추출 스키마 (guided_json용)",
+  "type": "object",
+  "properties": {
+    "form_type": {
+      "type": "string",
+      "enum": ["inventory_sheet"]
+    },
+    "unit_code": {
+      "type": "string",
+      "description": "부대 코드"
+    },
+    "report_date": {
+      "type": "string",
+      "description": "작성일자 (YYYY-MM-DD)"
+    },
+    "items": {
+      "type": "array",
+      "description": "물자 품목 목록",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "nsn": {
+            "type": "string",
+            "description": "물자코드 (NSN 또는 K-NSN)"
+          },
+          "item_name": {
+            "type": "string",
+            "description": "품목명"
+          },
+          "stock_qty": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "재고수량"
+          },
+          "location": {
+            "type": "string",
+            "description": "보관 위치"
+          },
+          "disposal_qty": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "불용수량"
+          },
+          "condition": {
+            "type": "string",
+            "description": "적부 판정 (적합, 부적합, 수리요)"
+          }
+        },
+        "required": ["item_name", "stock_qty"]
+      }
+    },
+    "total_items": {
+      "type": "integer",
+      "description": "총 품목 수"
+    },
+    "inspector_name": {
+      "type": "string",
+      "description": "점검자 성명"
+    },
+    "remarks": {
+      "type": "string",
+      "description": "비고"
+    }
+  },
+  "required": ["form_type", "unit_code", "report_date", "items"]
+}

@@ -102,18 +102,19 @@ v2는 **PP-DocLayout (레이아웃) + Gemma4 VLM (통합 추론)** 2단계 구�
 
 | P# | 컴포넌트 | 소스 파일 | AI 모델 / 기술 | 상태 |
 |----|----------|----------|---------------|------|
-| — | 공용 인터페이스 | `src/interfaces/` | — | 미구현 |
-| — | 오케스트레이터 | `src/pipeline/orchestrator.py` | — | 미구현 |
-| P1 | 화질 보정 + SR | `src/preprocess/preprocessor.py` | Real-ESRGAN (LOW DPI) | 미구현 (v1 이관 예정) |
-| P2 | 구조 분석 | `src/preprocess/layout_analyzer.py` | PP-DocLayout_plus-L (분해+순서+태스크) | 미구현 (v1 이관 예정) |
-| P3 | VLM 통합 추론 | `src/vlm/gemma4_engine.py` | Gemma4 26B-A4B + vLLM (guided_json + logprobs) | 미구현 |
-| P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ❌ (룰 엔진) | 미구현 |
-| P5 | 직렬화 | `src/postprocess/serializer.py` | ❌ | 미구현 (v1 이관 예정) |
-| P6 | DB 적재 | `src/postprocess/db_loader.py` | ❌ | 미구현 (v1 이관 예정) |
-| — | **수동 검토 큐** | `src/postprocess/review_queue.py` | ❌ (SQLite 큐) | 미구현 |
-| — | **Fallback 서비스** | `src/fallback/` | v1 PP-OCRv5 T3~T5 | 미구현 |
-| — | **VLM 헬스 모니터** | `src/pipeline/health_monitor.py` | ❌ (httpx polling) | 미구현 |
-| — | **Docker 구성** | `docker-compose.yml` | — | ✅ 설계 완료 |
+| — | 공용 인터페이스 | `src/interfaces/` | — | ✅ 완료 (14 Enum + 15 dataclass) |
+| — | 오케스트레이터 | `src/pipeline/orchestrator.py` | — | ✅ 완료 (6단계 재작성) |
+| P1 | 화질 보정 + SR | `src/preprocess/preprocessor.py` | Real-ESRGAN (LOW DPI) | ✅ 완료 (v1 이관) |
+| P2 | 구조 분석 | `src/preprocess/layout_analyzer.py` | PP-DocLayout_plus-L (분해+순서+태스크) | ✅ 완료 (v1 수정 이관) |
+| P3 | VLM 통합 추론 | `src/vlm/gemma4_engine.py` | Gemma4 26B-A4B + vLLM (guided_json + logprobs) | ✅ 완료 |
+| P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ❌ (룰 엔진) | ✅ 완료 (logprobs + 룰 병합) |
+| P5 | 직렬화 | `src/postprocess/serializer.py` | ❌ | ✅ 완료 (v1 이관) |
+| P6 | DB 적재 | `src/postprocess/db_loader.py` | ❌ | ✅ 완료 (v1 이관 + v2 스키마) |
+| — | **수동 검토 큐** | `src/postprocess/review_queue.py` | ❌ (SQLite 큐) | ✅ 완료 |
+| — | **Fallback 서비스** | `src/fallback/ocr_fallback_service.py` | v1 PP-OCRv5 T3~T5 | ✅ 완료 (v1 래핑 + v2 변환) |
+| — | **VLM 헬스 모니터** | `src/pipeline/health_monitor.py` | ❌ (httpx polling) | ✅ 완료 |
+| — | **Fallback 전환 정책** | `src/pipeline/fallback_policy.py` | ❌ | ✅ 완료 |
+| — | **Docker 구성** | `docker-compose.yml` + `docker/Dockerfile.*` | — | ✅ 완료 (4 Dockerfile) |
 
 ---
 
@@ -158,32 +159,33 @@ mil_OCR_v2/
 ### Phase 1 (1~2개월, 04~05월) — 핵심 파이프라인 구축
 
 **1-A. v1 이관 + 인터페이스 정의** (이관 우선순위: interfaces → preprocess → postprocess)
-- [ ] `src/interfaces/` 타입 재설계 (v1 축소 + VLMResult/FieldValue/ValidatedResult 신규)
-- [ ] P1 화질 보정 + SR (v1 T1 **그대로 이관**, import 경로 변경)
-- [ ] P1 SR (v1 sr_enhancer.py **그대로 이관**)
-- [ ] P2 구조 분석 (v1 T2 **수정 이관** — reading_order 강화, TASK_PROMPTS 추가)
-- [ ] Docker 통합 환경 구축 (PaddlePaddle + PyTorch + vLLM)
+- [x] `src/interfaces/` 타입 재설계 (v1 축소 + VLMResult/FieldValue/ValidatedResult 신규) ✅
+- [x] P1 화질 보정 + SR (v1 T1 **그대로 이관**, import 경로 변경) ✅
+- [x] P1 SR (v1 sr_enhancer.py **그대로 이관**) ✅
+- [x] P2 구조 분석 (v1 T2 **수정 이관** — reading_order 강화, TASK_PROMPTS 추가) ✅
+- [x] Docker 통합 환경 구축 (PaddlePaddle + PyTorch + vLLM) ✅
 
 **1-B. Gemma4 VLM 엔진 구현** (신규)
-- [ ] Gemma4 26B-A4B 모델 다운로드 + 로컬 배치
-- [ ] vLLM 서빙 설정 (오프라인 모드, guided_json, logprobs)
-- [ ] `src/vlm/gemma4_engine.py` — vLLM API 호출, 이미지 + instruction 전달
-- [ ] `src/vlm/instruction_builder.py` — P2 레이블 → instruction 자동 생성
-- [ ] `src/vlm/logprobs_scorer.py` — logprobs → 필드별 신뢰도 환산
-- [ ] `src/domain/schemas/*.json` — 군수 서식별 JSON Schema (guided_json용)
-- [ ] P2 → P3 연결 (영역별 crop + reading_order + task prompt)
-- [ ] P1 → P2 → P3 통합 테스트
+- [x] Gemma4 26B-A4B 모델 다운로드 + 로컬 배치 ✅ (`models/gemma4/gemma-4-26b-a4b-it/`, ~48GB BF16)
+- [x] vLLM 서빙 설정 (오프라인 모드, guided_json, logprobs) ✅ (docker-compose + Dockerfile)
+- [x] vLLM 서버 로컬 기동 검증 ✅ (v0.19.0, GPU #2 H100 80GB, `--max-num-seqs 128`)
+- [x] `src/vlm/gemma4_engine.py` — vLLM API 호출, 이미지 + instruction 전달 ✅
+- [x] `src/vlm/instruction_builder.py` — P2 레이블 → instruction 자동 생성 ✅
+- [x] `src/vlm/logprobs_scorer.py` — logprobs → 필드별 신뢰도 환산 ✅
+- [x] `src/domain/schemas/*.json` — 군수 서식별 JSON Schema 6종 (guided_json용) ✅
+- [x] P2 → P3 연결 (영역별 crop + reading_order + task prompt) ✅ (gemma4_engine.process)
+- [ ] P1 → P2 → P3 통합 테스트 (VLM 서버 가동 후) — 테스트 스크립트 작성 완료 (`tests/test_integration_pipeline.py`)
 
 **1-C. 후처리 이관 + 재작성**
-- [ ] P4 룰 검증 + 신뢰도 보정 (v1 T9 **대폭 수정** — logprobs 기반 + T8 룰 병합)
-- [ ] P4 → 검토 큐 적재 로직 (`src/postprocess/review_queue.py` — CRITICAL/LOW confidence 판정)
-- [ ] P5 직렬화 (v1 T11 **그대로 이관**)
-- [ ] P6 DB 적재 (v1 T12 **그대로 이관**, DB 스키마 v2 조정)
-- [ ] 오케스트레이터 **재작성** (12단계 → 6단계, vLLM API 호출)
-- [ ] VLM 헬스 모니터 구현 (`src/pipeline/health_monitor.py` — 수준 A)
-- [ ] Fallback 서비스 구현 (`src/fallback/` — 수준 B, v1 T3~T5 래핑)
-- [ ] Fallback 전환 정책 (`FallbackPolicy` — vlm/fallback/review_queue 분기)
-- [ ] P1→P6 전체 파이프라인 통합 테스트 (주 경로 + fallback 경로)
+- [x] P4 룰 검증 + 신뢰도 보정 (v1 T9 **대폭 수정** — logprobs 기반 + T8 룰 병합) ✅
+- [x] P4 → 검토 큐 적재 로직 (`src/postprocess/review_queue.py` — CRITICAL/LOW confidence 판정) ✅
+- [x] P5 직렬화 (v1 T11 **이관** — ValidatedResult 입력) ✅
+- [x] P6 DB ��재 (v1 T12 **이관** + DB 스키마 v2 조정: processing_path, review_queue_id) ✅
+- [x] 오케스트레이터 **재작성** (12단계 → 6단계, VLM/Fallback/검토큐 분기) ✅
+- [x] VLM 헬스 모니터 구현 (`src/pipeline/health_monitor.py` — 수준 A) ✅
+- [x] Fallback 서비스 구현 (`src/fallback/ocr_fallback_service.py` — v1 T3~T5 래핑 + v2 인터페이스 어댑터) ✅
+- [x] Fallback 전환 정책 (`FallbackPolicy` — vlm/fallback/review_queue 분기) ✅
+- [ ] P1���P6 전체 파이프라인 통합 테스트 (VLM 서버 가동 후)
 
 ### Phase 2 (3~4개월, 06~07월) — Fine-tuning + 품질 개선
 
@@ -200,7 +202,11 @@ mil_OCR_v2/
 
 ### Phase 3 (5~6개월, 08~09월) — 최적화 + 배포
 
-- [ ] 추론 속도 최적화 (vLLM 배치, Q4/Q8 양자화)
+- [ ] 추론 속도 최적화 (vLLM 배치 튜닝)
+- [ ] **Gemma4 양자화 실험** — BF16(현재) 대비 품질·속도·VRAM 비교
+  - [ ] AWQ 4-bit (`cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit`) — 어텐션만 INT4, MoE 전문가 BF16 유지, ~16GB VRAM, vLLM v0.19.0 호환
+  - [ ] FP8 Dynamic (`RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic`) — 가중치+활성화 FP8, ~29GB VRAM, 품질 손실 ~0.3% (vLLM gibberish 버그 #39049 해소 후 진행)
+  - [ ] 양자화별 OCR 품질 벤치마크 (군수 서식 테스트셋 기준 필드 정확도, 신뢰도 분포 비교)
 - [ ] 프론트엔드 UI 구현
 - [ ] **수동 검토 큐 UI** (필수 — `docs/FRONTEND.md` §2-2 참조)
   - [ ] 큐 목록 화면 (우선순위 정렬, 필터, 대시보드)
@@ -225,7 +231,9 @@ mil_OCR_v2/
 
 | 용도 | GPU | VRAM | 비고 |
 |------|-----|------|------|
-| Gemma4 26B-A4B 추론 | NVIDIA GPU | 12~16GB | Q4 양자화 시 ~8GB |
+| Gemma4 26B-A4B 추론 (BF16) | NVIDIA GPU | **~48GB** | 현재 운영 중 (H100 80GB) |
+| Gemma4 26B-A4B 추론 (AWQ 4-bit) | NVIDIA GPU | **~16GB** | Phase 3 양자화 실험 후 전환 검토 |
+| Gemma4 26B-A4B 추론 (FP8 Dynamic) | NVIDIA GPU | **~27GB** | Phase 3 양자화 실험 후 전환 검토 |
 | PP-DocLayout 추론 | NVIDIA GPU | 4GB | PaddlePaddle |
 | Real-ESRGAN SR | NVIDIA GPU | 2GB | 타일 기반 처리 |
 | Gemma4 Fine-tuning | NVIDIA GPU | 24GB+ | LoRA 시 16GB |

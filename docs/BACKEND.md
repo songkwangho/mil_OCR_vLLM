@@ -482,7 +482,7 @@ basicsr
 # Stage 2 — VLM (vLLM 서버)
 vllm
 torch
-transformers>=4.40.0
+transformers>=5.5.0          # Gemma4 아키텍처 지원 필수
 
 # Stage 3 — 후처리
 pydantic>=2.6.0

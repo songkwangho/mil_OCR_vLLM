@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════════════════
+#  mil_OCR_v2 — 파이프라인 서비스 (P1~P6)
+#
+#  베이스: PaddlePaddle GPU (CUDA 11.8 + CUDNN 8.9)
+#  추가: PyTorch (CUDA 11.8) + OpenAI SDK (vLLM 클라이언트)
+#
+#  프레임워크:
+#    - PaddlePaddle 3.2.0  → P2 PP-DocLayout
+#    - PyTorch (CUDA 11.8) → P1 Real-ESRGAN
+#    - OpenAI SDK           → P3 vLLM API 호출
+#    - OpenCV, scikit-image → P1 전처리
+#    - SQLAlchemy           → P6 DB 적재
+# ═══════════════════════════════════════════════════════════
+
+FROM paddlepaddle/paddle:3.2.0-gpu-cuda11.8-cudnn8.9
+
+LABEL maintainer="mil-ocr-team"
+LABEL description="mil_OCR_v2 파이프라인 서비스 (PaddlePaddle + PyTorch + vLLM 클라이언트)"
+
+# ─── 시스템 패키지 ──────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1-mesa-glx \
+        libglib2.0-0 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ─── PyTorch (CUDA 11.8 호환) ──────────────
+RUN pip install --no-cache-dir \
+        torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# ─── Real-ESRGAN (P1 초해상도) ─────────────
+RUN pip install --no-cache-dir \
+        realesrgan basicsr \
+    && python3 -c "\
+import importlib, pathlib; \
+p = pathlib.Path(importlib.import_module('torchvision').__file__).parent / 'transforms' / 'functional_tensor.py'; \
+p.exists() or p.write_text('from torchvision.transforms.functional import *\n')"
+
+# ─── PaddleOCR + 공통 의존성 ───────────────
+RUN pip install --no-cache-dir \
+        paddleocr>=3.4.0 \
+        opencv-python>=4.9.0 \
+        scikit-image>=0.22.0 \
+        Pillow>=10.0.0 \
+        numpy>=1.26.0 \
+        pyyaml
+
+# ─── vLLM 클라이언트 + 후처리 의존성 ──────
+RUN pip install --no-cache-dir \
+        openai \
+        httpx \
+        pydantic>=2.6.0 \
+        lxml>=5.1.0 \
+        pandas>=2.2.0 \
+        sqlalchemy>=2.0.0
+
+# ─── 작업 디렉토리 ──────────────────────────
+WORKDIR /workspace
+COPY src/ /workspace/src/
+COPY configs/ /workspace/configs/
+
+ENV PYTHONPATH=/workspace
+ENV PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+
+EXPOSE 8080
+
+CMD ["python", "-m", "src.pipeline.server"]

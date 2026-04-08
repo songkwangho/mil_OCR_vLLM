@@ -1,0 +1,71 @@
+# ═══════════════════════════════════════════════════════════
+#  mil_OCR_v2 — 수준 B 경량 Fallback 서비스
+#
+#  VLM(vLLM) 완전 불가 시 v1 PP-OCRv5 기반 기초 OCR 유지.
+#
+#  베이스: PaddlePaddle GPU (CUDA 11.8 + CUDNN 8.9)
+#  추가: PyTorch (CUDA 11.8) → T3 DiT 서식 분류
+#
+#  포함 모델:
+#    - T3: DiT (서식 분류)       → models/fallback/t3_form_classifier/
+#    - T4: PP-OCRv5 (텍스트 인식) → models/fallback/t4_handwriting/
+#    - T5: SLANeXt (표 구조)     → models/fallback/t5_table_structure/
+#
+#  API: FastAPI (:8081)
+#    POST /fallback/process  → 이미지 → T1~T5 결과
+#    GET  /health            → 헬스체크
+# ═══════════════════════════════════════════════════════════
+
+FROM paddlepaddle/paddle:3.2.0-gpu-cuda11.8-cudnn8.9
+
+LABEL maintainer="mil-ocr-team"
+LABEL description="mil_OCR_v2 경량 Fallback 서비스 (PP-OCRv5 + DiT + SLANeXt)"
+
+# ─── 시스템 패키지 ──────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1-mesa-glx \
+        libglib2.0-0 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ─── PyTorch (T3 DiT용) ───────────────────
+RUN pip install --no-cache-dir \
+        torch torchvision --index-url https://download.pytorch.org/whl/cu118
+
+# ─── HuggingFace Transformers (T3 DiT) ────
+RUN pip install --no-cache-dir \
+        transformers>=4.40.0
+
+# ─── Real-ESRGAN (P1/T1 초해상도) ─────────
+RUN pip install --no-cache-dir \
+        realesrgan basicsr \
+    && python3 -c "\
+import importlib, pathlib; \
+p = pathlib.Path(importlib.import_module('torchvision').__file__).parent / 'transforms' / 'functional_tensor.py'; \
+p.exists() or p.write_text('from torchvision.transforms.functional import *\n')"
+
+# ─── PaddleOCR + 공통 의존성 ───────────────
+RUN pip install --no-cache-dir \
+        paddleocr>=3.4.0 \
+        opencv-python>=4.9.0 \
+        scikit-image>=0.22.0 \
+        Pillow>=10.0.0 \
+        numpy>=1.26.0 \
+        pyyaml \
+        pydantic>=2.6.0 \
+        fastapi \
+        uvicorn
+
+# ─── 작업 디렉토리 ──────────────────────────
+WORKDIR /workspace
+COPY src/ /workspace/src/
+
+ENV PYTHONPATH=/workspace
+ENV PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+ENV FALLBACK_MODE=true
+
+EXPOSE 8081
+
+CMD ["uvicorn", "src.fallback.server:app", "--host", "0.0.0.0", "--port", "8081"]
