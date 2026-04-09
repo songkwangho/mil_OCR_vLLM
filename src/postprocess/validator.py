@@ -50,6 +50,12 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 OVERALL_CONFIDENCE_THRESHOLD = 0.85
 
+# Fallback 경로 신뢰도 보정 상수
+# Fallback lacks logprobs, so token_logprobs=[] and confidence comes from
+# rec_score * 0.7. We apply stricter thresholds to prevent over-trust.
+FALLBACK_CONFIDENCE_PENALTY = 0.10
+FALLBACK_MAX_OVERALL_CONFIDENCE = 0.70
+
 
 # ─────────────────────────────────────────────
 #  검증 규칙 실행
@@ -294,10 +300,22 @@ class P4Validator:
         penalty_map = self._build_penalty_map(all_errors)
         adjusted_fields: list[FieldValue] = []
 
+        # Fallback lacks logprobs, so token_logprobs=[] and confidence comes
+        # from rec_score * 0.7. We apply stricter thresholds to prevent
+        # over-trust in fallback results.
+        is_fallback = processing_path == ProcessingPath.FALLBACK
+
         for f in fields:
             penalty = penalty_map.get(f.field_key, 0.0)
             adjusted_confidence = max(0.0, f.confidence - penalty)
-            adjusted_flagged = is_flagged(adjusted_confidence, f.data_type)
+
+            if is_fallback:
+                # Raise the flagging threshold by FALLBACK_CONFIDENCE_PENALTY
+                # so that fallback fields are more strictly flagged
+                threshold = get_threshold(f.data_type) + FALLBACK_CONFIDENCE_PENALTY
+                adjusted_flagged = adjusted_confidence < threshold
+            else:
+                adjusted_flagged = is_flagged(adjusted_confidence, f.data_type)
 
             adjusted_fields.append(FieldValue(
                 field_key=f.field_key,
@@ -314,6 +332,10 @@ class P4Validator:
             overall = sum(f.confidence for f in adjusted_fields) / len(adjusted_fields)
         else:
             overall = 0.0
+
+        # Cap overall confidence for FALLBACK path (fallback discount is 0.7x)
+        if is_fallback:
+            overall = min(overall, FALLBACK_MAX_OVERALL_CONFIDENCE)
 
         # ── 4. 판정 ───
         flagged_fields = [f.field_key for f in adjusted_fields if f.is_flagged]

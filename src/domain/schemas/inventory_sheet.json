@@ -1,6 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "inventory_sheet",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2026-04-01",
+  "x-mil-ocr-deprecated": false,
   "title": "물자현황표",
   "description": "군수 물자현황표 필드 추출 스키마 (guided_json용)",
   "type": "object",

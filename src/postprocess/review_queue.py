@@ -180,6 +180,68 @@ class ReviewQueue:
         finally:
             session.close()
 
+    def export_training_pairs(
+        self,
+        status: str = "approved",
+        output_format: str = "sft",
+    ) -> list[dict]:
+        """교정 완료 데이터를 학습용 쌍으로 export.
+
+        Args:
+            status: 대상 상태 ("approved" — 검토 승인 완료 항목)
+            output_format: "sft" (instruction+response) 또는 "dpo" (chosen+rejected)
+
+        Returns:
+            학습 데이터 목록:
+              sft: [{"doc_id", "image_path", "instruction", "response"}]
+              dpo: [{"doc_id", "image_path", "instruction", "chosen", "rejected"}]
+        """
+        if not self._available:
+            logger.warning("ReviewQueue: DB 미사용 — export 불가")
+            return []
+
+        import json
+        _, SessionLocal = _get_rq_db(self.cfg.db_url)
+        ReviewRecord = _define_rq_tables.ReviewRecord
+
+        session = SessionLocal()
+        try:
+            rows = session.query(ReviewRecord).filter_by(status=status).all()
+            pairs: list[dict] = []
+
+            for row in rows:
+                corrected = row.corrected_fields_json
+                if not corrected:
+                    continue
+
+                base = {
+                    "doc_id": row.doc_id,
+                    "image_path": row.original_image_path or "",
+                    "processing_path": row.processing_path or "",
+                }
+
+                if output_format == "dpo":
+                    pairs.append({
+                        **base,
+                        "instruction": "이 서식에서 모든 필드를 추출하세요.",
+                        "chosen": corrected,
+                        "rejected": row.validation_errors_json or "{}",
+                    })
+                else:
+                    pairs.append({
+                        **base,
+                        "instruction": "이 서식에서 모든 필드를 추출하세요.",
+                        "response": corrected,
+                    })
+
+            logger.info(
+                "ReviewQueue: export %d pairs (status=%s, format=%s)",
+                len(pairs), status, output_format,
+            )
+            return pairs
+        finally:
+            session.close()
+
     def get_stats(self) -> ReviewQueueStats:
         """검토 큐 현황 통계."""
         if not self._available:

@@ -1,6 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "maintenance_record",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2026-04-01",
+  "x-mil-ocr-deprecated": false,
   "title": "정비기록서",
   "description": "군수 정비기록서 필드 추출 스키마 (guided_json용)",
   "type": "object",

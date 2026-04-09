@@ -189,23 +189,33 @@ mil_OCR_v2/
 
 ### Phase 2 (3~4개월, 06~07월) — Fine-tuning + 품질 개선
 
-**2-A. PP-DocLayout Fine-tuning**
+**2-A. PP-DocLayout Fine-tuning + 교정 데이터 축적 (병행)**
 - [ ] 학습 데이터 수집 (군수 서식 영역 어노테이션 2,000~5,000장)
 - [ ] PP-DocLayout Fine-tuning 실행
 - [ ] P2 검출 품질 검증
+- [x] 교정 데이터 → 학습 데이터 축적 파이프라인 구축 ✅
+  - [x] `review_queue.export_training_pairs()` — SFT/DPO 형식 export 메서드 ✅
+  - [x] `scripts/export_training_data.py` — 배치 변환 스크립트 (JSONL 출력) ✅
+- [ ] 검토 큐 운영 → 교정 데이터 최소 수량 확보 (SFT 착수 전 마일스톤: 유형당 50건+)
 
-**2-B. Gemma4 VLM Fine-tuning — 3단계**
+**2-B. Gemma4 VLM Fine-tuning — 3단계** (2-A 교정 데이터 축적 후)
 - [ ] **1단계 SFT** (필수): 서식 이미지 + 정답 JSON, LoRA, 유형당 200~500장
+  - 학습 데이터 출처: ① 수동 어노테이션 + ② 검토 큐 교정 데이터 (`scripts/export_training_data.py`)
 - [ ] 1단계 SFT 후 전체 파이프라인 성능 벤치마크
 - [ ] **2단계 수기 강화** (선택): 수기 인식 오류율 높을 시 — AI Hub 손글씨 + 군수 수기 crop
 - [ ] **3단계 DPO** (선택): 규칙 위반 빈번 시 — P4 검증 실패 출력을 Rejected로 자동 축적
+  - DPO 데이터 출처: `scripts/export_training_data.py --format dpo`
 
 ### Phase 3 (5~6개월, 08~09월) — 최적화 + 배포
 
 - [ ] 추론 속도 최적화 (vLLM 배치 튜닝)
 - [ ] **Gemma4 양자화 실험** — BF16(현재) 대비 품질·속도·VRAM 비교
   - [ ] AWQ 4-bit (`cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit`) — 어텐션만 INT4, MoE 전문가 BF16 유지, ~16GB VRAM, vLLM v0.19.0 호환
-  - [ ] FP8 Dynamic (`RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic`) — 가중치+활성화 FP8, ~29GB VRAM, 품질 손실 ~0.3% (vLLM gibberish 버그 #39049 해소 후 진행)
+  - [ ] FP8 Dynamic (`RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic`) — 가중치+활성화 FP8, ~29GB VRAM, 품질 손실 ~0.3%
+    - 선행 조건: `vllm-project/vllm#39049` (FP8 gibberish 버그) Close 확인
+    - 확인 트리거: Phase 3 착수 시점(08월) + vLLM 마이너 릴리스마다
+    - 판단 기준: issue Close + 릴리스 노트 반영 + 로컬 검증 통과
+    - 미해소 시: AWQ 4-bit 우선 적용, FP8은 다음 분기로 연기
   - [ ] 양자화별 OCR 품질 벤치마크 (군수 서식 테스트셋 기준 필드 정확도, 신뢰도 분포 비교)
 - [ ] 프론트엔드 UI 구현
 - [ ] **수동 검토 큐 UI** (필수 — `docs/FRONTEND.md` §2-2 참조)
@@ -213,6 +223,13 @@ mil_OCR_v2/
   - [ ] 개별 검토 화면 (원본 이미지 + 추출 결과 비교, 필드 수정)
   - [ ] 검토 API 엔드포인트 (FastAPI)
   - [ ] 교정 데이터 → Fine-tuning 학습 데이터 자동 축적
+- [ ] **서비스 통신 비동기 전환** (상세: `docs/BACKEND.md` §7-2)
+  - [ ] 폐쇄망 적합 메시지 브로커 선정 (Redis 로컬 / SQLite-backed 큐)
+  - [ ] pipeline → fallback: Redis Streams 비동기 전환
+  - [ ] 검토 큐 알림: Redis Pub/Sub → 프론트엔드 SSE
+- [ ] **서식 개정 대응 절차** (상세: `docs/AI_INFERENCE.md` §7)
+  - [ ] 스키마 버전 업 → VLM 재학습 트리거 조건 정의
+  - [ ] 구버전 DB 레코드 마이그레이션 정책
 - [ ] Docker 프로덕션 설정
 - [ ] 보안 검토 + 배포
 

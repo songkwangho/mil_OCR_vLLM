@@ -7,12 +7,14 @@ P3: Gemma4 VLM 엔진 (gemma4_engine.py)
 
 from .gemma4_engine import Gemma4Engine, Gemma4EngineConfig
 from .instruction_builder import InstructionBuilder, InstructionTask
+from .instruction_router import InstructionRouter
 from .logprobs_scorer import LogprobsScorer, calc_field_confidence, get_threshold, is_flagged
 
 __all__ = [
     "Gemma4Engine",
     "Gemma4EngineConfig",
     "InstructionBuilder",
+    "InstructionRouter",
     "InstructionTask",
     "LogprobsScorer",
     "calc_field_confidence",

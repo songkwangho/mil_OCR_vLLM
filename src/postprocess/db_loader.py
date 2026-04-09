@@ -83,6 +83,7 @@ def _define_tables(Base):
         confidence = Column(Float)
         review_required = Column(Boolean, default=False)
         review_queue_id = Column(String(100))
+        schema_version = Column(String(20), default="1.0.0")
         json_output = Column(Text)
         xml_output = Column(Text)
         processed_at = Column(DateTime)

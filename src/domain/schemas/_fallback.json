@@ -1,6 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "_fallback",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2026-04-01",
+  "x-mil-ocr-deprecated": false,
   "title": "범용 문서 (미분류)",
   "description": "서식 유형 미분류 시 범용 key-value 추출 스키마",
   "type": "object",

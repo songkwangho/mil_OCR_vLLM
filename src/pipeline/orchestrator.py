@@ -190,13 +190,23 @@ class PipelineOrchestrator:
 
     def _get_fallback_service(self):
         if "fallback" not in self._components:
-            from src.fallback.ocr_fallback_service import (
-                OCRFallbackService,
-                OCRFallbackConfig,
-            )
-            config = OCRFallbackConfig(device=self.cfg.device)
-            self._components["fallback"] = OCRFallbackService(config)
-            logger.info("오케스트레이터: Fallback 서비스 초기화 완료")
+            # fallback_base_url이 설정된 경우 HTTP 클라이언트 사용 (Docker 분리 모드)
+            # 미설정 시 in-process fallback (개발/테스트용)
+            if self.cfg.fallback_base_url and self.cfg.fallback_base_url != "http://localhost:8081":
+                from src.fallback.fallback_http_client import FallbackHTTPClient
+                self._components["fallback"] = FallbackHTTPClient(
+                    base_url=self.cfg.fallback_base_url,
+                )
+                logger.info("오케스트레이터: Fallback HTTP 클라이언트 초기화 (url=%s)",
+                            self.cfg.fallback_base_url)
+            else:
+                from src.fallback.ocr_fallback_service import (
+                    OCRFallbackService,
+                    OCRFallbackConfig,
+                )
+                config = OCRFallbackConfig(device=self.cfg.device)
+                self._components["fallback"] = OCRFallbackService(config)
+                logger.info("오케스트레이터: Fallback in-process 초기화 완료")
         return self._components["fallback"]
 
     def _get_review_queue(self):

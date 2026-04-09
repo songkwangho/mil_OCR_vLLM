@@ -468,7 +468,39 @@ K-NSN (한국 물자코드):    KN-NNNNN-NNNN
 
 ---
 
-## 7. 핵심 의존성
+## 7. 서비스 통신 아키텍처
+
+### 7-1. 현재 구조 (Phase 1)
+
+```
+[Pipeline 컨테이너]
+  ├── P1 Preprocessor ─── (in-process)
+  ├── P2 LayoutAnalyzer ── (in-process, GPU)
+  ├── P3 Gemma4Engine ──── HTTP POST → [vLLM 컨테이너 :8100]
+  │                         └── /v1/chat/completions (동기 blocking, 120s timeout)
+  ├── Fallback ──────────── HTTP POST → [Fallback 컨테이너 :8081]
+  │                         └── /fallback/process (동기)
+  ├── P4 Validator ──────── (in-process)
+  ├── P5 Serializer ─────── (in-process)
+  └── P6 DBLoader ─────── (in-process, SQLite)
+```
+
+**통신 방식**: 동기 HTTP REST
+- vLLM: OpenAI 호환 API (httpx/openai SDK)
+- Fallback: FastAPI REST (httpx)
+- 헬스체크: HTTP GET polling (`/health`, 30초 간격)
+- 검토 큐 / DB: SQLite 직접 접근
+
+### 7-2. Phase 3 목표: 비동기 메시지 기반
+
+폐쇄망 적합 메시지 브로커(**Redis 로컬** 또는 **SQLite-backed 경량 큐**)를 도입하여:
+- pipeline → fallback: Redis Streams 비동기 전환 (스케일아웃 병목 해소)
+- 검토 큐 알림: Redis Pub/Sub → 프론트엔드 SSE
+- 장기 목표: Celery/Dramatiq 태스크 그래프로 P1~P6 병렬화
+
+---
+
+## 8. 핵심 의존성
 
 ```txt
 # Stage 1 — 전처리

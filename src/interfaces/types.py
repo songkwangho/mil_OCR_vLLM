@@ -143,26 +143,13 @@ class LayoutRegion:
     """레이아웃 영역 단위 (P2).
 
     PP-DocLayout 검출 결과. region_type에 따라
-    VLM task prompt가 자동 결정됨 (TASK_PROMPTS 참조).
+    VLM task prompt가 자동 결정됨 (configs/instruction_mappings.yaml 참조).
     """
 
     region_id: str                    # r_0001, r_0002, …
     region_type: RegionType
     bbox: BoundingBox
     confidence: float                 # [0.0–1.0]
-
-
-# P2가 결정하는 영역 레이블 → VLM task prompt 매핑
-TASK_PROMPTS: dict[str, str] = {
-    "text":    "OCR:",
-    "table":   "Table Recognition:",
-    "formula": "Formula Recognition:",
-    "chart":   "Chart Recognition:",
-    "seal":    "Seal Recognition:",
-    "header":  "OCR:",
-    "footer":  "OCR:",
-    "figure":  "Image Description:",
-}
 
 
 @dataclass

@@ -325,3 +325,9 @@ VLM이 완전히 불가할 때 v1의 PP-OCRv5 기반 T1~T5를 별도 컨테이�
 | BF16 (현재) | google/gemma-4-26b-a4b-it | ~48GB | — | 기준 | v0.19.0 ✅ |
 | AWQ 4-bit | cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit | ~16GB | 어텐션만 INT4 (MoE 전문가 BF16 유지) | 최소 (~1-2%) | v0.19.0 ✅ |
 | FP8 Dynamic | RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic | ~27GB | 가중치 + 활성화 FP8 | ~0.3% | 주의: gibberish 버그 #39049 |
+
+### Upstream 버그 트래킹
+
+| 이슈 | 영향 | 상태 | 확인 트리거 | 미해소 시 대안 |
+|------|------|------|-----------|--------------|
+| `vllm-project/vllm#39049` (FP8 gibberish) | FP8 Dynamic 양자화 실험 차단 | Open (2026-04 기준) | Phase 3 착수(08월) + vLLM 릴리스마다 | AWQ 4-bit 우선 적용 |

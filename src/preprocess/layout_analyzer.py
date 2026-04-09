@@ -7,7 +7,7 @@ v1 T2에서 수정 이관:
   - RegionType 간소화: PRINTED_TEXT/HANDWRITTEN_FIELD → TEXT,
     STAMP → SEAL, FORMULA/CHART 신규 추가
   - reading_order 강화: 다단 컬럼 감지 + 컬럼 내 상→하 순서 보장
-  - TASK_PROMPTS 매핑: 영역 레이블 → VLM instruction 자동 결정
+  - 영역 레이블 → VLM instruction 매핑 (configs/instruction_mappings.yaml)
 
 역할 (VLM 전처리 게이트):
   ① 페이지 분해: Dense 페이지를 관리 가능한 영역 bbox로 분리
@@ -40,7 +40,6 @@ from src.interfaces.types import (
     LayoutRegion,
     LayoutResult,
     PreprocessedImage,
-    TASK_PROMPTS,
 )
 
 logger = logging.getLogger(__name__)
@@ -655,7 +654,7 @@ class P2LayoutAnalyzer:
     VLM의 전처리 게이트로서:
       ① 페이지를 영역별 bbox로 분해
       ② 다단 컬럼 감지 기반 읽기 순서 결정
-      ③ 영역 레이블 → TASK_PROMPTS 매핑으로 VLM instruction 자동 선택
+      ③ 영역 레이블 → VLM instruction 자동 선택 (configs/instruction_mappings.yaml)
 
     모델이 설정되어 있으면 PP-DocLayout을 사용하고,
     없으면 OpenCV 기반 heuristic으로 자동 전환됩니다.
@@ -665,8 +664,7 @@ class P2LayoutAnalyzer:
         result = analyzer.analyze(preprocessed_image)
         for idx in result.reading_order:
             region = result.regions[idx]
-            task = TASK_PROMPTS.get(region.region_type.value, "OCR:")
-            print(f"{region.region_id} → {task}")
+            print(f"{region.region_id} → {region.region_type.value}")
     """
 
     def __init__(self, config: Optional[P2LayoutAnalyzerConfig] = None):
