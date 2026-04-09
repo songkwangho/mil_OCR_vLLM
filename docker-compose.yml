@@ -2,7 +2,8 @@
 #
 # 서비스 구조:
 #   vllm-server     : Gemma4 VLM 추론 서버 (주 추론 엔진)
-#   pipeline        : P1~P6 파이프라인 (vllm-server에 API 호출)
+#   layout          : P2 레이아웃 추론 서비스 (PaddlePaddle CUDA 12.6)
+#   pipeline        : P1~P6 파이프라인 (vllm-server + layout에 API 호출)
 #   fallback        : v1 PP-OCRv5 기반 경량 fallback (T1~T5)
 #
 # SPOF 대비:
@@ -58,6 +59,38 @@ services:
     shm_size: "4g"
 
   # ─────────────────────────────────────────────
+  # P2 레이아웃 추론 — PP-DocLayout (PaddlePaddle CUDA 12.6)
+  # ─────────────────────────────────────────────
+  layout:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.layout
+    container_name: mil-ocr-v2-layout
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    volumes:
+      - ./models/t2_layout:/models/t2_layout:ro
+    environment:
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+      - LAYOUT_MODEL_NAME=PP-DocLayoutV3
+      - LAYOUT_DEVICE=gpu:0
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "4g"
+
+  # ─────────────────────────────────────────────
   # 파이프라인 — P1~P6 (주 처리 경로)
   # ─────────────────────────────────────────────
   pipeline:
@@ -69,11 +102,13 @@ services:
     depends_on:
       vllm-server:
         condition: service_healthy
+      layout:
+        condition: service_healthy
     ports:
       - "8080:8080"
     volumes:
       - ./models/t1_sr:/models/t1_sr:ro
-      - ./models/t2_layout:/models/t2_layout:ro
+      # t2_layout은 layout 컨테이너가 직접 마운트 (pipeline에서 불필요)
       - ./data:/data
       - ./configs:/configs:ro
     environment:
@@ -85,6 +120,9 @@ services:
       - VLLM_HEALTH_URL=http://vllm-server:8000/health
       - VLLM_HEALTH_CHECK_INTERVAL=30
       - VLLM_HEALTH_CHECK_TIMEOUT=10
+      # ── P2 레이아웃 추론 서비스 ──
+      - LAYOUT_SERVICE_URL=http://layout:8082
+      - LAYOUT_MODEL_NAME=PP-DocLayoutV3
       # ── 수준 B: fallback 연결 설정 ──
       - FALLBACK_ENABLED=true
       - FALLBACK_BASE_URL=http://fallback:8081

@@ -3,8 +3,11 @@
 #
 #  VLM(vLLM) 완전 불가 시 v1 PP-OCRv5 기반 기초 OCR 유지.
 #
-#  베이스: PaddlePaddle GPU (CUDA 11.8 + CUDNN 8.9)
-#  추가: PyTorch (CUDA 11.8) → T3 DiT 서식 분류
+#  베이스: PaddlePaddle GPU (CUDA 12.6 + CUDNN 9.5)
+#  추가: PyTorch (CUDA 12.6) → T3 DiT 서식 분류
+#
+#  CUDA 11.8 → 12.6 전환 사유:
+#    H100(sm_90) GPU에서 CUDA 11.8 빌드의 커널 미포함 (error 209)
 #
 #  포함 모델:
 #    - T3: DiT (서식 분류)       → models/fallback/t3_form_classifier/
@@ -16,7 +19,7 @@
 #    GET  /health            → 헬스체크
 # ═══════════════════════════════════════════════════════════
 
-FROM paddlepaddle/paddle:3.2.0-gpu-cuda11.8-cudnn8.9
+FROM paddlepaddle/paddle:3.2.0-gpu-cuda12.6-cudnn9.5
 
 LABEL maintainer="mil-ocr-team"
 LABEL description="mil_OCR_v2 경량 Fallback 서비스 (PP-OCRv5 + DiT + SLANeXt)"
@@ -30,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ─── PyTorch (T3 DiT용) ───────────────────
 RUN pip install --no-cache-dir \
-        torch torchvision --index-url https://download.pytorch.org/whl/cu118
+        torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 # ─── HuggingFace Transformers (T3 DiT) ────
 RUN pip install --no-cache-dir \

@@ -1,21 +1,26 @@
 # ═══════════════════════════════════════════════════════════
 #  mil_OCR_v2 — 파이프라인 서비스 (P1~P6)
 #
-#  베이스: PaddlePaddle GPU (CUDA 11.8 + CUDNN 8.9)
-#  추가: PyTorch (CUDA 11.8) + OpenAI SDK (vLLM 클라이언트)
+#  베이스: PaddlePaddle GPU (CUDA 12.6 + CUDNN 9.5)
+#  추가: PyTorch (CUDA 12.6) + OpenAI SDK (vLLM 클라이언트)
+#
+#  CUDA 11.8 → 12.6 전환 사유:
+#    H100(sm_90) GPU에서 CUDA 11.8 빌드의 커널 미포함 (error 209)
 #
 #  프레임워크:
-#    - PaddlePaddle 3.2.0  → P2 PP-DocLayout
-#    - PyTorch (CUDA 11.8) → P1 Real-ESRGAN
+#    - PyTorch (CUDA 12.6) → P1 Real-ESRGAN
 #    - OpenAI SDK           → P3 vLLM API 호출
 #    - OpenCV, scikit-image → P1 전처리
 #    - SQLAlchemy           → P6 DB 적재
+#
+#  참고: P2 PP-DocLayout 추론은 별도 layout 컨테이너(PaddlePaddle CUDA 12.6)에서 수행.
+#        Pipeline은 HTTP로 layout 서비스를 호출합니다.
 # ═══════════════════════════════════════════════════════════
 
-FROM paddlepaddle/paddle:3.2.0-gpu-cuda11.8-cudnn8.9
+FROM paddlepaddle/paddle:3.2.0-gpu-cuda12.6-cudnn9.5
 
 LABEL maintainer="mil-ocr-team"
-LABEL description="mil_OCR_v2 파이프라인 서비스 (PaddlePaddle + PyTorch + vLLM 클라이언트)"
+LABEL description="mil_OCR_v2 파이프라인 서비스 (PyTorch + vLLM 클라이언트 + Layout HTTP 클라이언트)"
 
 # ─── 시스템 패키지 ──────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,9 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-# ─── PyTorch (CUDA 11.8 호환) ──────────────
+# ─── PyTorch (CUDA 12.6 호환) ──────────────
 RUN pip install --no-cache-dir \
-        torch torchvision --index-url https://download.pytorch.org/whl/cu118
+        torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 # ─── Real-ESRGAN (P1 초해상도) ─────────────
 RUN pip install --no-cache-dir \
@@ -36,9 +41,8 @@ import importlib, pathlib; \
 p = pathlib.Path(importlib.import_module('torchvision').__file__).parent / 'transforms' / 'functional_tensor.py'; \
 p.exists() or p.write_text('from torchvision.transforms.functional import *\n')"
 
-# ─── PaddleOCR + 공통 의존성 ───────────────
+# ─── 공통 의존성 (P2 PaddleOCR는 layout 컨테이너로 이관)
 RUN pip install --no-cache-dir \
-        paddleocr>=3.4.0 \
         opencv-python>=4.9.0 \
         scikit-image>=0.22.0 \
         Pillow>=10.0.0 \

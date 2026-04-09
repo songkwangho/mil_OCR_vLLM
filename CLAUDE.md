@@ -105,7 +105,7 @@ v2는 **PP-DocLayout (레이아웃) + Gemma4 VLM (통합 추론)** 2단계 구�
 | — | 공용 인터페이스 | `src/interfaces/` | — | ✅ 완료 (14 Enum + 15 dataclass) |
 | — | 오케스트레이터 | `src/pipeline/orchestrator.py` | — | ✅ 완료 (6단계 재작성) |
 | P1 | 화질 보정 + SR | `src/preprocess/preprocessor.py` | Real-ESRGAN (LOW DPI) | ✅ 완료 (v1 이관) |
-| P2 | 구조 분석 | `src/preprocess/layout_analyzer.py` | PP-DocLayout_plus-L (분해+순서+태스크) | ✅ 완료 (v1 수정 이관) |
+| P2 | 구조 분석 | `src/preprocess/layout_analyzer.py` | PP-DocLayout_plus-L / PP-DocLayoutV3 선택 (분해+순서+태스크) | ✅ 완료 (v1 수정 이관 + V3 지원) |
 | P3 | VLM 통합 추론 | `src/vlm/gemma4_engine.py` | Gemma4 26B-A4B + vLLM (guided_json + logprobs) | ✅ 완료 |
 | P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ❌ (룰 엔진) | ✅ 완료 (logprobs + 룰 병합) |
 | P5 | 직렬화 | `src/postprocess/serializer.py` | ❌ | ✅ 완료 (v1 이관) |
@@ -114,7 +114,8 @@ v2는 **PP-DocLayout (레이아웃) + Gemma4 VLM (통합 추론)** 2단계 구�
 | — | **Fallback 서비스** | `src/fallback/ocr_fallback_service.py` | v1 PP-OCRv5 T3~T5 | ✅ 완료 (v1 래핑 + v2 변환) |
 | — | **VLM 헬스 모니터** | `src/pipeline/health_monitor.py` | ❌ (httpx polling) | ✅ 완료 |
 | — | **Fallback 전환 정책** | `src/pipeline/fallback_policy.py` | ❌ | ✅ 완료 |
-| — | **Docker 구성** | `docker-compose.yml` + `docker/Dockerfile.*` | — | ✅ 완료 (4 Dockerfile) |
+| — | **Layout 추론 서비스** | `src/preprocess/layout_server.py` + `layout_http_client.py` | PP-DocLayout (PaddlePaddle) | ✅ 완료 (CUDA 격리 컨테이너) |
+| — | **Docker 구성** | `docker-compose.yml` + `docker/Dockerfile.*` | — | ✅ 완료 (5 Dockerfile) |
 
 ---
 
@@ -138,7 +139,7 @@ mil_OCR_v2/
 │   └── domain/                  ← 군수 도메인 사전/스키마
 ├── models/                      ← 모델 가중치 (gitignore)
 │   ├── t1_sr/                   ← Real-ESRGAN
-│   ├── t2_layout/               ← PP-DocLayout
+│   ├── t2_layout/               ← PP-DocLayout_plus-L / PP-DocLayoutV3 (선택)
 │   ├── gemma4/                  ← Gemma4 26B-A4B
 │   └── fallback/                ← PP-OCRv5 + DiT + SLANeXt (수준 B)
 ├── data/                        ← 원본/학습/테스트 데이터

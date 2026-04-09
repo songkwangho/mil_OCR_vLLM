@@ -369,6 +369,79 @@ def run_single(pipeline: PipelineOrchestrator, image_path: Path, run_dir: Path):
     save_p6(doc_dir, result)
     save_summary(doc_dir, result)
 
+    # ── 콘솔 상세 보고 (BACKEND.md §9-7 준수) ──
+    print(f"\n{'─' * 80}")
+    print(f"  문서: {doc_id} ({len(raw_bytes)/1024:.1f} KB)")
+    print(f"{'─' * 80}")
+
+    # P1
+    if result.p1_result:
+        p1 = result.p1_result
+        t = result.timings.get("P1", 0)
+        print(f"\n  [P1] 화질 보정 OK ({t:.0f}ms)")
+        print(f"       DPI: {p1.original_dpi} -> {p1.dpi}, quality={p1.quality_score:.4f}, SR={p1.sr_applied}")
+        print(f"       이미지: {p1.image_array.shape[1]}x{p1.image_array.shape[0]}")
+        for w in p1.warnings:
+            print(f"       WARNING: {w}")
+
+    # P2
+    if result.p2_result:
+        p2 = result.p2_result
+        t = result.timings.get("P2", 0)
+        table_n = sum(1 for r in p2.regions if r.region_type.value == "table")
+        print(f"\n  [P2] 구조 분석 OK ({t:.0f}ms)")
+        print(f"       mode={p2.analysis_mode.value}, regions={len(p2.regions)}, tables={table_n}")
+        print(f"       reading_order: {p2.reading_order}")
+        for r in p2.regions:
+            b = r.bbox
+            poly = f" polygon={len(r.polygon)}pts" if hasattr(r, "polygon") and r.polygon else ""
+            print(f"       {r.region_id}: {r.region_type.value:15s} conf={r.confidence:.2f}  bbox=[{b.x1},{b.y1},{b.x2},{b.y2}]{poly}")
+
+    # P3
+    if result.p3_result:
+        p3 = result.p3_result
+        t = result.timings.get("P3", 0)
+        print(f"\n  [P3] VLM 추론 OK ({t:.0f}ms)")
+        print(f"       form={p3.form_type.value} (conf={p3.form_confidence:.4f})")
+        print(f"       fields={len(p3.fields)}, tables={len(p3.tables)}, vlm_time={p3.processing_time_ms:.0f}ms")
+        for fld in p3.fields[:15]:
+            v = str(getattr(fld, "raw_value", ""))[:60]
+            print(f"       field: {fld.field_key:30s} = {v:60s} conf={fld.confidence:.4f}")
+        if len(p3.fields) > 15:
+            print(f"       ... +{len(p3.fields) - 15} more")
+        for w in p3.warnings:
+            print(f"       WARNING: {w}")
+
+    # P4
+    if result.p4_result:
+        p4 = result.p4_result
+        t = result.timings.get("P4", 0)
+        print(f"\n  [P4] 룰 검증 OK ({t:.0f}ms)")
+        print(f"       confidence={p4.overall_confidence:.4f}, review={p4.review_required}, errors={len(p4.validation_errors)}, flagged={p4.flagged_fields}")
+        for ve in p4.validation_errors:
+            print(f"       error: {ve}")
+
+    # P5
+    if result.output:
+        t = result.timings.get("P5", 0)
+        o = result.output
+        print(f"\n  [P5] 직렬화 OK ({t:.0f}ms)")
+        print(f"       JSON={len(o.json_output or '')} chars, XML={len(o.xml_output or '')} chars")
+
+    # P6
+    if result.output:
+        t = result.timings.get("P6", 0)
+        print(f"\n  [P6] DB 적재 OK ({t:.0f}ms)")
+        print(f"       record_ids={result.output.db_record_ids}")
+
+    # 에러 출력
+    for e in result.errors:
+        print(f"\n  FAIL: {e}")
+
+    # 문서 요약
+    steps = " | ".join(f"{k}={v:.0f}ms" for k, v in result.timings.items())
+    print(f"\n  -- 문서 요약: total={result.total_ms:.0f}ms  {steps}")
+
     return result
 
 
@@ -401,6 +474,9 @@ def main():
     cfg = PipelineConfig(
         vllm_base_url=os.environ.get("VLLM_BASE_URL", "http://localhost:8100/v1"),
         vllm_health_url=os.environ.get("VLLM_HEALTH_URL", "http://localhost:8100/health"),
+        layout_service_url=os.environ.get("LAYOUT_SERVICE_URL"),
+        layout_model_name=os.environ.get("LAYOUT_MODEL_NAME", "PP-DocLayoutV3"),
+        layout_fusion_mode=os.environ.get("LAYOUT_FUSION_MODE", "").lower() in ("true", "1", "yes"),
         fallback_enabled=True,
         review_queue_enabled=True,
         review_queue_db_url=f"sqlite:///{run_dir}/review_queue.db",
@@ -427,14 +503,32 @@ def main():
             "status": r.status.value,
             "processing_path": r.processing_path.value,
             "total_ms": round(r.total_ms, 1),
+            "timings": {k: round(v, 1) for k, v in r.timings.items()},
             "error_count": len(r.errors),
+            "errors": r.errors,
             "warning_count": len(r.warnings),
+            "warnings": r.warnings,
         })
 
     _save_json(run_dir / "run_summary.json", total_summary)
-    logger.info("=" * 60)
-    logger.info("전체 완료: %d문서, 출력: %s", len(results), run_dir)
-    logger.info("=" * 60)
+
+    # ── 콘솔 상세 보고 (BACKEND.md §9-7 준수) ──
+    print("\n" + "=" * 80)
+    print("  전체 테스트 요약")
+    print("=" * 80)
+    for r in results:
+        steps = " | ".join(f"{k}={v:.0f}ms" for k, v in r.timings.items())
+        status_tag = "PASS" if not r.errors else "FAIL"
+        print(f"  [{status_tag}] {r.doc_id:30s} total={r.total_ms:.0f}ms  {steps}")
+        for e in r.errors:
+            print(f"         FAIL: {e}")
+        for w in r.warnings:
+            print(f"         WARNING: {w}")
+    total_errors = sum(len(r.errors) for r in results)
+    total_warnings = sum(len(r.warnings) for r in results)
+    print(f"\n  결과: {len(results)}건 처리, errors={total_errors}, warnings={total_warnings}")
+    print(f"  출력: {run_dir}")
+    print("=" * 80)
 
 
 if __name__ == "__main__":

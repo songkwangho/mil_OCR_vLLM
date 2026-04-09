@@ -5,11 +5,14 @@
 #    - PP-DocLayout Fine-tuning (PaddlePaddle)
 #    - Gemma4 VLM Fine-tuning (PyTorch + PEFT/LoRA)
 #
-#  베이스: PaddlePaddle GPU (CUDA 11.8 + CUDNN 8.9)
+#  베이스: PaddlePaddle GPU (CUDA 12.6 + CUDNN 9.5)
 #  추가: PyTorch + PEFT + TRL (LoRA, SFT, DPO)
+#
+#  CUDA 11.8 → 12.6 전환 사유:
+#    H100(sm_90) GPU에서 CUDA 11.8 빌드의 커널 미포함 (error 209)
 # ═══════════════════════════════════════════════════════════
 
-FROM paddlepaddle/paddle:3.2.0-gpu-cuda11.8-cudnn8.9
+FROM paddlepaddle/paddle:3.2.0-gpu-cuda12.6-cudnn9.5
 
 LABEL maintainer="mil-ocr-team"
 LABEL description="mil_OCR_v2 Fine-tuning 환경 (PaddlePaddle + PyTorch + PEFT)"
@@ -21,9 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
     && rm -rf /var/lib/apt/lists/*
 
-# ─── PyTorch (CUDA 11.8 호환) ──────────────
+# ─── PyTorch (CUDA 12.6 호환) ──────────────
 RUN pip install --no-cache-dir \
-        torch torchvision --index-url https://download.pytorch.org/whl/cu118
+        torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 # ─── HuggingFace + Fine-tuning 도구 ───────
 RUN pip install --no-cache-dir \

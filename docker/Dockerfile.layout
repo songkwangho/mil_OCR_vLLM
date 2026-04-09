@@ -1,0 +1,51 @@
+# ═══════════════════════════════════════════════════════════
+#  mil_OCR_v2 — P2 레이아웃 추론 서비스
+#
+#  PP-DocLayout_plus-L / PP-DocLayoutV3 모델 추론 전용 컨테이너.
+#  PaddlePaddle + CUDA 12.6 (H100 sm_90 지원)
+#
+#  Pipeline 컨테이너(PyTorch CUDA 12.8)와 CUDA 버전 충돌을 방지하기 위해
+#  별도 컨테이너로 분리하여 HTTP API로 통신합니다.
+#
+#  API: FastAPI (:8082)
+#    POST /layout/analyze  → 이미지 → raw detections (label, score, bbox, order, polygon)
+#    GET  /health           → 모델 로드 상태 확인
+# ═══════════════════════════════════════════════════════════
+
+FROM paddlepaddle/paddle:3.2.0-gpu-cuda12.6-cudnn9.5
+
+LABEL maintainer="mil-ocr-team"
+LABEL description="mil_OCR_v2 P2 레이아웃 추론 서비스 (PaddlePaddle CUDA 12.6)"
+
+# ─── 시스템 패키지 ──────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1-mesa-glx \
+        libglib2.0-0 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ─── PaddleOCR + FastAPI ────────────────────
+RUN pip install --no-cache-dir \
+        paddleocr>=3.4.0 \
+        opencv-python>=4.9.0 \
+        numpy>=1.26.0 \
+        fastapi \
+        uvicorn
+
+# ─── 작업 디렉토리 ──────────────────────────
+WORKDIR /workspace
+COPY src/preprocess/layout_server.py /workspace/src/preprocess/layout_server.py
+
+# __init__.py 생성 (모듈 인식용)
+RUN mkdir -p /workspace/src/preprocess \
+    && touch /workspace/src/__init__.py \
+    && touch /workspace/src/preprocess/__init__.py
+
+ENV PYTHONPATH=/workspace
+ENV PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+ENV LAYOUT_MODEL_NAME=PP-DocLayoutV3
+ENV LAYOUT_DEVICE=gpu:0
+
+EXPOSE 8082
+
+CMD ["uvicorn", "src.preprocess.layout_server:app", "--host", "0.0.0.0", "--port", "8082"]

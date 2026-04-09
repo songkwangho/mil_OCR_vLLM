@@ -59,6 +59,15 @@ class PipelineConfig:
     # 모델 경로
     model_root: Optional[str] = None
 
+    # 레이아웃 모델 선택 ("PP-DocLayout_plus-L" 또는 "PP-DocLayoutV3")
+    layout_model_name: str = "PP-DocLayout_plus-L"
+
+    # Layout 추론 서비스 URL (None이면 in-process, 값이면 HTTP 호출)
+    layout_service_url: Optional[str] = None
+
+    # 융합 모드: V3(구조) + plus-L(텍스트) 결과 합성 (layout_service_url 필요)
+    layout_fusion_mode: bool = False
+
     # Fallback 설정
     fallback_enabled: bool = True
     fallback_base_url: str = "http://localhost:8081"
@@ -136,12 +145,20 @@ class PipelineOrchestrator:
     def _get_p2(self):
         if "p2" not in self._components:
             from src.preprocess.layout_analyzer import P2LayoutAnalyzer, P2LayoutAnalyzerConfig
-            config = P2LayoutAnalyzerConfig(device=self.cfg.device)
+            config = P2LayoutAnalyzerConfig(
+                device=self.cfg.device,
+                model_name=self.cfg.layout_model_name,
+                layout_service_url=self.cfg.layout_service_url,
+                fusion_mode=self.cfg.layout_fusion_mode,
+            )
             if self.cfg.model_root:
-                config.model_dir = f"{self.cfg.model_root}/t2_layout/PP-DocLayout_plus-L"
+                config.model_dir = (
+                    f"{self.cfg.model_root}/t2_layout/{self.cfg.layout_model_name}"
+                )
             self._components["p2"] = P2LayoutAnalyzer(config)
-            logger.info("오케스트레이터: P2 초기화 완료 (mode=%s)",
-                        self._components["p2"].mode.value)
+            logger.info("오케스트레이터: P2 초기화 완료 (mode=%s, model=%s)",
+                        self._components["p2"].mode.value,
+                        self.cfg.layout_model_name)
         return self._components["p2"]
 
     def _get_p3(self):

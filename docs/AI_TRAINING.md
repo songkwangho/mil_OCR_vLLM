@@ -8,8 +8,8 @@
 
 | 모델 | 컴포넌트 | Pretrained 출처 | Fine-tuned 출력 | 상태 |
 |------|---------|----------------|----------------|------|
-| PP-DocLayout_plus-L | P2 구조 분석 | PaddleOCR 3.0 | `models/t2_layout/PP-DocLayout_plus-L_finetuned/` | ❌ 미시작 |
-| Gemma4 26B-A4B | P3 VLM 통합 추론 | google/gemma-4-26b-a4b-it | `models/gemma4/gemma4-mil-finetuned/` | ❌ 미시작 |
+| PP-DocLayout_plus-L | P2 구조 분석 | PaddleOCR 3.0 | `models/t2_layout/PP-DocLayout_plus-L_finetuned/` | ❌ 미시작 (Phase 2) |
+| Gemma4 26B-A4B | P3 VLM 통합 추론 | google/gemma-4-26b-a4b-it | `models/gemma4/gemma4-mil-finetuned/` | ❌ 미시작 (Phase 2) |
 
 ---
 
@@ -28,7 +28,7 @@
 
 | 항목 | 값 |
 |------|------|
-| 스크립트 | `training/layout/train_pp_doclayout.py` |
+| 스크립트 | `training/layout/train_pp_doclayout.py` (Phase 2 예정) |
 | 데이터 포맷 | COCO 어노테이션 (train.json, val.json) |
 | 카테고리 | 군수 서식 특화: text, table, header, footer, signature, seal, figure, formula, handwritten_field, checkbox |
 | Pretrained 가중치 | `models/t2_layout/PP-DocLayout_plus-L/` (124MB) |
@@ -46,7 +46,7 @@
 
 | 항목 | 값 |
 |------|------|
-| 스크립트 | `training/vlm/train_gemma4_sft.py` (예정) |
+| 스크립트 | `training/vlm/train_gemma4_sft.py` (Phase 2 예정) |
 | 방식 | LoRA (rank=16, alpha=32) |
 | 학습 VRAM | 16~24GB (LoRA + Q4 base) |
 | 프레임워크 | PyTorch + PEFT + transformers |
@@ -76,7 +76,7 @@
 
 | 항목 | 값 |
 |------|------|
-| 스크립트 | `training/vlm/train_gemma4_handwriting.py` (예정) |
+| 스크립트 | `training/vlm/train_gemma4_handwriting.py` (Phase 2 예정) |
 | 방식 | LoRA 추가 학습 (1단계 가중치 위에 누적) |
 | 조건 | 1단계 SFT 이후 수기 필드 인식 오류가 높을 때만 수행 |
 
@@ -96,7 +96,7 @@
 
 | 항목 | 값 |
 |------|------|
-| 스크립트 | `training/vlm/train_gemma4_dpo.py` (예정) |
+| 스크립트 | `training/vlm/train_gemma4_dpo.py` (Phase 2 예정) |
 | 방식 | DPO (Direct Preference Optimization) |
 | 조건 | 1~2단계 이후 검증 규칙 위반이 빈번할 때만 수행 |
 
@@ -210,7 +210,7 @@ Gemma4 3단계 DPO (P3) ← 선택: 규칙 위반이 빈번할 때만
 
 | 태스크 | 스크립트 | 방법 |
 |--------|---------|------|
-| SFT 학습 데이터 | `scripts/generate_sft_pairs.py` (예정) | P2로 영역 crop → 수동 정답 JSON 작성 |
-| 표 학습 데이터 | `scripts/generate_table_pairs.py` (예정) | 표 crop + HTML 정답 생성 |
-| 수기 학습 데이터 | `scripts/generate_handwriting_pairs.py` (예정) | AI Hub 손글씨 + 군수 서식 수기 crop |
+| SFT 학습 데이터 | `scripts/generate_sft_pairs.py` (Phase 2 예정) | P2로 영역 crop → 수동 정답 JSON 작성 |
+| 표 학습 데이터 | `scripts/generate_table_pairs.py` (Phase 2 예정) | 표 crop + HTML 정답 생성 |
+| 수기 학습 데이터 | `scripts/generate_handwriting_pairs.py` (Phase 2 예정) | AI Hub 손글씨 + 군수 서식 수기 crop |
 | DPO 데이터 | (자동 수집) | 파이프라인 운용 중 P4 검증 실패 출력을 Rejected로 축적 |

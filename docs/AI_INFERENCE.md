@@ -19,9 +19,10 @@
 
 | 모델 | 위치 | 크기 | 형식 | 출처 | 상태 |
 |------|------|------|------|------|------|
-| Real-ESRGAN x2plus | `models/t1_sr/RealESRGAN_x2plus.pth` | 64MB | PyTorch (.pth) | xinntao/Real-ESRGAN | v1에서 이관 예정 |
-| PP-DocLayout_plus-L | `models/t2_layout/PP-DocLayout_plus-L/` | 124MB | PaddlePaddle | PaddleOCR 3.0 | v1에서 이관 예정 |
-| Gemma4 26B-A4B | `models/gemma4/gemma-4-26b-a4b-it/` | ~48GB (BF16) | SafeTensors | google/gemma-4-26b-a4b-it | ✅ 배치 완료 |
+| Real-ESRGAN x2plus | `models/t1_sr/RealESRGAN_x2plus.pth` | 64MB | PyTorch (.pth) | xinntao/Real-ESRGAN | ⚠️ v1에서 이관 예정 (가중치 미배치) |
+| PP-DocLayout_plus-L | `models/t2_layout/PP-DocLayout_plus-L/` | 126MB | PaddlePaddle | PaddleOCR 3.0 | ⚠️ v1에서 이관 예정 (가중치 미배치) |
+| PP-DocLayoutV3 | `models/t2_layout/PP-DocLayoutV3/` | 132MB | PaddlePaddle | PaddleOCR 3.4 | ⚠️ 사전 배치 필요 (선택 사용) |
+| Gemma4 26B-A4B | `models/gemma4/gemma-4-26b-a4b-it/` | ~48GB (BF16) | SafeTensors | google/gemma-4-26b-a4b-it | ✅ 배치 완료 (2026-04-08 검증) |
 
 ---
 
@@ -38,8 +39,9 @@
 
 **역할**: VLM이 처리할 입력을 관리 가능한 단위로 분해하고, 처리 순서를 보장하는 **전처리 게이트**
 
-- v1 T2에서 이관 — PP-DocLayout_plus-L
+- v1 T2에서 이관 — **PP-DocLayout_plus-L** (기본) 또는 **PP-DocLayoutV3** (선택)
 - Input: `PreprocessedImage` → Output: `LayoutResult`
+- 모델 선택: `PipelineConfig.layout_model_name` 또는 `P2LayoutAnalyzerConfig.model_name`
 
 **역할 1 — 페이지 분해 (Dense 페이지 문제 해결)**
 페이지 전체를 VLM에 입력하면 다단 컬럼, 표·수식·텍스트 혼재 환경에서 long-sequence 디코딩 지연과 누락이 발생합니다.
@@ -55,7 +57,22 @@ VLM: "OCR:"              → 텍스트 인식
 ```
 
 **역할 2 — 읽기 순서 보장**
-구조 분석이 영역 간 읽기 순서를 예측합니다. 다단 컬럼 문서에서 "1열 상단 → 1열 하단 → 2열 상단" 같은 올바른 순서로 VLM 입력이 구성되어야 최종 JSON 출력의 구조가 올바릅니다.
+영역 간 읽기 순서를 결정합니다. 다단 컬럼 문서에서 "1열 상단 → 1열 하단 → 2열 상단" 같은 올바른 순서로 VLM 입력이 구성되어야 최종 JSON 출력의 구조가 올바릅니다.
+
+**읽기 순서 결정 방식 — 모델 선택에 따라 다름**:
+
+| 모델 | 읽기 순서 결정 방식 | 설정 |
+|------|-------------------|------|
+| **PP-DocLayout_plus-L** (기본) | 좌표 기반 휴리스틱 (헤더/푸터 분리 → 다단 컬럼 x-center 클러스터링 → 컬럼 내 y 상→하) | — |
+| **PP-DocLayoutV3** | **모델 예측** (Transformer decoder의 `dec_order_head` + AntisymmetricPairwiseScorer → pairwise 선후 관계 학습) | `use_model_reading_order=True` (기본) |
+
+V3의 읽기 순서 원리:
+1. Transformer decoder 각 layer에서 query feature를 `dec_order_head` (Linear)로 투영
+2. `AntisymmetricPairwiseScorer`가 모든 검출 쌍 (i,j)에 대해 선후 관계 logit 계산 (반대칭: `logits[i,j] = -logits[j,i]`)
+3. Sigmoid → voting 기반 ranking 알고리즘으로 순서 디코딩
+4. 일부 라벨(image, table, header, footer 등)은 읽기 순서 예측에서 제외 (`SKIP_ORDER_LABELS`)
+
+> `use_model_reading_order=False`로 설정하면 V3 모델에서도 좌표 기반 휴리스틱을 사용합니다.
 
 **역할 3 — Task Prompt 결정**
 검출된 영역의 클래스 레이블이 VLM의 task prompt를 결정합니다:
@@ -70,7 +87,47 @@ TASK_PROMPTS = {
 # P2가 label을 주지 않으면 VLM은 어떤 태스크를 수행할지 모름
 ```
 
-- 검출 영역 유형: text, table, figure, header, footer, seal, formula, chart
+- 검출 영역 유형 (v2 RegionType): text, table, figure, header, footer, seal, formula, chart
+
+**PP-DocLayout_plus-L Pretrained 라벨 (20종) → v2 RegionType 매핑**:
+
+| PP-DocLayout 원본 라벨 | v2 RegionType | 비고 |
+|------------------------|---------------|------|
+| `paragraph_title`, `doc_title`, `header` | HEADER | 제목/헤더 |
+| `text`, `content`, `aside_text`, `number`, `abstract`, `algorithm` | TEXT | 일반 텍스트 |
+| `table` | TABLE | 표 |
+| `image`, `figure_title` | FIGURE | 이미지/그림 |
+| `formula`, `formula_number` | FORMULA | 수식 |
+| `chart` | CHART | 차트 |
+| `footer`, `footnote`, `reference`, `reference_content` | FOOTER | 하단/참조 |
+| `seal` | SEAL | 인장 |
+
+> 매핑 코드: `src/preprocess/layout_analyzer.py` `_ModelAnalyzer.LABEL_MAP`
+
+**PP-DocLayoutV3 추가 라벨 (6종) → v2 RegionType 매핑**:
+
+| V3 추가 라벨 | v2 RegionType | 비고 |
+|-------------|---------------|------|
+| `vertical_text` | TEXT | 세로 텍스트 |
+| `inline_formula` | FORMULA | 인라인 수식 |
+| `display_formula` | FORMULA | 디스플레이 수식 |
+| `header_image` | FIGURE | 헤더 이미지 |
+| `footer_image` | FIGURE | 푸터 이미지 |
+| `vision_footnote` | FOOTER | 시각적 각주 |
+
+> 매핑 코드: `src/preprocess/layout_analyzer.py` `_ModelAnalyzer.V3_EXTRA_LABELS`
+
+**PP-DocLayout_plus-L vs PP-DocLayoutV3 비교**:
+
+| 항목 | PP-DocLayout_plus-L (기본) | PP-DocLayoutV3 |
+|------|---------------------------|----------------|
+| 아키텍처 | RT-DETR | Mask RT-DETR |
+| 출력 | bbox | bbox + polygon mask + **reading order** |
+| 클래스 수 | 20종 | 25종 |
+| 읽기 순서 | ❌ (좌표 휴리스틱) | ✅ 모델 예측 (pairwise scoring) |
+| 모델 크기 | ~126MB | ~132MB |
+| 입력 크기 | 동적 | 고정 800×800 |
+
 - Fine-tuning 후 군수 서식 영역(수기 기입란 등) 검출 가능
 
 ### 3-3. P3 — Gemma4 VLM 통합 추론 (`src/vlm/gemma4_engine.py`)
@@ -255,9 +312,9 @@ VLM이 완전히 불가할 때 v1의 PP-OCRv5 기반 T1~T5를 별도 컨테이�
 
 | 모델 | 위치 | 크기 | 프레임워크 | 역할 |
 |------|------|------|-----------|------|
-| DiT (서식 분류) | `models/fallback/t3_form_classifier/` | ~350MB | PyTorch | T3 서식 분류 |
-| PP-OCRv5 Korean | `models/fallback/t4_handwriting/` | ~15MB | PaddlePaddle | T4 텍스트 인식 |
-| SLANeXt_wired | `models/fallback/t5_table_structure/` | ~30MB | PaddlePaddle | T5 표 구조 인식 |
+| DiT (서식 분류) | `models/fallback/t3_form_classifier/` | ~350MB | PyTorch | T3 서식 분류 | ⚠️ 가중치 미배치 |
+| PP-OCRv5 Korean | `models/fallback/t4_handwriting/` | ~15MB | PaddlePaddle | T4 텍스트 인식 | ⚠️ 가중치 미배치 |
+| SLANeXt_wired | `models/fallback/t5_table_structure/` | ~30MB | PaddlePaddle | T5 표 구조 인식 | ⚠️ 가중치 미배치 |
 
 **Fallback vs VLM 비교**:
 
@@ -285,15 +342,19 @@ VLM이 완전히 불가할 때 v1의 PP-OCRv5 기반 T1~T5를 별도 컨테이�
 | 서비스 | 용도 | 프레임워크 | 헬스체크 |
 |--------|------|-----------|---------|
 | `vllm-server` | Gemma4 vLLM v0.19.0 서버 (guided decoding + logprobs) | vLLM + PyTorch + transformers 5.5.0 | `/health` (30s) |
-| `pipeline` | P1~P6 파이프라인 (vLLM 서버에 API 호출) | PaddlePaddle + PyTorch | `/health` (30s) |
+| **`layout`** | **P2 레이아웃 추론 (PP-DocLayoutV3 / plus-L)** | **PaddlePaddle CUDA 12.6** | **`/health` (30s)** |
+| `pipeline` | P1, P3~P6 파이프라인 (vLLM + layout 서버에 API 호출) | PyTorch | `/health` (30s) |
 | `fallback` | v1 PP-OCRv5 기반 경량 파이프라인 (T1~T5) | PaddlePaddle + PyTorch | `/health` (30s) |
 | `train` | Fine-tuning 환경 (profiles: training) | PyTorch + PaddlePaddle + PEFT | — |
 
+**Layout 서비스 분리 배경**: PaddlePaddle(CUDA 11.8)과 PyTorch(CUDA 12.8)의 CUDA 버전 충돌을 방지하기 위해 P2 레이아웃 추론을 별도 컨테이너로 분리. `layout` 컨테이너는 PaddlePaddle CUDA 12.6 베이스로 H100(sm_90)을 지원합니다.
+
 **권장 구성 — 분리 모드**:
 - `vllm-server`: Gemma4 모델 로드 1회 → 상주 서빙 (OpenAI 호환 API) + `restart: unless-stopped`
-- `pipeline`: vLLM API endpoint(`http://vllm-server:8000`)로 추론 요청
+- `layout`: PP-DocLayout 모델 로드 1회 → 상주 서빙 (`POST /layout/analyze`) + `restart: unless-stopped`
+- `pipeline`: vLLM API(`http://vllm-server:8000`) + Layout API(`http://layout:8082`)로 추론 요청
 - `fallback`: VLM 불가 시 자동 전환 대상 — 항상 대기 상태로 유지
-- 장점: 모델 로드 오버헤드 제거, 파이프라인 재시작 시에도 모델 유지, SPOF 방지
+- 장점: CUDA 격리, 모델 로드 오버헤드 제거, 파이프라인 재시작 시에도 모델 유지
 
 ---
 

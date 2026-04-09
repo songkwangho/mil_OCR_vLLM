@@ -150,6 +150,7 @@ class LayoutRegion:
     region_type: RegionType
     bbox: BoundingBox
     confidence: float                 # [0.0–1.0]
+    polygon: Optional[list[tuple[float, float]]] = None  # V3 polygon points (없으면 None)
 
 
 @dataclass

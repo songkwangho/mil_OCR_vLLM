@@ -81,6 +81,7 @@ class LayoutRegion:
     region_type: str           # text, table, figure, header, footer, seal
     bbox: BoundingBox
     confidence: float
+    polygon: Optional[list[tuple[float, float]]] = None  # V3 polygon (없으면 None)
 
 @dataclass
 class LayoutResult:
@@ -88,7 +89,9 @@ class LayoutResult:
     page_width: int
     page_height: int
     regions: list[LayoutRegion]
-    reading_order: list[int]   # regions 인덱스 순서 (다단 컬럼 대응)
+    reading_order: list[int]   # regions 인덱스 순서
+                               # - plus-L: 좌표 기반 휴리스틱 (다단 컬럼 대응)
+                               # - V3: 모델 예측 (pairwise scoring)
     analysis_mode: str         # model / heuristic
     warnings: list[str] = field(default_factory=list)
 
@@ -473,9 +476,10 @@ K-NSN (한국 물자코드):    KN-NNNNN-NNNN
 ### 7-1. 현재 구조 (Phase 1)
 
 ```
-[Pipeline 컨테이너]
-  ├── P1 Preprocessor ─── (in-process)
-  ├── P2 LayoutAnalyzer ── (in-process, GPU)
+[Pipeline 컨테이너]                                      [Layout 컨테이너 :8082]
+  ├── P1 Preprocessor ─── (in-process)                   PaddlePaddle CUDA 12.6
+  ├── P2 LayoutAnalyzer ── HTTP POST ──────────────────► POST /layout/analyze
+  │     └── 후처리 (NMS, area filter, reading order)       └── PP-DocLayoutV3 추론
   ├── P3 Gemma4Engine ──── HTTP POST → [vLLM 컨테이너 :8100]
   │                         └── /v1/chat/completions (동기 blocking, 120s timeout)
   ├── Fallback ──────────── HTTP POST → [Fallback 컨테이너 :8081]
@@ -485,7 +489,11 @@ K-NSN (한국 물자코드):    KN-NNNNN-NNNN
   └── P6 DBLoader ─────── (in-process, SQLite)
 ```
 
+**Layout 서비스 분리 사유**: PaddlePaddle(CUDA 11.8)과 PyTorch(CUDA 12.8)의 CUDA 충돌 방지.
+Layout 컨테이너는 PaddlePaddle CUDA 12.6 베이스로 H100(sm_90)을 지원합니다.
+
 **통신 방식**: 동기 HTTP REST
+- Layout: FastAPI REST (httpx) — 이미지 Base64 전송, raw detections JSON 수신
 - vLLM: OpenAI 호환 API (httpx/openai SDK)
 - Fallback: FastAPI REST (httpx)
 - 헬스체크: HTTP GET polling (`/health`, 30초 간격)
@@ -501,6 +509,8 @@ K-NSN (한국 물자코드):    KN-NNNNN-NNNN
 ---
 
 ## 8. 핵심 의존성
+
+> **참고**: 프로젝트 루트에 `requirements.txt`는 없습니다. 모든 의존성은 `docker/Dockerfile.*` 파일에서 관리됩니다 (컨테이너 기반 배포).
 
 ```txt
 # Stage 1 — 전처리
@@ -538,3 +548,242 @@ httpx                       # vLLM 헬스체크 + fallback 통신
 - VLM instruction/response는 **반드시 guided_json으로 구조화**
 - 신뢰도는 logprobs 기반 산출 → P4 룰 검증으로 보정
 - Python 3.10+
+
+---
+
+## 9. 통합 테스트 절차 및 결과 기록
+
+### 9-1. 실행 방식
+
+통합 테스트는 **개발 디렉토리에 구성된 Docker 컨테이너**를 통해 진행한다.
+
+```bash
+# pipeline 컨테이너에서 실행 (layout + vllm-server 가동 필요)
+docker run --rm --gpus device=0 --network host \
+  -v $(pwd):/workspace \
+  -e LAYOUT_SERVICE_URL=http://localhost:8082 \
+  -e VLLM_BASE_URL=http://localhost:8100/v1 \
+  -e PYTHONPATH=/workspace \
+  mil_ocr_v2-pipeline \
+  python scripts/run_pipeline_with_outputs.py [--input-dir data/raw]
+```
+
+테스트 이미지는 `data/raw/` 디렉토리에 배치한다.
+
+### 9-2. 결과 저장 구조
+
+결과는 `data/pipeline_outputs/{timestamp}/` 디렉토리에 저장된다.
+
+```
+data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
+├── run_summary.json                    ← 전체 실행 요약
+├── ocr_results.db                      ← P6 DB (SQLite)
+├── review_queue.db                     ← 검토 큐 DB
+├── {doc_id}/
+│   ├── summary.json                    ← 문서별 요약
+│   ├── P1/
+│   │   ├── result.json                 ← 단계 결과 (dpi, quality_score, sr_applied 등)
+│   │   ├── preprocessed.png            ← 전처리 이미지
+│   │   └── binary.png                  ← 이진화 이미지
+│   ├── P2/
+│   │   ├── result.json                 ← 영역 목록 (region_type, bbox, confidence, polygon)
+│   │   └── layout_visualization.png    ← 영역 시각화
+│   ├── P3/
+│   │   ├── result.json                 ← VLM 추출 결과 (fields, tables, form_type, logprobs)
+│   │   └── raw_vlm_response.txt        ← VLM 원시 응답 (서브프로세스별: 분류/추출/표)
+│   ├── P4/
+│   │   └── result.json                 ← 검증 결과 (overall_confidence, errors, flagged)
+│   ├── P5/
+│   │   ├── output.json                 ← JSON 직렬화
+│   │   ├── output.xml                  ← XML 직렬화
+│   │   └── output.csv                  ← CSV 직렬화 (해당 시)
+│   └── P6/
+│       └── result.json                 ← DB 적재 결과 (record_ids)
+└── ...
+```
+
+### 9-3. run_summary.json 스키마
+
+전체 실행에 대한 요약. 샘플별로 단계별 추론 시간, 성공/실패 여부, 실패 사유를 기록한다.
+
+```json
+{
+  "timestamp": "20260409_043928",
+  "document_count": 3,
+  "documents": [
+    {
+      "doc_id": "국회공문서",
+      "status": "review",           // success | review | failed
+      "processing_path": "vlm",     // vlm | fallback
+      "total_ms": 6242.3,
+      "timings": {
+        "P1": 803.3,
+        "P2": 49.7,
+        "P3": 5359.7,
+        "P4": 3.3,
+        "P5": 4.5,
+        "P6": 21.8
+      },
+      "error_count": 0,
+      "errors": [],
+      "warning_count": 4,
+      "warnings": [
+        "[P1] IMAGE_TOO_BRIGHT: mean=237.7",
+        "[P1] LOW_RESOLUTION_BAND: quality score penalized x0.85",
+        "[P3] Field extraction: JSON parse failed",
+        "[검토큐] 적재 완료: RQ-20260409-국회공문서"
+      ]
+    }
+  ]
+}
+```
+
+### 9-4. 단계별 result.json 실제 스키마
+
+현재 구현(`scripts/run_pipeline_with_outputs.py`)이 저장하는 실제 필드:
+
+**P1/result.json**
+```json
+{
+  "doc_id": "전역지원서_1",
+  "dpi": 144,
+  "original_dpi": 72,
+  "resolution_band": "low",
+  "quality_score": 0.85,
+  "sr_applied": false,
+  "image_shape": [832, 520, 3],
+  "warnings": ["LOW_RESOLUTION_BAND: quality score penalized x0.85"]
+}
+```
+
+**P2/result.json**
+```json
+{
+  "doc_id": "전역지원서_1",
+  "page_width": 520,
+  "page_height": 832,
+  "region_count": 4,
+  "regions": [
+    {
+      "region_id": "r_0001",
+      "region_type": "header",
+      "bbox": {"x1": 10, "y1": 19, "x2": 510, "y2": 120},
+      "confidence": 0.7
+    }
+  ],
+  "reading_order": [0, 3, 1, 2],
+  "analysis_mode": "model",
+  "warnings": []
+}
+```
+
+**P3/result.json**
+```json
+{
+  "doc_id": "전역지원서_1",
+  "form_type": "unknown",
+  "form_confidence": 1.0,
+  "schema_id": "_fallback",
+  "field_count": 0,
+  "fields": [
+    {"field_key": "...", "raw_value": "...", "corrected_value": "...", "data_type": "...", "confidence": 0.95, "is_flagged": false}
+  ],
+  "table_count": 0,
+  "tables": [
+    {"region_id": "r_0001", "html": "<table>...</table>", "cell_count": 12, "confidence": 0.85}
+  ],
+  "domain_codes": [
+    {"code_type": "nsn", "raw_value": "...", "normalized_value": "...", "confidence": 0.9}
+  ],
+  "processing_time_ms": 6144.9,
+  "warnings": ["Field extraction: JSON parse failed"]
+}
+```
+
+**P4/result.json**
+```json
+{
+  "doc_id": "전역지원서_1",
+  "overall_confidence": 0.0,
+  "review_required": true,
+  "flagged_fields": [],
+  "validation_error_count": 0,
+  "validation_errors": [
+    {"error_id": "...", "error_type": "...", "severity": "...", "field_ref": "...", "expected": "...", "actual": "...", "message": "..."}
+  ],
+  "processing_path": "vlm"
+}
+```
+
+**P6/result.json**
+```json
+{
+  "doc_id": "전역지원서_1",
+  "status": "review",
+  "processing_path": "vlm",
+  "form_type": "unknown",
+  "db_record_ids": ["doc:전역지원서_1", "fields:0", "run:전역지원서_1"],
+  "review_queue_id": "RQ-20260409-전역지원서_1",
+  "processing_ms": 6218.3
+}
+```
+
+**문서별 summary.json**
+```json
+{
+  "doc_id": "국회공문서",
+  "status": "review",
+  "processing_path": "vlm",
+  "timings": {"P1": 803.3, "P2": 49.7, "P3": 5359.7, "P4": 3.3, "P5": 4.5, "P6": 21.8},
+  "total_ms": 6242.3,
+  "error_count": 0,
+  "errors": [],
+  "warning_count": 4,
+  "warnings": ["[P1] IMAGE_TOO_BRIGHT: mean=237.7", "..."],
+  "P1": {"quality_score": 0.721, "dpi": 158, "sr_applied": false},
+  "P2": {"region_count": 27, "mode": "heuristic"},
+  "P3": {"form_type": "unknown", "form_confidence": 1.0, "field_count": 0, "table_count": 0, "processing_time_ms": 5338},
+  "P4": {"overall_confidence": 0.0, "review_required": true, "flagged_count": 0, "error_count": 0}
+}
+```
+
+### 9-5. 단계별 저장 파일 목록
+
+| 단계 | 파일 | 내용 |
+|------|------|------|
+| P1 | `result.json` | dpi, original_dpi, resolution_band, quality_score, sr_applied, image_shape, warnings |
+| P1 | `preprocessed.png` | 전처리 완료 이미지 (RGB→BGR) |
+| P1 | `binary.png` | 이진화 이미지 |
+| P2 | `result.json` | page_width/height, region_count, regions[], reading_order, analysis_mode, warnings |
+| P2 | `layout_visualization.png` | 영역 bbox + 읽기 순서 시각화 |
+| P3 | `result.json` | form_type, fields[], tables[], domain_codes[], processing_time_ms, warnings |
+| P3 | `raw_vlm_response.txt` / `.json` | VLM 원시 응답 (JSON 파싱 가능 시 .json, 불가 시 .txt) |
+| P4 | `result.json` | overall_confidence, review_required, flagged_fields, validation_errors[], processing_path |
+| P5 | `output.json` | JSON 직렬화 |
+| P5 | `output.xml` | XML 직렬화 |
+| P5 | `output.csv` | CSV 직렬화 (해당 시) |
+| P6 | `result.json` | status, db_record_ids, review_queue_id, processing_ms |
+
+### 9-6. 서브프로세스 기록
+
+P3 VLM 추론은 내부적으로 서식 분류 → 영역별 추출 → 표 구조 인식 순서로 vLLM API를 호출한다.
+현재 구현에서는 통합 `result.json` + `raw_vlm_response.txt`로 저장하며, 향후 서브프로세스별 분리가 필요할 경우:
+
+```
+P3/
+├── result.json                     ← 통합 결과
+├── raw_vlm_response.txt            ← VLM 원시 응답 전문
+├── sub_classify.json               ← (서브) 서식 분류 응답 + 시간
+├── sub_extract_region_{N}.json     ← (서브) 영역별 필드 추출 응답 + 시간
+└── sub_table_{N}.json              ← (서브) 표 구조 인식 응답 + 시간
+```
+
+### 9-7. 콘솔 출력 보고 원칙
+
+통합 테스트 실행 시 콘솔에도 다음을 **빠짐없이** 출력한다:
+
+1. **환경 정보**: CUDA 버전, 서비스 URL, 테스트 이미지 수, 컴포넌트 초기화 시간
+2. **문서별 단계 결과**: 각 단계의 실행 시간, 핵심 output (위 §9-5 항목), 경고/폴백 여부
+3. **실패 시**: 실패 단계, 에러 메시지, 스택 트레이스
+4. **문서별 요약**: 총 처리 시간, `P1=Xms | P2=Xms | ...` 형태의 단계별 시간
+5. **전체 요약**: `[PASS/FAIL] {doc_id} total=Xms ...` 형태의 한 줄 요약 + 총 errors/warnings 수
