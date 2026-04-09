@@ -4,37 +4,50 @@
 
 ---
 
-## 1. 파이프라인 구조 (6단계)
+## 1. 파이프라인 구조 (고도화)
 
 ```
 DocumentInput
     │
     ▼
 [Stage 1 — 전처리]
-    P1: 화질 보정 + SR       → PreprocessedImage
-    P2: 구조 분석             → LayoutResult
-        ① 페이지 분해: Dense 페이지를 영역 bbox로 분리
-        ② 읽기 순서: 영역 간 reading_order 결정
-        ③ Task Prompt 결정: 영역 레이블 → VLM instruction 자동 선택
+    P1:     화질 보정 + SR          → PreprocessedImage
+    P2:     레이아웃 탐지            → RawLayoutResult  (PP-DocLayout 원시 탐지)
+    P2.5-A: LayoutPostProcessor     → LayoutResult     (정제 완료)
+        ① 미소 박스 제거 (6px 미만)
+        ② 중복 박스 제거 (IoU > 0.7)
+        ③ 인접 텍스트 블록 병합
     │
     ▼
 [Stage 2 — VLM 통합 추론]
-    P3: Gemma4 VLM           → VLMResult
-        P2의 reading_order 순서대로 영역별 처리:
-        ① 서식 분류 → form_type 결정 → JSON Schema 로드
-        ② 영역별 crop + P2 레이블 → task prompt + guided_json → 필드 추출
-        ③ logprobs → 필드별 토큰 확률 → 신뢰도 산출
+    P3-A:   FormClassifier          → FormType
+        전체 페이지 저해상도(140토큰) → form_type 확정 → JSON Schema 선택
+
+    P2.5-B: InstructionRouter       → list[InstructionSpec]
+        region_type + form_type → 도메인 맥락 포함 instruction 생성
+        (TASK_PROMPTS 딕셔너리 대체 — layout_analyzer/types.py에서 제거)
+
+    P2.5-C: ResolutionRouter        → list[CroppedRegion]
+        영역 타입별 pixel_budget 할당:
+        table: 1120 | seal/handwritten: 560 | text: 280 | header/footer: 140
+
+    P3-B:   StructuredExtractor     → VLMResult
+        pixel_budget 기준 배치 그룹화
+        → bbox 크롭 이미지 + instruction → Gemma4 병렬 배치 호출
+        → guided_json + logprobs 신뢰도 산출
+        → RepetitionGuard (운영 후 판단)
     │
     ▼
 [Stage 3 — 후처리]
     P4: 룰 검증 + 신뢰도 보정 → ValidatedResult
+        처리 경로별 임계값 적용 (VLM / Fallback 분리)
         ├─ 통과 (confidence ≥ 임계값, CRITICAL 없음)
         │      → P5 직렬화 → P6 DB 적재 → PipelineOutput
         └─ 실패 (CRITICAL 오류 or LOW confidence)
                → 검토 큐 적재 → 담당자 UI 확인 → 수정 후 P6 재적재
 
 [Fallback 경로 — VLM 불가 시]
-    P1 → P2 → Fallback(T3~T5) → P4 검증 → 검토 큐 (항상)
+    P1 → P2 → P2.5-A → Fallback(T3~T5) → P4(Fallback 임계값) → 검토 큐 (항상)
 ```
 
 ---
@@ -78,60 +91,112 @@ class BoundingBox:
 @dataclass
 class LayoutRegion:
     region_id: str             # r_0001, r_0002, ...
-    region_type: str           # text, table, figure, header, footer, seal
+    region_type: RegionType    # text, table, figure, header, footer, seal, formula, chart
     bbox: BoundingBox
     confidence: float
-    polygon: Optional[list[tuple[float, float]]] = None  # V3 polygon (없으면 None)
+    polygon: Optional[list[tuple[float, float]]] = None  # V3 polygon
 
 @dataclass
-class LayoutResult:
+class RawLayoutResult:
+    """P2 원시 탐지 결과 — LayoutPostProcessor 정제 전."""
     doc_id: str
     page_width: int
     page_height: int
     regions: list[LayoutRegion]
-    reading_order: list[int]   # regions 인덱스 순서
-                               # - plus-L: 좌표 기반 휴리스틱 (다단 컬럼 대응)
-                               # - V3: 모델 예측 (pairwise scoring)
-    analysis_mode: str         # model / heuristic
+    reading_order: list[int]
+    analysis_mode: AnalysisMode = AnalysisMode.HEURISTIC
     warnings: list[str] = field(default_factory=list)
 
-# P2가 결정하는 영역 레이블 → VLM task prompt 매핑
-TASK_PROMPTS = {
-    "text":    "OCR:",
-    "table":   "Table Recognition:",
-    "formula": "Formula Recognition:",
-    "chart":   "Chart Recognition:",
-    "seal":    "Seal Recognition:",
-    "header":  "OCR:",
-    "footer":  "OCR:",
-    "figure":  "Image Description:",
+@dataclass
+class LayoutResult:
+    """P2.5-A LayoutPostProcessor 정제 완료 결과."""
+    doc_id: str
+    page_width: int
+    page_height: int
+    regions: list[LayoutRegion]   # 미소/중복 박스 제거 + 블록 병합 완료
+    reading_order: list[int]
+    analysis_mode: AnalysisMode = AnalysisMode.HEURISTIC
+    removed_count: int = 0        # 제거된 박스 수 (디버깅용)
+    merged_count: int = 0         # 병합된 블록 수 (디버깅용)
+    warnings: list[str] = field(default_factory=list)
+```
+
+### 2-3. P2.5-B InstructionRouter 출력
+
+```python
+@dataclass
+class InstructionSpec:
+    """InstructionRouter가 생성하는 영역별 VLM 호출 명세."""
+    region_id: str
+    region_type: RegionType
+    form_type: Optional[FormType] = None   # P3-A FormClassifier 결과
+    system_prompt: str = ""                # 도메인 맥락 (군수 서식 특화)
+    user_instruction: str = ""             # 태스크 지시 (PaddleOCR-VL "OCR:" 대비 상세)
+    json_schema: Optional[dict] = None     # guided_json (표/전체서식용)
+    pixel_budget: int = 280                # ResolutionRouter가 할당
+
+# InstructionRouter가 생성하는 도메인 맥락 포함 instruction 예시:
+# form_type="supply_request", region_type="text" →
+#   system_prompt: "군수 보급청구서 OCR 시스템입니다."
+#   user_instruction: "이 수기 기입란에서 NSN 코드(NNNN-NN-NNN-NNNN)와
+#                      수량을 인식하세요. 불확실한 글자는 [?]로 표시."
+#
+# form_type=None, region_type="text" (분류 전) →
+#   user_instruction: "한국어 텍스트를 인식하세요." (도메인 맥락 없음)
+# → FormClassifier 선행이 InstructionRouter 품질을 결정하는 이유
+```
+
+### 2-4. P2.5-C ResolutionRouter 출력
+
+```python
+@dataclass
+class CroppedRegion:
+    """ResolutionRouter가 생성하는 크롭 이미지 + 메타데이터."""
+    region_id: str
+    region_type: RegionType
+    cropped_image: np.ndarray      # bbox 크롭 이미지
+    pixel_budget: int              # Gemma4 이미지 토큰 수
+    instruction_spec: InstructionSpec
+
+# pixel_budget 기준값 (실험 후 조정 가능)
+PIXEL_BUDGET = {
+    "table":             1120,   # 표: 셀 경계·미세 글씨 → 최고 해상도
+    "seal":               560,   # 인장: 원형 배치 텍스트
+    "handwritten_field":  560,   # 수기 기입란: 군수 서식 핵심 영역
+    "text":               280,   # 일반 텍스트
+    "formula":            280,   # 수식
+    "chart":              280,
+    "figure":             140,
+    "header":             140,   # 헤더/푸터: 저해상도로 충분
+    "footer":             140,
 }
 ```
 
-### 2-3. VLM 통합 추론 결과
+### 2-5. VLM 통합 추론 결과
 
 ```python
 @dataclass
 class FieldValue:
-    """VLM이 추출한 개별 필드 (guided_json 출력)."""
-    field_key: str             # JSON Schema의 property 이름
-    raw_value: str             # VLM 출력 원본
-    corrected_value: str       # VLM 교정 결과 (동일하면 교정 없음)
+    """P3-B StructuredExtractor가 추출한 개별 필드."""
+    field_key: str
+    raw_value: str
+    corrected_value: str
     data_type: str             # text, number, date, code
-    confidence: float          # logprobs 기반 토큰 확률 → 신뢰도
-    token_logprobs: list[float]  # 해당 필드 토큰들의 개별 logprob
-    is_flagged: bool = False   # 신뢰도 < 임계값
+    confidence: float          # logprobs 기반 (길이 편향 보정 포함)
+    token_logprobs: list[float]
+    is_flagged: bool = False
+    region_id: Optional[str] = None   # 출처 영역 (디버깅용)
 
 @dataclass
 class RecognizedTable:
     region_id: str
-    html: str                  # 표 구조 HTML
-    cells: list[dict]          # [{"row": 0, "col": 0, "text": "품목"}]
+    html: str
+    cells: list[dict]
     confidence: float
 
 @dataclass
 class DomainCode:
-    code_type: str             # nsn, k_nsn, unit_code, date, rank
+    code_type: CodeType        # nsn, k_nsn, unit_code, date, rank
     raw_value: str
     normalized_value: str
     confidence: float
@@ -139,74 +204,262 @@ class DomainCode:
 @dataclass
 class VLMResult:
     doc_id: str
-    form_type: str             # supply_request, maintenance_record, ...
+    form_type: FormType
     form_confidence: float
-    schema_id: str             # guided_json에 사용된 스키마 ID
-    fields: list[FieldValue]   # guided_json으로 추출된 키-값 쌍 + logprobs 신뢰도
+    schema_id: str             # "supply_request:v1" 형식 (스키마 버전 포함)
+    fields: list[FieldValue]
     tables: list[RecognizedTable]
     domain_codes: list[DomainCode]
-    raw_json: str              # VLM 원본 JSON 응답
-    processing_time_ms: float
+    raw_json: str = ""         # VLM 원본 JSON 응답 (디버깅용)
+    processing_time_ms: float = 0.0
+    processing_path: ProcessingPath = ProcessingPath.VLM
     warnings: list[str] = field(default_factory=list)
 ```
 
-### 2-4. 후처리 결과
+### 2-6. 후처리 결과
 
 ```python
 @dataclass
 class ValidationError:
-    error_id: str
-    error_type: str            # arithmetic, date_logic, code_format
-    severity: str              # critical, high, medium, low
-    field_ref: str             # 관련 field_key
+    error_id: str              # ve_0001, ve_0002, ...
+    error_type: ValidationErrorType  # arithmetic, date_logic, code_format, missing_field, format
+    severity: Severity         # critical, high, medium, low
+    field_ref: str
     expected: str
     actual: str
     message: str
 
 @dataclass
 class ValidatedResult:
-    """P4 출력 — 룰 검증 + 신뢰도 보정 결과."""
     doc_id: str
-    fields: list[FieldValue]   # 보정된 신뢰도 반영
+    fields: list[FieldValue]
+    tables: list[RecognizedTable]
     validation_errors: list[ValidationError]
-    overall_confidence: float  # 보정 후 전체 신뢰도
+    overall_confidence: float
     review_required: bool
     flagged_fields: list[str]
+    processing_path: ProcessingPath = ProcessingPath.VLM
+
+@dataclass
+class ReviewQueueItem:
+    queue_id: str                    # RQ-20260407-001
+    doc_id: str
+    enqueued_at: datetime
+    priority: ReviewPriority         # critical, normal
+    reason: ReviewReason             # validation_failed, low_confidence, fallback, total_failure
+    processing_path: ProcessingPath  # vlm, fallback, none
+    validated_result: Optional[ValidatedResult] = None
+    validation_errors: list[ValidationError] = field(default_factory=list)
+    flagged_fields: list[str] = field(default_factory=list)
+    original_image_path: str = ""
+    preprocessed_image_path: str = ""
+    status: ReviewStatus = ReviewStatus.PENDING
+    reviewer: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    corrected_fields: dict[str, str] = field(default_factory=dict)
+    reviewer_notes: str = ""
 
 @dataclass
 class PipelineOutput:
     doc_id: str
     status: PipelineStatus     # success, partial, review, failed
-    json_output: Optional[str]
-    xml_output: Optional[str]
-    csv_rows: list[dict]
-    db_record_ids: list[str]
-    review_queue_id: Optional[str]
-    processing_ms: float
+    processing_path: ProcessingPath
+    form_type: Optional[FormType] = None
+    json_output: Optional[str] = None
+    xml_output: Optional[str] = None
+    csv_rows: list[dict] = field(default_factory=list)
+    db_record_ids: list[str] = field(default_factory=list)
+    review_queue_id: Optional[str] = None
+    processing_ms: float = 0.0
 ```
 
 ---
 
-## 3. SPOF 대비 — 가용성 설계
+## 3. P2~P3 구간 신규 컴포넌트 상세 설계
 
-> Gemma4 VLM(vLLM 서버)이 단일 장애점(SPOF)이 되는 것을 방지하기 위한 2단계 대비 전략.
+### 3-1. P2.5-A LayoutPostProcessor
 
-### 3-1. 수준 A — vLLM 자체 안정성 확보
+**파일**: `src/preprocess/layout_postprocessor.py`
 
-**목표**: vLLM 프로세스가 비정상일 때 자동 감지 + 자동 복구.
+**역할**: PP-DocLayout 원시 탐지 결과의 노이즈를 제거하여 VLM 입력 품질을 보장합니다. 이 단계 없이 크롭하면 VLM이 6px짜리 점, 인장과 텍스트가 겹친 중복 박스, 단어 단위로 분절된 텍스트 조각을 받게 됩니다.
+
+```python
+class LayoutPostProcessor:
+    MICRO_BOX_PX = 6          # 6px 미만 박스 제거 (PaddleOCR-VL 기준)
+    OVERLAP_IOU_THRESHOLD = 0.7
+    SEAL_IOU_THRESHOLD = 0.5  # 인장은 더 엄격한 기준 적용
+
+    def process(self, raw: RawLayoutResult) -> LayoutResult:
+        regions, removed_ids = self._filter_micro_boxes(raw.regions)
+        regions, overlap_removed = self._filter_overlapping(regions)
+        removed_ids.update(overlap_removed)
+        regions, merged_map = self._merge_adjacent_text_blocks(regions)
+
+        # 제거/병합된 region_id 반영하여 reading_order 재정렬
+        reading_order = self._remap_reading_order(
+            raw.reading_order,
+            removed_ids=removed_ids,
+            merged_map=merged_map,
+        )
+
+        return LayoutResult(
+            ...,
+            regions=regions,
+            reading_order=reading_order,
+            removed_count=len(removed_ids),
+            merged_count=len(merged_map),
+        )
+
+    def _filter_micro_boxes(self, regions) -> tuple[list, set[str]]:
+        """6px 미만 박스 제거.
+        Returns: (남은 regions, 제거된 region_id 집합)"""
+
+    def _filter_overlapping(self, regions) -> tuple[list, set[str]]:
+        """IoU 임계값 초과 중복 박스 제거.
+        seal 영역: 0.5, 그 외: 0.7
+        신뢰도 낮은 쪽 제거.
+        Returns: (남은 regions, 제거된 region_id 집합)"""
+
+    def _merge_adjacent_text_blocks(self, regions) -> tuple[list, dict[str, str]]:
+        """동일 컬럼 내 인접 text 블록 병합.
+        x-center 차이 < 20px, y-gap < 15px 조건.
+        Returns: (병합 후 regions, {흡수된 region_id → 병합 대상 region_id})"""
+
+    def _remap_reading_order(
+        self,
+        original_order: list[int],
+        removed_ids: set[str],
+        merged_map: dict[str, str],
+    ) -> list[int]:
+        """제거/병합 결과를 반영하여 reading_order를 재정렬.
+
+        처리 흐름:
+          1. removed_ids에 포함된 인덱스 제거
+          2. merged_map에 포함된 인덱스를 병합 대상 인덱스로 치환 (중복 제거)
+          3. 남은 인덱스를 정제 후 regions 리스트 기준으로 리넘버링
+             (원본 인덱스 → 정제 후 인덱스 매핑)
+
+        예시:
+          original_order = [0, 1, 2, 3, 4]
+          removed_ids = {"r_0002"}        → idx=1 제거
+          merged_map = {"r_0004": "r_0003"} → idx=4를 idx=3으로 치환
+          → 정제 후 regions: [r_0001, r_0003(+r_0004 병합), r_0005]
+          → 재넘버링: {0→0, 3→1, 5→2}
+          → 결과: [0, 1, 2]
+        """
+```
+
+### 3-2. P3-A FormClassifier
+
+**파일**: `src/vlm/form_classifier.py`
+
+**역할**: 전체 페이지를 저해상도(140 토큰)로 Gemma4에 1회 호출하여 서식 유형을 확정합니다. 이 결과가 InstructionRouter에 피드백되어 이후 모든 영역의 instruction 품질을 결정합니다. 서식 분류 실패 시 wrong schema로 전체 추출 결과가 오염되는 오류 전파를 차단하는 게이트 역할입니다.
+
+```python
+class FormClassifier:
+    def classify(
+        self,
+        image_rgb: np.ndarray,
+        warnings: Optional[list[str]] = None,
+    ) -> tuple[FormType, float]:
+        """
+        전체 페이지 이미지(H×W×3 RGB)를 저해상도(140 토큰)로 VLM 1회 호출.
+
+        Returns:
+            form_type: FormType   # supply_request | maintenance_record | ...| unknown
+            confidence: float     # logprobs 기반 분류 신뢰도
+        """
+        # 저해상도 인코딩 → vLLM 호출 → logprobs 기반 신뢰도 산출
+        # unknown → _fallback.json 스키마 사용
+```
+
+### 3-3. P2.5-B InstructionRouter
+
+**파일**: `src/vlm/instruction_router.py`
+
+**역할**: region_type과 form_type을 조합하여 도메인 맥락이 포함된 상세 InstructionSpec을 생성합니다. 기존 `instruction_builder.py`와 `TASK_PROMPTS` 딕셔너리를 대체하며, 레이아웃 모델과 VLM instruction 로직의 결합을 해소합니다.
+
+PaddleOCR-VL의 `"OCR:"` 2단어 프리픽스는 전용 학습 모델이기 때문에 가능합니다. 범용 VLM인 Gemma4는 도메인 맥락, 출력 형식, 불확실성 처리까지 포함한 상세 instruction이 필요합니다.
+
+```python
+class InstructionRouter:
+    def route(
+        self,
+        region: LayoutRegion,
+        form_type: Optional[str],
+    ) -> InstructionSpec:
+        """
+        동일 region_type이라도 form_type에 따라 다른 instruction 생성:
+
+        region_type="text", form_type="supply_request":
+          → "이 수기 기입란에서 NSN 코드(NNNN-NN-NNN-NNNN)와 수량을 인식하세요."
+
+        region_type="text", form_type="maintenance_record":
+          → "이 수기 기입란에서 장비 ID와 정비 유형을 인식하세요."
+
+        region_type="text", form_type=None:
+          → "한국어 텍스트를 인식하세요." (FormClassifier 미수행 시)
+        """
+```
+
+### 3-4. P2.5-C ResolutionRouter
+
+**파일**: `src/vlm/resolution_router.py`
+
+**역할**: 영역 타입별로 Gemma4 이미지 토큰 예산(pixel_budget)을 차등 할당하고 bbox 크롭 이미지를 생성합니다. 모든 영역에 동일 해상도를 적용하면 표와 수기 기입란에서 부족하고 헤더/푸터에서 낭비가 발생합니다.
+
+```python
+class ResolutionRouter:
+    def route(
+        self,
+        layout: LayoutResult,
+        preprocessed: PreprocessedImage,
+        instructions: dict[str, InstructionSpec],  # {region_id → InstructionSpec}
+    ) -> dict[int, list[CroppedRegion]]:
+        """bbox 크롭 + pixel_budget 할당 + 배치 그룹화.
+        반환: {pixel_budget → [CroppedRegion, ...]} — 동일 budget끼리 그룹화.
+        해상도가 다른 이미지 혼재 시 vLLM 패딩 오버헤드 발생."""
+```
+
+### 3-5. P3-B StructuredExtractor
+
+**파일**: `src/vlm/structured_extractor.py`
+
+**역할**: pixel_budget 기준으로 그룹화된 CroppedRegion 배치를 Gemma4에 병렬 전송하고 결과를 조립합니다. 기존 `gemma4_engine.py`에서 추출 전용 책임만 분리한 컴포넌트입니다.
+
+```python
+class StructuredExtractor:
+    def extract(
+        self,
+        groups: dict[int, list[CroppedRegion]],
+        doc_id: str,
+        form_type: FormType,
+        form_confidence: float,
+        schema_id: str,
+        schema: Optional[dict] = None,
+        warnings: Optional[list[str]] = None,
+    ) -> VLMResult:
+        """
+        각 pixel_budget 그룹 내 영역을 순차 vLLM 호출.
+        guided_json + logprobs로 필드 추출 + 도메인 코드 자동 감지.
+        결과를 region_id 기준으로 재조립하여 VLMResult 구성.
+        """
+```
+
+---
+
+## 4. SPOF 대비 — 가용성 설계
+
+### 4-1. 수준 A — vLLM 자체 안정성 확보
 
 | 메커니즘 | 구현 방식 | 설정 |
 |----------|----------|------|
 | Docker 자동 재시작 | `restart: unless-stopped` | `docker-compose.yml` |
 | 헬스체크 | `curl -sf http://localhost:8000/health` | interval 30s, timeout 10s, retries 3, start_period 120s |
-| 오케스트레이터 감시 | 매 요청 전 `/health` 확인 + 주기적 백그라운드 polling | `VLLM_HEALTH_CHECK_INTERVAL=30` |
-
-**오케스트레이터 헬스체크 로직**:
+| 오케스트레이터 감시 | 매 요청 전 `/health` 확인 + 백그라운드 polling | `VLLM_HEALTH_CHECK_INTERVAL=30` |
 
 ```python
 class VLMHealthMonitor:
-    """vLLM 서버 상태를 주기적으로 확인."""
-
     def __init__(self, health_url: str, interval: int = 30, timeout: int = 10):
         self.health_url = health_url
         self.interval = interval
@@ -216,7 +469,6 @@ class VLMHealthMonitor:
         self._consecutive_failures: int = 0
 
     def is_healthy(self) -> bool:
-        """캐시된 상태 반환. interval 경과 시 실제 체크."""
         now = time.time()
         if now - self._last_check >= self.interval:
             self._check()
@@ -241,55 +493,18 @@ class VLMHealthMonitor:
             logger.error("vLLM 서버 비정상 — fallback 전환 대기")
 ```
 
-**복구 흐름**:
-1. Docker healthcheck 실패 3회 → Docker가 컨테이너 자동 재시작
-2. 재시작 중(~60-90초) 오케스트레이터는 `_healthy = False` 상태
-3. 이 기간의 요청은 수준 B(fallback) 또는 검토 큐로 전환
-4. 복구 후 자동으로 주 경로 재개
-
-### 3-2. 수준 B — 경량 Fallback (v1 PP-OCRv5 기반)
-
-**목표**: VLM이 완전히 불가할 때 기초 OCR 파이프라인으로 최소 서비스 유지.
-
-**Fallback 서비스 구성** (별도 Docker 컨테이너 `fallback`):
-
-| v1 컴포넌트 | fallback 기능 | 정확도 | 비고 |
-|------------|-------------|--------|------|
-| T1 화질 보정 | 이미지 전처리 + SR | v2 P1과 동일 | 공유 |
-| T2 레이아웃 | PP-DocLayout 영역 검출 | v2 P2와 동일 | 공유 |
-| T3 서식 분류 | DiT 기반 분류 | 중간 | 주 경로 대비 정확도 ↓ |
-| T4 수기 인식 | PP-OCRv5 텍스트 인식 | 중간 | VLM 대비 교정 능력 ↓ |
-| T5 구조 인식 | SLANeXt 표 구조 | 중간 | VLM 대비 정밀도 ↓ |
-
-**Fallback 모델 가중치** (`models/fallback/`):
-```
-models/fallback/
-├── t3_form_classifier/dit-base-finetuned-rvlcdip/
-├── t4_handwriting/korean_PP-OCRv5_mobile_rec/
-└── t5_table_structure/SLANeXt_wired/
-```
+### 4-2. 수준 B — 경량 Fallback
 
 **전환 정책**:
 
 ```python
 class FallbackPolicy:
-    """VLM 불가 시 fallback 전환 정책."""
-
-    FALLBACK_MODES = Literal["auto", "manual_queue", "disabled"]
-
     def decide(
         self,
         vlm_healthy: bool,
         fallback_enabled: bool,
         fallback_healthy: bool,
     ) -> str:
-        """처리 경로 결정.
-
-        Returns:
-            "vlm"          — 주 경로 (VLM 정상)
-            "fallback"     — 경량 fallback (VLM 불가, fallback 가용)
-            "review_queue"  — 수동 검토 큐 (둘 다 불가)
-        """
         if vlm_healthy:
             return "vlm"
         if fallback_enabled and fallback_healthy:
@@ -298,161 +513,100 @@ class FallbackPolicy:
 ```
 
 **Fallback 출력 특성**:
-- `PipelineOutput.status = "partial"` (VLM 대비 불완전)
-- `PipelineOutput.review_required = True` (항상 검토 필요 표시)
-- guided_json / logprobs 신뢰도 없음 → 필드 신뢰도 = PP-OCRv5 rec_score 사용
-- 서식 분류 정확도 저하 → `_fallback.json` 스키마 사용 빈도 증가
+- `processing_path = "fallback"` → P4에서 Fallback 임계값 적용 (VLM 대비 낮게 설정)
+- `review_required = True` (항상)
+- guided_json / logprobs 없음 → PP-OCRv5 rec_score 사용
 
-### 3-3. 수동 검토 큐
+### 4-3. 수동 검토 큐
 
-**목표**: 자동 처리 불가/불완전 문서를 담당자가 확인·교정할 수 있는 큐 시스템.
-
-**검토 큐 적재 조건** (P4 검증 단계에서 판정):
+**검토 큐 적재 조건**:
 
 | 조건 | 트리거 | 우선순위 |
 |------|--------|---------|
 | CRITICAL ValidationError | `severity == "critical"` | 🔴 긴급 |
-| LOW confidence 필드 존재 | `field.confidence < 임계값` (§4-2 참조) | 🟡 일반 |
-| Fallback 경로 처리 문서 | `PipelineOutput.status == "partial"` | 🟡 일반 |
-| VLM + Fallback 모두 불가 | 원본 이미지만 큐에 적재 | 🔴 긴급 |
-
-**처리 흐름**:
-
-```
-[자동 처리 경로 — 주 경로]
-DocumentInput → P1 → P2 → P3(VLM) → P4 검증 통과 → P5 직렬화 → P6 DB 적재
-                                          ✅ overall_confidence ≥ 임계값
-                                          ✅ CRITICAL 오류 없음
-
-[자동 처리 경로 — Fallback]
-DocumentInput → P1 → P2 → Fallback(T3~T5) → P4 검증 → 검토 큐 적재 (항상)
-                                                        → 담당자 확인 후 P6 DB 적재
-
-[수동 검토 경로]
-DocumentInput → P1 → P2 → P3(VLM) → P4 검증 실패
-                                          ❌ CRITICAL 오류 or LOW confidence
-                                          → 검토 큐 적재
-                                          → 담당자 UI 확인
-                                          → 수정 후 P6 DB 재적재
-
-[완전 장애 경로]
-DocumentInput → VLM 불가 + Fallback 불가 → 원본 이미지 + 메타데이터 큐 적재
-                                          → 담당자 수동 처리
-```
-
-**검토 큐 데이터 모델**:
-
-```python
-@dataclass
-class ReviewQueueItem:
-    """수동 검토 큐의 개별 항목."""
-    queue_id: str                    # RQ-20260407-001
-    doc_id: str                      # 원본 문서 ID
-    enqueued_at: datetime            # 큐 적재 시각
-    priority: str                    # critical, normal
-    reason: str                      # validation_failed, low_confidence, fallback, total_failure
-    source_path: str                 # 처리 경로 (vlm, fallback, none)
-
-    # 자동 처리 결과 (있는 경우)
-    validated_result: Optional[ValidatedResult]   # P4 출력 (부분 결과)
-    validation_errors: list[ValidationError]       # CRITICAL 오류 목록
-    flagged_fields: list[str]                      # LOW confidence 필드 키 목록
-
-    # 원본 참조
-    original_image_path: str         # 원본 이미지 경로
-    preprocessed_image_path: str     # P1 전처리 이미지 경로
-
-    # 검토 상태
-    status: str                      # pending, in_review, approved, rejected
-    reviewer: Optional[str]          # 검토 담당자
-    reviewed_at: Optional[datetime]
-    corrected_fields: dict           # 담당자가 수정한 필드 {field_key: corrected_value}
-    reviewer_notes: str = ""
-
-@dataclass
-class ReviewQueueStats:
-    """검토 큐 현황 통계."""
-    total_pending: int
-    total_in_review: int
-    critical_count: int
-    normal_count: int
-    avg_wait_minutes: float
-```
-
-**검토 완료 후 처리**:
-1. 담당자가 UI에서 필드 수정 → `corrected_fields` 저장
-2. `status = "approved"` → P5 직렬화 → P6 DB 적재 (수정된 값 사용)
-3. 교정 데이터(원본 → 수정)를 VLM Fine-tuning 학습 데이터로 자동 축적
-4. `status = "rejected"` → 문서 폐기 또는 재스캔 요청
+| LOW confidence 필드 | `field.confidence < 임계값` | 🟡 일반 |
+| Fallback 경로 처리 | `processing_path == "fallback"` | 🟡 일반 |
+| VLM + Fallback 모두 불가 | 원본 이미지만 큐 적재 | 🔴 긴급 |
 
 ---
 
-## 4. Guided Decoding — 서식별 JSON Schema
+## 5. Guided Decoding — 서식별 JSON Schema
 
-### 3-1. 스키마 관리
+### 5-1. 스키마 관리 (버전 관리 도입)
 
 ```
 src/domain/schemas/
-├── supply_request.json       ← 보급청구서
-├── maintenance_record.json   ← 정비기록서
-├── inventory_sheet.json      ← 물자현황표
-├── handover_doc.json         ← 인수인계서
-├── inspection_report.json    ← 검사보고서
-└── _fallback.json            ← 미분류 문서용 범용 스키마
+├── v1/
+│   ├── supply_request.json
+│   ├── maintenance_record.json
+│   ├── inventory_sheet.json
+│   ├── handover_doc.json
+│   ├── inspection_report.json
+│   └── _fallback.json
+└── v2/                         ← 서식 개정 시
+    └── supply_request.json
+
+schema_registry.py              ← form_type + version → Schema 조회
 ```
 
-### 3-2. 처리 흐름
+`VLMResult.schema_id` 형식: `"supply_request:v1"` (버전 포함)
+DB 레코드에 스키마 버전을 함께 기록하여 서식 개정 후 마이그레이션 가능.
 
-1. P3가 먼저 **서식 분류** instruction을 실행 → `form_type` 결정
-2. `form_type` → 해당 JSON Schema 파일 로드
-3. 전체 문서 이미지 + 서식별 Schema를 `guided_json`으로 vLLM에 전달
+### 5-2. 처리 흐름
+
+1. P3-A FormClassifier → `form_type` 결정
+2. InstructionRouter → `form_type` 기반 JSON Schema 선택
+3. P3-B StructuredExtractor → 영역별 크롭 + Schema를 `guided_json`으로 vLLM 전달
 4. VLM은 Schema에 맞는 JSON만 생성 → **파싱 실패 원천 차단**
-5. 미분류(`unknown`) 시 `_fallback.json` 사용 (범용 key-value 추출)
-
-### 3-3. Fallback 전략
-
-| 상황 | 처리 |
-|------|------|
-| VLM이 서식 유형을 `unknown`으로 분류 | `_fallback.json` 스키마 사용 |
-| guided_json 에도 불구하고 빈 응답 | 영역별 OCR로 fallback (텍스트만 추출) |
-| vLLM 서버 무응답 | **수준 B fallback 전환** (§3-2) → fallback도 불가 시 검토 큐 적재 (§3-3) |
+5. `unknown` 시 `_fallback.json` 사용
 
 ---
 
-## 5. logprobs 신뢰도 산출
+## 6. logprobs 신뢰도 산출
 
-### 5-1. 필드별 신뢰도
+### 6-1. 필드별 신뢰도 (길이 편향 보정 포함)
 
 ```python
-# VLM 응답에서 필드값에 해당하는 토큰들의 logprob 추출
-# 예: "quantity": 50 → 토큰 "50"의 logprob = -0.02 → prob = 0.98
+def calc_field_confidence(
+    token_logprobs: list[float],
+    field_type: str,
+) -> float:
+    """
+    기존: geometric_mean(exp(logprob)) — 토큰 수 많을수록 구조적 낮은 점수
+    개선: 필드 유형별 기대 토큰 수 기반 보정 계수 적용
 
-field_confidence = geometric_mean([exp(lp) for lp in field_token_logprobs])
+    예: "부대명: 수도방위사령부 예하 1경비단" (긴 텍스트)
+        vs "NSN: 1005-01-432-1234" (짧은 코드)
+        → 동일 유형 임계값 적용 전 편향 보정 필요
+    """
+    geo_mean = exp(mean(token_logprobs))
+    length_factor = min(1.0, sqrt(EXPECTED_TOKENS[field_type]
+                                   / max(len(token_logprobs), 1)))
+    return round(geo_mean * length_factor, 4)
 ```
 
-### 5-2. 필드 유형별 임계값
+### 6-2. 필드 유형별 임계값 — 처리 경로 분리
 
-| 필드 유형 | 임계값 | 미달 시 |
-|----------|--------|---------|
-| 금액 (amount) | 0.99 | is_flagged + review |
-| 코드 (code/NSN) | 0.97 | is_flagged + review |
-| 날짜 (date) | 0.95 | is_flagged |
-| 수량 (quantity) | 0.95 | is_flagged |
-| 일반 텍스트 | 0.90 | is_flagged |
-| 서명 | 0.70 | is_flagged |
+| 필드 유형 | VLM 임계값 | Fallback 임계값 | 비고 |
+|----------|:----------:|:--------------:|------|
+| 금액 (amount) | 0.99 | 0.80 | Fallback은 사실상 항상 검토 큐 |
+| 코드 (code/NSN) | 0.97 | 0.75 | |
+| 날짜 (date) | 0.95 | 0.70 | |
+| 수량 (quantity) | 0.95 | 0.70 | |
+| 일반 텍스트 | 0.90 | 0.65 | |
+| 서명 | 0.70 | 0.50 | |
 
-### 5-3. P4 룰 검증으로 보정
+### 6-3. P4 룰 검증으로 보정
 
-logprobs 신뢰도가 높아도 룰 검증에 실패하면 감점:
 - `합계 ≠ 수량 × 단가` → 관련 필드 신뢰도 **-0.30**
 - NSN 형식 불일치 → 해당 필드 신뢰도 **-0.15**
 - 날짜 순서 위반 → 해당 필드 신뢰도 **-0.10**
 
 ---
 
-## 6. 군수 도메인 지식
+## 7. 군수 도메인 지식
 
-### 6-1. 주요 서식 유형
+### 7-1. 주요 서식 유형
 
 | 서식명 | schema_id | JSON Schema | 주요 필드 |
 |--------|-----------|------------|----------|
@@ -461,7 +615,7 @@ logprobs 신뢰도가 높아도 룰 검증에 실패하면 감점:
 | 물자현황표 | `inventory_sheet` | `inventory_sheet.json` | item_name, stock_qty, location, disposal_qty |
 | 인수인계서 | `handover_doc` | `handover_doc.json` | from_person, to_person, date, items |
 
-### 6-2. 코드 체계
+### 7-2. 코드 체계
 
 ```
 NSN (NATO Stock Number):  NNNN-NN-NNN-NNNN  (예: 1005-01-432-1234)
@@ -471,46 +625,40 @@ K-NSN (한국 물자코드):    KN-NNNNN-NNNN
 
 ---
 
-## 7. 서비스 통신 아키텍처
+## 8. 서비스 통신 아키텍처
 
-### 7-1. 현재 구조 (Phase 1)
+### 8-1. 현재 구조 (Phase 1)
 
 ```
-[Pipeline 컨테이너]                                      [Layout 컨테이너 :8082]
-  ├── P1 Preprocessor ─── (in-process)                   PaddlePaddle CUDA 12.6
-  ├── P2 LayoutAnalyzer ── HTTP POST ──────────────────► POST /layout/analyze
-  │     └── 후처리 (NMS, area filter, reading order)       └── PP-DocLayoutV3 추론
-  ├── P3 Gemma4Engine ──── HTTP POST → [vLLM 컨테이너 :8100]
-  │                         └── /v1/chat/completions (동기 blocking, 120s timeout)
-  ├── Fallback ──────────── HTTP POST → [Fallback 컨테이너 :8081]
-  │                         └── /fallback/process (동기)
-  ├── P4 Validator ──────── (in-process)
-  ├── P5 Serializer ─────── (in-process)
-  └── P6 DBLoader ─────── (in-process, SQLite)
+[Pipeline 컨테이너]
+  ├── P1 Preprocessor          (in-process)
+  ├── P2 LayoutAnalyzer        HTTP POST → [Layout 컨테이너 :8082]
+  │     └── PP-DocLayoutV3 추론 (PaddlePaddle CUDA 12.6)
+  ├── P2.5-A LayoutPostProcessor (in-process)
+  ├── P3-A FormClassifier      HTTP POST → [vLLM 컨테이너 :8100]
+  │     └── 저해상도 서식 분류 호출
+  ├── P2.5-B InstructionRouter (in-process)
+  ├── P2.5-C ResolutionRouter  (in-process)
+  ├── P3-B StructuredExtractor HTTP POST → [vLLM 컨테이너 :8100]
+  │     └── 배치 병렬 추출 호출
+  ├── Fallback                 HTTP POST → [Fallback 컨테이너 :8081]
+  ├── P4 Validator             (in-process)
+  ├── P5 Serializer            (in-process)
+  └── P6 DBLoader              (in-process, SQLite)
 ```
 
-**Layout 서비스 분리 사유**: PaddlePaddle(CUDA 11.8)과 PyTorch(CUDA 12.8)의 CUDA 충돌 방지.
-Layout 컨테이너는 PaddlePaddle CUDA 12.6 베이스로 H100(sm_90)을 지원합니다.
+**Layout 서비스 분리 사유**: PaddlePaddle과 PyTorch의 CUDA 충돌 방지.
+전체 서비스 CUDA 12.6 통일 완료 (H100 sm_90 지원). Layout 컨테이너는 fusion 모드(V3+plus-L / V3+heuristic, DPI 기반 분기) 지원.
 
-**통신 방식**: 동기 HTTP REST
-- Layout: FastAPI REST (httpx) — 이미지 Base64 전송, raw detections JSON 수신
-- vLLM: OpenAI 호환 API (httpx/openai SDK)
-- Fallback: FastAPI REST (httpx)
-- 헬스체크: HTTP GET polling (`/health`, 30초 간격)
-- 검토 큐 / DB: SQLite 직접 접근
+### 8-2. Phase 3 목표: 비동기 메시지 기반
 
-### 7-2. Phase 3 목표: 비동기 메시지 기반
-
-폐쇄망 적합 메시지 브로커(**Redis 로컬** 또는 **SQLite-backed 경량 큐**)를 도입하여:
-- pipeline → fallback: Redis Streams 비동기 전환 (스케일아웃 병목 해소)
+폐쇄망 적합 메시지 브로커(Redis 로컬 또는 SQLite-backed 경량 큐) 도입:
+- pipeline → fallback: Redis Streams 비동기 전환
 - 검토 큐 알림: Redis Pub/Sub → 프론트엔드 SSE
-- 장기 목표: Celery/Dramatiq 태스크 그래프로 P1~P6 병렬화
 
 ---
 
-## 8. 핵심 의존성
-
-> **참고**: 프로젝트 루트에 `requirements.txt`는 없습니다. 모든 의존성은 `docker/Dockerfile.*` 파일에서 관리됩니다 (컨테이너 기반 배포).
+## 9. 핵심 의존성
 
 ```txt
 # Stage 1 — 전처리
@@ -522,7 +670,7 @@ realesrgan
 basicsr
 
 # Stage 2 — VLM (vLLM 서버)
-vllm
+vllm>=0.19.0
 torch
 transformers>=5.5.0          # Gemma4 아키텍처 지원 필수
 
@@ -534,31 +682,30 @@ sqlalchemy>=2.0.0
 pyyaml
 
 # VLM 클라이언트
-openai                      # vLLM OpenAI 호환 API 클라이언트
-httpx                       # vLLM 헬스체크 + fallback 통신
+openai
+httpx
 ```
 
 ---
 
-## 8. 코딩 컨벤션
+## 10. 코딩 컨벤션
 
 - 모든 함수·클래스에 docstring 필수
 - 컴포넌트 간 데이터 전달은 `src/interfaces/types.py`의 dataclass 사용
 - 오케스트레이터(`pipeline/orchestrator.py`)만 컴포넌트를 순서대로 호출
+- `TASK_PROMPTS` 딕셔너리를 `layout_analyzer.py` / `types.py`에 두지 않음 — `InstructionRouter`에서 일원화
 - VLM instruction/response는 **반드시 guided_json으로 구조화**
-- 신뢰도는 logprobs 기반 산출 → P4 룰 검증으로 보정
+- 신뢰도는 logprobs 기반 산출 (길이 편향 보정) → P4 룰 검증으로 보정
+- P4는 `processing_path` 기반으로 임계값 프로파일 분기
 - Python 3.10+
 
 ---
 
-## 9. 통합 테스트 절차 및 결과 기록
+## 11. 통합 테스트 절차 및 결과 기록
 
-### 9-1. 실행 방식
-
-통합 테스트는 **개발 디렉토리에 구성된 Docker 컨테이너**를 통해 진행한다.
+### 11-1. 실행 방식
 
 ```bash
-# pipeline 컨테이너에서 실행 (layout + vllm-server 가동 필요)
 docker run --rm --gpus device=0 --network host \
   -v $(pwd):/workspace \
   -e LAYOUT_SERVICE_URL=http://localhost:8082 \
@@ -568,43 +715,42 @@ docker run --rm --gpus device=0 --network host \
   python scripts/run_pipeline_with_outputs.py [--input-dir data/raw]
 ```
 
-테스트 이미지는 `data/raw/` 디렉토리에 배치한다.
-
-### 9-2. 결과 저장 구조
-
-결과는 `data/pipeline_outputs/{timestamp}/` 디렉토리에 저장된다.
+### 11-2. 결과 저장 구조
 
 ```
 data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
-├── run_summary.json                    ← 전체 실행 요약
-├── ocr_results.db                      ← P6 DB (SQLite)
-├── review_queue.db                     ← 검토 큐 DB
-├── {doc_id}/
-│   ├── summary.json                    ← 문서별 요약
-│   ├── P1/
-│   │   ├── result.json                 ← 단계 결과 (dpi, quality_score, sr_applied 등)
-│   │   ├── preprocessed.png            ← 전처리 이미지
-│   │   └── binary.png                  ← 이진화 이미지
-│   ├── P2/
-│   │   ├── result.json                 ← 영역 목록 (region_type, bbox, confidence, polygon)
-│   │   └── layout_visualization.png    ← 영역 시각화
-│   ├── P3/
-│   │   ├── result.json                 ← VLM 추출 결과 (fields, tables, form_type, logprobs)
-│   │   └── raw_vlm_response.txt        ← VLM 원시 응답 (서브프로세스별: 분류/추출/표)
-│   ├── P4/
-│   │   └── result.json                 ← 검증 결과 (overall_confidence, errors, flagged)
-│   ├── P5/
-│   │   ├── output.json                 ← JSON 직렬화
-│   │   ├── output.xml                  ← XML 직렬화
-│   │   └── output.csv                  ← CSV 직렬화 (해당 시)
-│   └── P6/
-│       └── result.json                 ← DB 적재 결과 (record_ids)
-└── ...
+├── run_summary.json
+├── ocr_results.db
+├── review_queue.db
+└── {doc_id}/
+    ├── summary.json
+    ├── P1/
+    │   ├── result.json
+    │   ├── preprocessed.png
+    │   └── binary.png
+    ├── P2/
+    │   ├── result.json            ← RawLayoutResult (정제 전)
+    │   └── layout_visualization.png
+    ├── P2.5A/
+    │   └── result.json            ← LayoutResult (정제 후, removed/merged 수 포함)
+    ├── P3A/
+    │   └── result.json            ← form_type, form_confidence, 추론 시간
+    ├── P3B/
+    │   ├── result.json            ← fields[], tables[], domain_codes[], logprobs
+    │   └── raw_vlm_responses/
+    │       ├── batch_{budget}_{n}.json   ← pixel_budget별 배치 응답
+    │       └── ...
+    ├── P4/
+    │   └── result.json
+    ├── P5/
+    │   ├── output.json
+    │   ├── output.xml
+    │   └── output.csv
+    └── P6/
+        └── result.json
 ```
 
-### 9-3. run_summary.json 스키마
-
-전체 실행에 대한 요약. 샘플별로 단계별 추론 시간, 성공/실패 여부, 실패 사유를 기록한다.
+### 11-3. 단계별 타이밍 기록 (run_summary.json)
 
 ```json
 {
@@ -612,178 +758,31 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
   "document_count": 3,
   "documents": [
     {
-      "doc_id": "국회공문서",
-      "status": "review",           // success | review | failed
-      "processing_path": "vlm",     // vlm | fallback
-      "total_ms": 6242.3,
+      "doc_id": "보급청구서_001",
+      "status": "success",
+      "processing_path": "vlm",
+      "total_ms": 4820.1,
       "timings": {
-        "P1": 803.3,
-        "P2": 49.7,
-        "P3": 5359.7,
-        "P4": 3.3,
-        "P5": 4.5,
-        "P6": 21.8
-      },
-      "error_count": 0,
-      "errors": [],
-      "warning_count": 4,
-      "warnings": [
-        "[P1] IMAGE_TOO_BRIGHT: mean=237.7",
-        "[P1] LOW_RESOLUTION_BAND: quality score penalized x0.85",
-        "[P3] Field extraction: JSON parse failed",
-        "[검토큐] 적재 완료: RQ-20260409-국회공문서"
-      ]
+        "P1": 310.2,
+        "P2": 48.5,
+        "P2_5A": 12.3,
+        "P3A": 420.7,
+        "P3B": 3850.4,
+        "P4": 3.1,
+        "P5": 4.2,
+        "P6": 18.7
+      }
     }
   ]
 }
 ```
 
-### 9-4. 단계별 result.json 실제 스키마
-
-현재 구현(`scripts/run_pipeline_with_outputs.py`)이 저장하는 실제 필드:
-
-**P1/result.json**
-```json
-{
-  "doc_id": "전역지원서_1",
-  "dpi": 144,
-  "original_dpi": 72,
-  "resolution_band": "low",
-  "quality_score": 0.85,
-  "sr_applied": false,
-  "image_shape": [832, 520, 3],
-  "warnings": ["LOW_RESOLUTION_BAND: quality score penalized x0.85"]
-}
-```
-
-**P2/result.json**
-```json
-{
-  "doc_id": "전역지원서_1",
-  "page_width": 520,
-  "page_height": 832,
-  "region_count": 4,
-  "regions": [
-    {
-      "region_id": "r_0001",
-      "region_type": "header",
-      "bbox": {"x1": 10, "y1": 19, "x2": 510, "y2": 120},
-      "confidence": 0.7
-    }
-  ],
-  "reading_order": [0, 3, 1, 2],
-  "analysis_mode": "model",
-  "warnings": []
-}
-```
-
-**P3/result.json**
-```json
-{
-  "doc_id": "전역지원서_1",
-  "form_type": "unknown",
-  "form_confidence": 1.0,
-  "schema_id": "_fallback",
-  "field_count": 0,
-  "fields": [
-    {"field_key": "...", "raw_value": "...", "corrected_value": "...", "data_type": "...", "confidence": 0.95, "is_flagged": false}
-  ],
-  "table_count": 0,
-  "tables": [
-    {"region_id": "r_0001", "html": "<table>...</table>", "cell_count": 12, "confidence": 0.85}
-  ],
-  "domain_codes": [
-    {"code_type": "nsn", "raw_value": "...", "normalized_value": "...", "confidence": 0.9}
-  ],
-  "processing_time_ms": 6144.9,
-  "warnings": ["Field extraction: JSON parse failed"]
-}
-```
-
-**P4/result.json**
-```json
-{
-  "doc_id": "전역지원서_1",
-  "overall_confidence": 0.0,
-  "review_required": true,
-  "flagged_fields": [],
-  "validation_error_count": 0,
-  "validation_errors": [
-    {"error_id": "...", "error_type": "...", "severity": "...", "field_ref": "...", "expected": "...", "actual": "...", "message": "..."}
-  ],
-  "processing_path": "vlm"
-}
-```
-
-**P6/result.json**
-```json
-{
-  "doc_id": "전역지원서_1",
-  "status": "review",
-  "processing_path": "vlm",
-  "form_type": "unknown",
-  "db_record_ids": ["doc:전역지원서_1", "fields:0", "run:전역지원서_1"],
-  "review_queue_id": "RQ-20260409-전역지원서_1",
-  "processing_ms": 6218.3
-}
-```
-
-**문서별 summary.json**
-```json
-{
-  "doc_id": "국회공문서",
-  "status": "review",
-  "processing_path": "vlm",
-  "timings": {"P1": 803.3, "P2": 49.7, "P3": 5359.7, "P4": 3.3, "P5": 4.5, "P6": 21.8},
-  "total_ms": 6242.3,
-  "error_count": 0,
-  "errors": [],
-  "warning_count": 4,
-  "warnings": ["[P1] IMAGE_TOO_BRIGHT: mean=237.7", "..."],
-  "P1": {"quality_score": 0.721, "dpi": 158, "sr_applied": false},
-  "P2": {"region_count": 27, "mode": "heuristic"},
-  "P3": {"form_type": "unknown", "form_confidence": 1.0, "field_count": 0, "table_count": 0, "processing_time_ms": 5338},
-  "P4": {"overall_confidence": 0.0, "review_required": true, "flagged_count": 0, "error_count": 0}
-}
-```
-
-### 9-5. 단계별 저장 파일 목록
-
-| 단계 | 파일 | 내용 |
-|------|------|------|
-| P1 | `result.json` | dpi, original_dpi, resolution_band, quality_score, sr_applied, image_shape, warnings |
-| P1 | `preprocessed.png` | 전처리 완료 이미지 (RGB→BGR) |
-| P1 | `binary.png` | 이진화 이미지 |
-| P2 | `result.json` | page_width/height, region_count, regions[], reading_order, analysis_mode, warnings |
-| P2 | `layout_visualization.png` | 영역 bbox + 읽기 순서 시각화 |
-| P3 | `result.json` | form_type, fields[], tables[], domain_codes[], processing_time_ms, warnings |
-| P3 | `raw_vlm_response.txt` / `.json` | VLM 원시 응답 (JSON 파싱 가능 시 .json, 불가 시 .txt) |
-| P4 | `result.json` | overall_confidence, review_required, flagged_fields, validation_errors[], processing_path |
-| P5 | `output.json` | JSON 직렬화 |
-| P5 | `output.xml` | XML 직렬화 |
-| P5 | `output.csv` | CSV 직렬화 (해당 시) |
-| P6 | `result.json` | status, db_record_ids, review_queue_id, processing_ms |
-
-### 9-6. 서브프로세스 기록
-
-P3 VLM 추론은 내부적으로 서식 분류 → 영역별 추출 → 표 구조 인식 순서로 vLLM API를 호출한다.
-현재 구현에서는 통합 `result.json` + `raw_vlm_response.txt`로 저장하며, 향후 서브프로세스별 분리가 필요할 경우:
-
-```
-P3/
-├── result.json                     ← 통합 결과
-├── raw_vlm_response.txt            ← VLM 원시 응답 전문
-├── sub_classify.json               ← (서브) 서식 분류 응답 + 시간
-├── sub_extract_region_{N}.json     ← (서브) 영역별 필드 추출 응답 + 시간
-└── sub_table_{N}.json              ← (서브) 표 구조 인식 응답 + 시간
-```
-
-### 9-7. 콘솔 출력 보고 원칙
-
-통합 테스트 실행 시 콘솔에도 다음을 **빠짐없이** 출력한다:
+### 11-4. 콘솔 출력 보고 원칙
 
 1. **환경 정보**: CUDA 버전, 서비스 URL, 테스트 이미지 수, 컴포넌트 초기화 시간
-2. **문서별 단계 결과**: 각 단계의 실행 시간, 핵심 output (위 §9-5 항목), 경고/폴백 여부
-3. **실패 시**: 실패 단계, 에러 메시지, 스택 트레이스
-4. **문서별 요약**: 총 처리 시간, `P1=Xms | P2=Xms | ...` 형태의 단계별 시간
-5. **전체 요약**: `[PASS/FAIL] {doc_id} total=Xms ...` 형태의 한 줄 요약 + 총 errors/warnings 수
+2. **문서별 단계 결과**: 각 단계의 실행 시간, 핵심 output, 경고/폴백 여부
+3. **P2.5-A 정제 결과**: 제거된 박스 수, 병합된 블록 수
+4. **P3-A 분류 결과**: form_type, form_confidence
+5. **P3-B 배치 처리**: 그룹별 배치 크기, 각 배치 추론 시간
+6. **실패 시**: 실패 단계, 에러 메시지, 스택 트레이스
+7. **전체 요약**: `[PASS/FAIL] {doc_id} total=Xms P1=Xms P2=Xms P2.5A=Xms P3A=Xms P3B=Xms ...`

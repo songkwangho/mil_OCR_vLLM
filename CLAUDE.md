@@ -8,7 +8,9 @@
 ## 핵심 원칙
 
 - **폐쇄망 전용** — 외부 API 호출, 모델 다운로드 절대 금지. 모든 가중치는 `models/`에 사전 배치
-- **3단계 파이프라인** — 전처리 → VLM 통합 추론 → 후처리 (v1의 12단계에서 6단계로 단순화)
+- **3단계 파이프라인** — 전처리 → VLM 통합 추론 → 후처리 (v1의 12단계에서 8단계로 재구성)
+- **Crop-then-Infer** — PP-DocLayout bbox 크롭 이미지를 영역별로 Gemma4에 전달 (전체 페이지 입력 지양)
+- **FormClassifier 선행** — 서식 분류를 InstructionRouter보다 먼저 수행하여 도메인 맥락 기반 instruction 생성
 - **Guided Decoding** — VLM 출력을 군수 서식별 JSON Schema로 구조 보장
 - **logprobs 신뢰도** — VLM 토큰 확률 기반 필드별 정밀 신뢰도 산출
 - **오프라인 모델 로드** — `HF_HUB_OFFLINE=1`, `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True`
@@ -22,10 +24,10 @@ v1 (mil_OCR)은 T1~T12의 12개 독립 컴포넌트로 구성되어 있으나:
 - 개별 AI 모델 7개를 각각 Fine-tuning해야 하는 부담
 - 파이프라인 단계 간 데이터 변환 복잡도 높음
 
-v2는 **PP-DocLayout (레이아웃) + Gemma4 VLM (통합 추론)** 2단계 구조로 재설계하여:
+v2는 **PP-DocLayout (레이아웃) + Gemma4 VLM (통합 추론)** 구조로 재설계하여:
 - AI 모델 수: 7개 → **2개** (레이아웃 + VLM)
 - Fine-tuning 대상: 7개 → **2개**
-- 파이프라인 단순화: 12단계 → **6단계** (전처리2 + VLM1 + 후처리3)
+- PaddleOCR-VL 파이프라인 분석을 통해 **Crop-then-Infer + FormClassifier 선행 + 배치 병렬 처리** 구조로 P2~P3 구간을 고도화
 
 ---
 
@@ -42,57 +44,91 @@ v2는 **PP-DocLayout (레이아웃) + Gemma4 VLM (통합 추론)** 2단계 구�
 
 ---
 
-## 시스템 파이프라인 (v2)
+## 시스템 파이프라인 (v2 — 고도화)
 
 ```
 [Stage 1 — 전처리]
-    P1: 화질 보정 + SR       → PreprocessedImage
-    P2: 구조 분석             → LayoutResult (regions + bbox + reading_order)
-        ① 페이지 분해: Dense 페이지를 관리 가능한 영역 bbox로 분리
-        ② 읽기 순서: 영역 간 올바른 처리 순서 보장 (다단 컬럼 등)
-        ③ Task Prompt 결정: 영역 레이블 → VLM instruction 자동 선택
+    P1: 화질 보정 + SR            → PreprocessedImage
+    P2: 레이아웃 탐지              → RawLayoutResult  (PP-DocLayout 원시 탐지)
+    P2.5-A: LayoutPostProcessor   → LayoutResult     (노이즈 제거 + 블록 병합)
+        ① 미소 박스 제거 (6px 미만)
+        ② 중복 박스 제거 (IoU > 0.7)
+        ③ 인접 텍스트 블록 병합
         ↓
 [Stage 2 — VLM 통합 추론]              ┌─ [Fallback — VLM 불가 시]
-    P3: Gemma4 VLM → VLMResult         │   v1 T3~T5 (PP-OCRv5)
-        - OCR + 교정                    │   → 서식 분류 + 텍스트 인식 + 표 구조
-        - 표 구조 인식                   │   → 결과는 항상 검토 큐 적재
-        - 서식 분류                      │
-        - 특수 코드 인식                 └───────────────┐
-        - 스키마 매핑 (guided_json)                      │
-        - logprobs 신뢰도                                │
-        ↓                                                ↓
-[Stage 3 — 후처리]
-    P4: 룰 검증 + 신뢰도 보정 → ValidatedResult
+    P3-A: FormClassifier               │   v1 T3~T5 (PP-OCRv5)
+        전체 페이지 → 저해상도(140토큰) │   → 서식 분류 + 텍스트 인식 + 표 구조
+        → form_type 확정               │   → 결과는 항상 검토 큐 적재
+        ↓
+    P2.5-B: InstructionRouter          │
+        region_type + form_type        │
+        → 도메인 맥락 포함 instruction  │
+        → JSON Schema 선택             │
+        ↓
+    P2.5-C: ResolutionRouter           │
+        영역 타입별 pixel_budget 할당   │
+        (표: 1120, 수기: 560, 헤더: 140토큰)
+        ↓
+    P3-B: StructuredExtractor          │
+        bbox 크롭 이미지 + instruction │
+        → pixel_budget 기준 배치 그룹화│
+        → Gemma4 병렬 배치 호출        │
+        → logprobs 신뢰도 산출         │
+        → RepetitionGuard              │
+        ↓                             └───────────────┐
+[Stage 3 — 후처리]                                    │
+    P4: 룰 검증 + 신뢰도 보정 → ValidatedResult        │
         ├─ ✅ 통과 → P5 직렬화 → P6 DB 적재 → PipelineOutput
-        └─ ❌ 실패 (CRITICAL 오류 or LOW confidence)
-                   → 검토 큐 적재 → 담당자 UI 확인 → 수정 후 P6 재적재
+        └─ ❌ 실패 (CRITICAL 오류 or LOW confidence)   │
+                   → 검토 큐 적재 → 담당자 UI 확인     ↓
+                   → 수정 후 P6 재적재
 ```
+
+### P2~P3 구간 설계 근거 (PaddleOCR-VL 분석 기반)
+
+**Q1. Layout detection 후 bbox 크롭 이미지를 Gemma4에 보내는 게 더 정확하지 않나?**
+
+맞습니다. 이것이 Crop-then-Infer 방식의 핵심 근거입니다. 전체 페이지를 통째로 VLM에 입력하면 다단 컬럼, 표·수기·텍스트 혼재 환경에서 long-sequence 디코딩 지연과 누락이 발생합니다. PP-DocLayout이 영역을 분리한 뒤 각 bbox 크롭 이미지만 VLM에 전달하면 영역 집중도가 높아지고 오인식이 줄어듭니다. LayoutPostProcessor가 미소 박스·중복 박스를 제거하는 선행 정제 없이는 VLM이 의미 없는 조각 이미지를 받게 되므로, 정제 단계가 반드시 선행되어야 합니다.
+
+**Q2. 처리속도 문제는 배치 처리로 해결 가능하지 않나?**
+
+맞습니다. P3-B StructuredExtractor는 ResolutionRouter가 할당한 pixel_budget 기준으로 같은 해상도 그룹을 배치로 묶어 vLLM에 동시 전송합니다. 해상도가 다른 이미지가 섞이면 패딩 오버헤드가 발생하므로, 동일 pixel_budget끼리 그룹화하는 것이 vLLM 배치 처리 효율의 핵심입니다. `--max-num-seqs 128` 제약 안에서 그룹별 배치 전송으로 처리량을 최대화합니다.
+
+**Q3. 문서 분류를 먼저 해서 InstructionRouter에 전달해야 더 정확한 instruction이 나오지 않나?**
+
+맞습니다. 같은 `text` 라벨 영역이라도 서식 유형에 따라 instruction이 달라져야 합니다. P3-A FormClassifier가 전체 페이지를 저해상도로 먼저 분류하여 form_type을 확정하고, 이 결과를 InstructionRouter에 전달합니다. form_type 없이 영역별 instruction을 생성하면 도메인 맥락이 빠진 범용 instruction만 만들어집니다.
 
 ### 핵심 메커니즘
 
+- **Crop-then-Infer**: PP-DocLayout bbox → LayoutPostProcessor 정제 → 영역별 크롭 → Gemma4
+- **FormClassifier 선행**: 전체 페이지 저해상도 분류 → form_type → InstructionRouter 피드백
+- **InstructionRouter**: region_type + form_type → 도메인 맥락 포함 상세 instruction 생성
+- **ResolutionRouter**: 영역 타입별 pixel_budget 차등 할당 (표/수기 고해상도 집중)
+- **배치 병렬 처리**: pixel_budget 기준 그룹화 → vLLM 동시 전송
 - **Guided Decoding**: 군수 서식별 JSON Schema를 `guided_json`으로 vLLM에 전달
-  → VLM 출력이 항상 유효한 JSON 구조를 보장, 파싱 실패 원천 차단
-- **logprobs 신뢰도**: vLLM `logprobs` 옵션으로 출력 토큰별 로그 확률 반환
-  → 필드값 토큰의 확률을 확신도(0.0~1.0)로 환산, 수치 필드에 특히 정밀
+- **logprobs 신뢰도**: 필드별 토큰 확률 → 확신도 환산, 길이 편향 보정 포함
 - **SPOF 대비 (2단계)**:
-  - 수준 A: vLLM `/health` 헬스체크 + `restart: unless-stopped` → 자동 감지·복구
-  - 수준 B: v1 PP-OCRv5 기반 경량 fallback 서비스 → VLM 불가 시 기초 OCR 유지
-- **수동 검토 큐**: P4 검증 실패(CRITICAL/LOW confidence) 문서 → 큐 적재 → 담당자 교정 → DB 재적재
+  - 수준 A: vLLM `/health` 헬스체크 + `restart: unless-stopped`
+  - 수준 B: v1 PP-OCRv5 기반 경량 fallback 서비스
+- **수동 검토 큐**: P4 검증 실패 → 큐 적재 → 담당자 교정 → DB 재적재
 
 ### v1 → v2 컴포넌트 매핑
 
 | v1 | v2 | 비고 |
 |----|-----|------|
 | T1 화질 보정 | **P1** 화질 보정 + SR | v1에서 이관 (Real-ESRGAN 포함) |
-| T2 레이아웃 분석 | **P2** 구조 분석 | PP-DocLayout — VLM의 전처리 게이트 (분해+순서+태스크) |
-| T3 서식 분류 | **P3** VLM | instruction으로 분류 |
-| T4 수기 인식 | **P3** VLM | 영역별 OCR |
-| T5 구조 인식 | **P3** VLM | 표 HTML 출력 |
-| T6 특수 코드 | **P3** VLM | 코드 패턴 인식 |
-| T7 언어모델 교정 | **P3** VLM | 문맥 기반 교정 |
+| T2 레이아웃 분석 | **P2** 레이아웃 탐지 | PP-DocLayout 원시 탐지 (정제 전) |
+| — | **P2.5-A** LayoutPostProcessor | 신규 — 미소/중복 박스 제거, 블록 병합 |
+| T3 서식 분류 | **P3-A** FormClassifier | 전체 페이지 저해상도 VLM 호출로 분리 |
+| — | **P2.5-B** InstructionRouter | 신규 — form_type 반영 도메인 instruction |
+| — | **P2.5-C** ResolutionRouter | 신규 — 영역별 pixel_budget 할당 |
+| T4 수기 인식 | **P3-B** StructuredExtractor | bbox 크롭 + 배치 병렬 VLM 호출 |
+| T5 구조 인식 | **P3-B** StructuredExtractor | 표 crop 고해상도 처리 |
+| T6 특수 코드 | **P3-B** StructuredExtractor | 코드 패턴 instruction 포함 |
+| T7 언어모델 교정 | **P3-B** StructuredExtractor | 문맥 기반 교정 |
 | T8 데이터 검증 | **P4** 룰 검증 | 산술/날짜/코드 교차검증 |
-| T9 신뢰도 스코어링 | **P3** VLM (logprobs) | VLM 토큰 확률 → 필드 신뢰도 |
-| T10 스키마 매핑 | **P3** VLM (guided_json) | JSON Schema로 구조화 추출 |
+| T9 신뢰도 스코어링 | **P3-B** (logprobs) | 토큰 확률 → 필드 신뢰도, 길이 편향 보정 |
+| T10 스키마 매핑 | **P3-B** (guided_json) | JSON Schema로 구조화 추출 |
 | T11 직렬화 | **P5** 직렬화 | v1에서 이관 |
 | T12 DB 적재 | **P6** DB 적재 | v1에서 이관 |
 
@@ -102,20 +138,30 @@ v2는 **PP-DocLayout (레이아웃) + Gemma4 VLM (통합 추론)** 2단계 구�
 
 | P# | 컴포넌트 | 소스 파일 | AI 모델 / 기술 | 상태 |
 |----|----------|----------|---------------|------|
-| — | 공용 인터페이스 | `src/interfaces/` | — | ✅ 완료 (14 Enum + 15 dataclass) |
-| — | 오케스트레이터 | `src/pipeline/orchestrator.py` | — | ✅ 완료 (6단계 재작성) |
+| — | 공용 인터페이스 | `src/interfaces/` | — | ✅ 완료 (14 Enum + 17 dataclass) |
+| — | 오케스트레이터 | `src/pipeline/orchestrator.py` | — | ✅ 완료 (P3-A/B 분리 반영 재작성 완료) |
 | P1 | 화질 보정 + SR | `src/preprocess/preprocessor.py` | Real-ESRGAN (LOW DPI) | ✅ 완료 (v1 이관) |
-| P2 | 구조 분석 | `src/preprocess/layout_analyzer.py` | PP-DocLayout_plus-L / PP-DocLayoutV3 선택 (분해+순서+태스크) | ✅ 완료 (v1 수정 이관 + V3 지원) |
-| P3 | VLM 통합 추론 | `src/vlm/gemma4_engine.py` | Gemma4 26B-A4B + vLLM (guided_json + logprobs) | ✅ 완료 |
-| P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ❌ (룰 엔진) | ✅ 완료 (logprobs + 룰 병합) |
+| P2 | 레이아웃 탐지 | `src/preprocess/layout_analyzer.py` | PP-DocLayout_plus-L / PP-DocLayoutV3 | ✅ 완료 (원시 탐지) |
+| P2.5-A | LayoutPostProcessor | `src/preprocess/layout_postprocessor.py` | — (룰 기반) | ✅ 완료 (미소/중복 박스 제거, 블록 병합) |
+| P3-A | FormClassifier | `src/vlm/form_classifier.py` | Gemma4 (저해상도 140토큰) | ✅ 완료 (서식 분류 + logprobs 신뢰도) |
+| P2.5-B | InstructionRouter | `src/vlm/instruction_router.py` | — (YAML 매핑) | ✅ 완료 (form_type 반영 도메인 instruction) |
+| P2.5-C | ResolutionRouter | `src/vlm/resolution_router.py` | — (룰 기반) | ✅ 완료 (pixel_budget 할당 + 배치 그룹화) |
+| P3-B | StructuredExtractor | `src/vlm/structured_extractor.py` | Gemma4 + vLLM (배치 병렬) | ✅ 완료 (guided_json + logprobs 신뢰도) |
+| P3-B | RepetitionGuard | `src/vlm/repetition_guard.py` | — | 🟡 선택 구현 (운영 후 판단) |
+| — | VLM 공용 클라이언트 | `src/vlm/vlm_client.py` | — | ✅ 완료 (이미지 인코딩/크롭, logprobs 파싱, 도메인 코드 감지) |
+| P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ❌ (룰 엔진) | ✅ 완료 (VLM/Fallback 경로별 임계값 분리) |
 | P5 | 직렬화 | `src/postprocess/serializer.py` | ❌ | ✅ 완료 (v1 이관) |
 | P6 | DB 적재 | `src/postprocess/db_loader.py` | ❌ | ✅ 완료 (v1 이관 + v2 스키마) |
-| — | **수동 검토 큐** | `src/postprocess/review_queue.py` | ❌ (SQLite 큐) | ✅ 완료 |
-| — | **Fallback 서비스** | `src/fallback/ocr_fallback_service.py` | v1 PP-OCRv5 T3~T5 | ✅ 완료 (v1 래핑 + v2 변환) |
-| — | **VLM 헬스 모니터** | `src/pipeline/health_monitor.py` | ❌ (httpx polling) | ✅ 완료 |
-| — | **Fallback 전환 정책** | `src/pipeline/fallback_policy.py` | ❌ | ✅ 완료 |
-| — | **Layout 추론 서비스** | `src/preprocess/layout_server.py` + `layout_http_client.py` | PP-DocLayout (PaddlePaddle) | ✅ 완료 (CUDA 격리 컨테이너) |
-| — | **Docker 구성** | `docker-compose.yml` + `docker/Dockerfile.*` | — | ✅ 완료 (5 Dockerfile) |
+| — | 수동 검토 큐 | `src/postprocess/review_queue.py` | ❌ (SQLite 큐) | ✅ 완료 |
+| — | Fallback 서비스 | `src/fallback/ocr_fallback_service.py` | v1 PP-OCRv5 T3~T5 | ✅ 완료 |
+| — | VLM 헬스 모니터 | `src/pipeline/health_monitor.py` | ❌ (httpx polling) | ✅ 완료 |
+| — | Fallback 전환 정책 | `src/pipeline/fallback_policy.py` | ❌ | ✅ 완료 |
+| — | Layout 추론 서비스 | `src/preprocess/layout_server.py` + `layout_http_client.py` | PP-DocLayout | ✅ 완료 |
+| — | 스키마 레지스트리 | `src/domain/schema_registry.py` | ❌ | ✅ 완료 (버전 관리 지원) |
+| — | Docker 구성 | `docker-compose.yml` + `docker/Dockerfile.*` | — | ✅ 완료 (5 Dockerfile) |
+
+> **기존 `src/vlm/instruction_builder.py`**: InstructionRouter 위임 래퍼로 유지 (하위 호환). TASK_PROMPTS 딕셔너리를 layout_analyzer.py와 types.py에서 제거하고 InstructionRouter로 일원화 완료.
+> **기존 `src/vlm/gemma4_engine.py`**: FormClassifier(P3-A)와 StructuredExtractor(P3-B)로 분리 완료. Legacy 하위 호환용으로 유지.
 
 ---
 
@@ -132,8 +178,9 @@ mil_OCR_v2/
 ├── src/
 │   ├── interfaces/              ← 공용 타입, Enum
 │   ├── pipeline/                ← 오케스트레이터
-│   ├── preprocess/              ← P1 화질 보정, P2 레이아웃
-│   ├── vlm/                     ← P3 Gemma4 VLM 엔진
+│   ├── preprocess/              ← P1 화질 보정, P2 레이아웃, P2.5-A LayoutPostProcessor
+│   ├── vlm/                     ← P3-A FormClassifier, P2.5-B InstructionRouter,
+│   │                               P2.5-C ResolutionRouter, P3-B StructuredExtractor
 │   ├── postprocess/             ← P4 룰 검증, P5 직렬화, P6 DB 적재, 검토 큐
 │   ├── fallback/                ← 수준 B 경량 fallback (v1 T3~T5 래핑)
 │   └── domain/                  ← 군수 도메인 사전/스키마
@@ -144,7 +191,7 @@ mil_OCR_v2/
 │   └── fallback/                ← PP-OCRv5 + DiT + SLANeXt (수준 B)
 ├── data/                        ← 원본/학습/테스트 데이터
 ├── docker/                      ← Dockerfile (vllm, pipeline, fallback, train)
-├── docker-compose.yml           ← Docker 서비스 (vllm-server, pipeline, fallback, train)
+├── docker-compose.yml           ← Docker 서비스
 ├── scripts/                     ← 배치/테스트 스크립트
 ├── training/                    ← Fine-tuning 스크립트
 ├── configs/                     ← 파이프라인 설정
@@ -157,82 +204,50 @@ mil_OCR_v2/
 
 > 시작 기준: 2026-04 (현재)
 
-### Phase 1 (1~2개월, 04~05월) — 핵심 파이프라인 구축
+### Phase 1 잔여 (04월 말) — 파이프라인 구조 고도화
 
-**1-A. v1 이관 + 인터페이스 정의** (이관 우선순위: interfaces → preprocess → postprocess)
-- [x] `src/interfaces/` 타입 재설계 (v1 축소 + VLMResult/FieldValue/ValidatedResult 신규) ✅
-- [x] P1 화질 보정 + SR (v1 T1 **그대로 이관**, import 경로 변경) ✅
-- [x] P1 SR (v1 sr_enhancer.py **그대로 이관**) ✅
-- [x] P2 구조 분석 (v1 T2 **수정 이관** — reading_order 강화, TASK_PROMPTS 추가) ✅
-- [x] Docker 통합 환경 구축 (PaddlePaddle + PyTorch + vLLM) ✅
+**1-D. P2~P3 구간 신규 컴포넌트 구현** (최우선)
+- [ ] PP-DocLayout 원본 검출률 측정 (군수 서식 샘플 50장) — Fine-tuning 목표 수량 조정 근거
+- [x] `src/preprocess/layout_postprocessor.py` — LayoutPostProcessor (미소/중복 박스 제거, 블록 병합)
+- [x] `src/vlm/form_classifier.py` — FormClassifier P3-A (전체 페이지 저해상도 서식 분류)
+- [x] `src/vlm/instruction_router.py` — InstructionRouter (form_type 반영 도메인 instruction 생성)
+- [x] `src/vlm/resolution_router.py` — ResolutionRouter (영역별 pixel_budget 할당)
+- [x] `src/vlm/structured_extractor.py` — StructuredExtractor P3-B (bbox 크롭 + 배치 병렬 VLM 호출)
+- [x] `src/vlm/vlm_client.py` — VLM 공용 클라이언트 (이미지 인코딩, logprobs 파싱, 도메인 코드 감지)
+- [x] `src/interfaces/types.py` 갱신 — RawLayoutResult, InstructionSpec, CroppedRegion 추가
+- [x] P4 validator.py — 처리 경로별 신뢰도 임계값 분리 (VLM vs Fallback)
+- [x] 오케스트레이터 재작성 — P3-A → InstructionRouter → ResolutionRouter → P3-B 흐름 반영
 
-**1-B. Gemma4 VLM 엔진 구현** (신규)
-- [x] Gemma4 26B-A4B 모델 다운로드 + 로컬 배치 ✅ (`models/gemma4/gemma-4-26b-a4b-it/`, ~48GB BF16)
-- [x] vLLM 서빙 설정 (오프라인 모드, guided_json, logprobs) ✅ (docker-compose + Dockerfile)
-- [x] vLLM 서버 로컬 기동 검증 ✅ (v0.19.0, GPU #2 H100 80GB, `--max-num-seqs 128`)
-- [x] `src/vlm/gemma4_engine.py` — vLLM API 호출, 이미지 + instruction 전달 ✅
-- [x] `src/vlm/instruction_builder.py` — P2 레이블 → instruction 자동 생성 ✅
-- [x] `src/vlm/logprobs_scorer.py` — logprobs → 필드별 신뢰도 환산 ✅
-- [x] `src/domain/schemas/*.json` — 군수 서식별 JSON Schema 6종 (guided_json용) ✅
-- [x] P2 → P3 연결 (영역별 crop + reading_order + task prompt) ✅ (gemma4_engine.process)
-- [ ] P1 → P2 → P3 통합 테스트 (VLM 서버 가동 후) — 테스트 스크립트 작성 완료 (`tests/test_integration_pipeline.py`)
-
-**1-C. 후처리 이관 + 재작성**
-- [x] P4 룰 검증 + 신뢰도 보정 (v1 T9 **대폭 수정** — logprobs 기반 + T8 룰 병합) ✅
-- [x] P4 → 검토 큐 적재 로직 (`src/postprocess/review_queue.py` — CRITICAL/LOW confidence 판정) ✅
-- [x] P5 직렬화 (v1 T11 **이관** — ValidatedResult 입력) ✅
-- [x] P6 DB ��재 (v1 T12 **이관** + DB 스키마 v2 조정: processing_path, review_queue_id) ✅
-- [x] 오케스트레이터 **재작성** (12단계 → 6단계, VLM/Fallback/검토큐 분기) ✅
-- [x] VLM 헬스 모니터 구현 (`src/pipeline/health_monitor.py` — 수준 A) ✅
-- [x] Fallback 서비스 구현 (`src/fallback/ocr_fallback_service.py` — v1 T3~T5 래핑 + v2 인터페이스 어댑터) ✅
-- [x] Fallback 전환 정책 (`FallbackPolicy` — vlm/fallback/review_queue 분기) ✅
-- [ ] P1���P6 전체 파이프라인 통합 테스트 (VLM 서버 가동 후)
+**1-E. 통합 테스트**
+- [ ] P1 → P2 → P2.5-A → P3-A → P2.5-B → P2.5-C → P3-B → P4 end-to-end 테스트
+- [ ] 군수 서식 샘플별 단계 출력 비교 (기존 P3 단일 호출 대비 정확도 측정)
 
 ### Phase 2 (3~4개월, 06~07월) — Fine-tuning + 품질 개선
 
-**2-A. PP-DocLayout Fine-tuning + 교정 데이터 축적 (병행)**
-- [ ] 학습 데이터 수집 (군수 서식 영역 어노테이션 2,000~5,000장)
-- [ ] PP-DocLayout Fine-tuning 실행
-- [ ] P2 검출 품질 검증
-- [x] 교정 데이터 → 학습 데이터 축적 파이프라인 구축 ✅
-  - [x] `review_queue.export_training_pairs()` — SFT/DPO 형식 export 메서드 ✅
-  - [x] `scripts/export_training_data.py` — 배치 변환 스크립트 (JSONL 출력) ✅
-- [ ] 검토 큐 운영 → 교정 데이터 최소 수량 확보 (SFT 착수 전 마일스톤: 유형당 50건+)
+**2-A. 검토 큐 UI MVP + 교정 데이터 축적 (병행 Track)**
 
-**2-B. Gemma4 VLM Fine-tuning — 3단계** (2-A 교정 데이터 축적 후)
-- [ ] **1단계 SFT** (필수): 서식 이미지 + 정답 JSON, LoRA, 유형당 200~500장
-  - 학습 데이터 출처: ① 수동 어노테이션 + ② 검토 큐 교정 데이터 (`scripts/export_training_data.py`)
+> 검토 큐 UI는 Phase 3에서 Phase 2-A로 앞당겨 편입. SFT 학습 데이터 품질 확보를 위해 Fine-tuning 착수 전에 교정 데이터 파이프라인이 활성화되어야 함.
+
+- [ ] 검토 큐 UI MVP 구현 (큐 목록 + 개별 검토 + 필드 수정 + 승인/반려)
+- [ ] 교정 데이터 JSONL export 파이프라인 활성화
+- [ ] PP-DocLayout 어노테이션 (군수 서식 영역 2,000~5,000장)
+- [ ] PP-DocLayout Fine-tuning 실행 + P2 검출 품질 검증
+- [ ] AWQ 4-bit 서빙 가능성 사전 검증 (Phase 3 리스크 분산)
+
+**2-B. Gemma4 VLM Fine-tuning — 3단계** (교정 데이터 유형당 100건+ 확보 후)
+- [ ] **1단계 SFT** (필수): LoRA, 유형당 300장 이상 목표
 - [ ] 1단계 SFT 후 전체 파이프라인 성능 벤치마크
-- [ ] **2단계 수기 강화** (선택): 수기 인식 오류율 높을 시 — AI Hub 손글씨 + 군수 수기 crop
-- [ ] **3단계 DPO** (선택): 규칙 위반 빈번 시 — P4 검증 실패 출력을 Rejected로 자동 축적
-  - DPO 데이터 출처: `scripts/export_training_data.py --format dpo`
+- [ ] **2단계 수기 강화** (선택): 수기 오류율 높을 시
+- [ ] **3단계 DPO** (선택): 시스템 운영 3개월 후 자동 축적 데이터 기반
 
 ### Phase 3 (5~6개월, 08~09월) — 최적화 + 배포
 
-- [ ] 추론 속도 최적화 (vLLM 배치 튜닝)
-- [ ] **Gemma4 양자화 실험** — BF16(현재) 대비 품질·속도·VRAM 비교
-  - [ ] AWQ 4-bit (`cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit`) — 어텐션만 INT4, MoE 전문가 BF16 유지, ~16GB VRAM, vLLM v0.19.0 호환
-  - [ ] FP8 Dynamic (`RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic`) — 가중치+활성화 FP8, ~29GB VRAM, 품질 손실 ~0.3%
-    - 선행 조건: `vllm-project/vllm#39049` (FP8 gibberish 버그) Close 확인
-    - 확인 트리거: Phase 3 착수 시점(08월) + vLLM 마이너 릴리스마다
-    - 판단 기준: issue Close + 릴리스 노트 반영 + 로컬 검증 통과
-    - 미해소 시: AWQ 4-bit 우선 적용, FP8은 다음 분기로 연기
-  - [ ] 양자화별 OCR 품질 벤치마크 (군수 서식 테스트셋 기준 필드 정확도, 신뢰도 분포 비교)
-- [ ] 프론트엔드 UI 구현
-- [ ] **수동 검토 큐 UI** (필수 — `docs/FRONTEND.md` §2-2 참조)
-  - [ ] 큐 목록 화면 (우선순위 정렬, 필터, 대시보드)
-  - [ ] 개별 검토 화면 (원본 이미지 + 추출 결과 비교, 필드 수정)
-  - [ ] 검토 API 엔드포인트 (FastAPI)
-  - [ ] 교정 데이터 → Fine-tuning 학습 데이터 자동 축적
-- [ ] **서비스 통신 비동기 전환** (상세: `docs/BACKEND.md` §7-2)
-  - [ ] 폐쇄망 적합 메시지 브로커 선정 (Redis 로컬 / SQLite-backed 큐)
-  - [ ] pipeline → fallback: Redis Streams 비동기 전환
-  - [ ] 검토 큐 알림: Redis Pub/Sub → 프론트엔드 SSE
-- [ ] **서식 개정 대응 절차** (상세: `docs/AI_INFERENCE.md` §7)
-  - [ ] 스키마 버전 업 → VLM 재학습 트리거 조건 정의
-  - [ ] 구버전 DB 레코드 마이그레이션 정책
-- [ ] Docker 프로덕션 설정
-- [ ] 보안 검토 + 배포
+- [ ] RepetitionGuard 도입 (운영 중 반복 생성 문제 관측 시)
+- [ ] Gemma4 양자화 실험 — AWQ 4-bit 우선, FP8은 vllm#39049 해소 후
+- [ ] 검토 큐 UI 고도화 (대시보드, 통계, bbox 오버레이)
+- [ ] 비동기 메시지 기반 통신 전환 (Redis Streams)
+- [ ] 도메인 스키마 버전 관리 도입 (Schema Registry)
+- [ ] Docker 프로덕션 설정 + 보안 검토 + 배포
 
 ---
 
@@ -251,7 +266,7 @@ mil_OCR_v2/
 |------|-----|------|------|
 | Gemma4 26B-A4B 추론 (BF16) | NVIDIA GPU | **~48GB** | 현재 운영 중 (H100 80GB) |
 | Gemma4 26B-A4B 추론 (AWQ 4-bit) | NVIDIA GPU | **~16GB** | Phase 3 양자화 실험 후 전환 검토 |
-| Gemma4 26B-A4B 추론 (FP8 Dynamic) | NVIDIA GPU | **~27GB** | Phase 3 양자화 실험 후 전환 검토 |
+| Gemma4 26B-A4B 추론 (FP8 Dynamic) | NVIDIA GPU | **~27GB** | vllm#39049 해소 후 실험 |
 | PP-DocLayout 추론 | NVIDIA GPU | 4GB | PaddlePaddle |
 | Real-ESRGAN SR | NVIDIA GPU | 2GB | 타일 기반 처리 |
 | Gemma4 Fine-tuning | NVIDIA GPU | 24GB+ | LoRA 시 16GB |

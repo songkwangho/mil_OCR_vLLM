@@ -51,6 +51,10 @@ __all__ = [
     # P2 구조 분석
     "LayoutRegion",
     "LayoutResult",
+    "RawLayoutResult",
+    # P2.5 중간 처리
+    "InstructionSpec",
+    "CroppedRegion",
     # P3 VLM 통합 추론
     "FieldValue",
     "RecognizedTable",
@@ -154,10 +158,10 @@ class LayoutRegion:
 
 
 @dataclass
-class LayoutResult:
-    """P2 출력 — 구조 분석 결과.
+class RawLayoutResult:
+    """P2 출력 — PP-DocLayout 원시 탐지 결과 (후처리 전).
 
-    P2 → P3 (VLM)
+    P2 → P2.5-A (LayoutPostProcessor)
     reading_order 순서대로 영역별 crop + task prompt를 VLM에 전달.
     """
 
@@ -168,6 +172,52 @@ class LayoutResult:
     reading_order: list[int]          # regions 인덱스 순서 (다단 컬럼 대응)
     analysis_mode: AnalysisMode = AnalysisMode.HEURISTIC
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LayoutResult:
+    """P2.5-A 출력 — 후처리 완료 구조 분석 결과.
+
+    P2.5-A → P3 (VLM)
+    LayoutPostProcessor가 미소/중복 박스 제거 및 블록 병합을 수행한 결과.
+    reading_order 순서대로 영역별 crop + task prompt를 VLM에 전달.
+    """
+
+    doc_id: str
+    page_width: int
+    page_height: int
+    regions: list[LayoutRegion]
+    reading_order: list[int]          # regions 인덱스 순서 (다단 컬럼 대응)
+    analysis_mode: AnalysisMode = AnalysisMode.HEURISTIC
+    removed_count: int = 0            # 제거된 박스 수
+    merged_count: int = 0             # 병합된 블록 수
+    warnings: list[str] = field(default_factory=list)
+
+
+# ═══════════════════════════════════════════════
+#  P2.5 — InstructionRouter / ResolutionRouter
+# ═══════════════════════════════════════════════
+
+@dataclass
+class InstructionSpec:
+    """InstructionRouter가 생성하는 영역별 VLM 호출 명세."""
+    region_id: str
+    region_type: RegionType
+    form_type: Optional[FormType] = None
+    system_prompt: str = ""
+    user_instruction: str = ""
+    json_schema: Optional[dict] = None
+    pixel_budget: int = 280
+
+
+@dataclass
+class CroppedRegion:
+    """ResolutionRouter가 생성하는 크롭 이미지 + 메타데이터."""
+    region_id: str
+    region_type: RegionType
+    cropped_image: np.ndarray
+    pixel_budget: int
+    instruction_spec: InstructionSpec
 
 
 # ═══════════════════════════════════════════════
@@ -188,6 +238,7 @@ class FieldValue:
     confidence: float                 # logprobs 기반 기하평균 신뢰도
     token_logprobs: list[float]       # 해당 필드 토큰들의 개별 logprob
     is_flagged: bool = False          # 신뢰도 < 필드 유형별 임계값
+    region_id: Optional[str] = None
 
 
 @dataclass
@@ -226,8 +277,9 @@ class VLMResult:
     fields: list[FieldValue]          # guided_json 추출 키-값 쌍 + logprobs 신뢰도
     tables: list[RecognizedTable]
     domain_codes: list[DomainCode]
-    raw_json: str                     # VLM 원본 JSON 응답
-    processing_time_ms: float
+    raw_json: str = ""                # VLM 원본 JSON 응답
+    processing_time_ms: float = 0.0
+    processing_path: ProcessingPath = ProcessingPath.VLM
     warnings: list[str] = field(default_factory=list)
 
 

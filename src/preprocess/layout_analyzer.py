@@ -40,6 +40,7 @@ from src.interfaces.types import (
     LayoutRegion,
     LayoutResult,
     PreprocessedImage,
+    RawLayoutResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -925,14 +926,14 @@ class P2LayoutAnalyzer:
                 remapped.append(i)
         return remapped
 
-    def analyze(self, preprocessed: PreprocessedImage) -> LayoutResult:
-        """PreprocessedImage → LayoutResult 전체 파이프라인.
+    def analyze(self, preprocessed: PreprocessedImage) -> RawLayoutResult:
+        """P2 출력 — 원시 레이아웃 탐지 결과 (LayoutPostProcessor 정제 전)
 
         Args:
             preprocessed: P1 출력 (image_array: RGB, binary_array: 이진화)
 
         Returns:
-            LayoutResult: 검출된 영역 + 읽기 순서
+            RawLayoutResult: 검출된 영역 + 읽기 순서
         """
         notes: list[str] = []
         warnings: list[str] = []
@@ -1018,7 +1019,7 @@ class P2LayoutAnalyzer:
             reading_order,
         )
 
-        return LayoutResult(
+        return RawLayoutResult(
             doc_id=preprocessed.doc_id,
             page_width=w,
             page_height=h,

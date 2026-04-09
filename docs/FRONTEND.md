@@ -13,81 +13,91 @@
 
 ---
 
-## 2. 향후 계획 (Phase 3)
+## 2. 향후 계획
 
-### 2-1. 문서 처리 UI
+### 2-1. 검토 큐 UI MVP (Phase 2-A — 최우선)
+
+> Fine-tuning 착수 전 교정 데이터 확보를 위해 Phase 3에서 Phase 2-A로 앞당김.
+> 데이터 모델 및 적재 조건: `docs/BACKEND.md` §4-3 참조.
+
+**MVP 구현 범위** (Phase 2-A):
+
+| 기능 | MVP | Phase 3 고도화 |
+|------|:---:|:--------------:|
+| 큐 목록 조회 (우선순위 정렬) | ✅ | |
+| 개별 검토 화면 (이미지 + 필드 수정) | ✅ | |
+| 승인/반려 액션 | ✅ | |
+| 교정 데이터 JSONL export | ✅ | |
+| 대시보드/통계 | | ✅ |
+| 담당자 배정 관리 | | ✅ |
+| P2 레이아웃 bbox 오버레이 | | ✅ |
+| P2.5-A 정제 결과 시각화 | | ✅ |
+
+**적재 조건 (P4 판정)**:
+- CRITICAL `ValidationError` 발생
+- LOW confidence 필드 존재 (경로별 임계값 미달 — `docs/BACKEND.md` §6-2)
+- Fallback 경로 처리 문서 (`processing_path == "fallback"` — 항상)
+- VLM + Fallback 모두 불가 (원본 이미지만 적재)
+
+**큐 목록 화면**:
+- 우선순위: 🔴 긴급 (CRITICAL / 완전 장애) > 🟡 일반 (LOW confidence / fallback)
+- 컬럼: 큐 ID, 문서 ID, 적재 시각, 우선순위, 사유, 처리 경로(vlm/fallback), 상태
+- 필터: 상태, 우선순위, 사유, 처리 경로, 날짜 범위
+
+**개별 검토 화면**:
+- **좌측**: 원본 이미지 뷰어
+- **우측**: 추출 결과 편집 패널
+  - 필드별 값 + 신뢰도 표시 (LOW confidence 🟡 강조)
+  - CRITICAL 오류 🔴 인라인 표시
+  - form_type + schema_id 표시 (서식 분류 결과 확인)
+  - 담당자 직접 수정 (JSONPath 기반 중첩 필드 지원)
+- **하단**: 승인 / 반려 / 메모
+
+**처리 흐름**:
+```
+큐 목록 → 문서 선택 → 검토 화면 (status: pending → in_review)
+    → 원본 이미지 + 자동 추출 결과 비교
+    → 오류 필드 수정 (corrected_fields: JSONPath 형식)
+    → [승인] → P5 직렬화 → P6 DB 적재 (status: approved)
+    → 교정 데이터 자동 export (SFT/DPO/FormClassifier 형식)
+```
+
+**API 엔드포인트** (FastAPI MVP):
+| Method | Path | 설명 |
+|--------|------|------|
+| GET | `/api/review-queue` | 큐 목록 조회 |
+| GET | `/api/review-queue/{queue_id}` | 개별 항목 상세 |
+| PATCH | `/api/review-queue/{queue_id}` | 상태 변경 + 필드 수정 |
+| GET | `/api/review-queue/{queue_id}/image` | 원본 이미지 반환 |
+
+### 2-2. 문서 처리 UI (Phase 3)
 
 - 문서 이미지 업로드 (단일 / 배치)
 - 실시간 파이프라인 진행 상태 표시
 - 단계별 결과 시각화:
   - P1: 전처리 전/후 이미지 비교, SR 적용 여부
-  - P2: 레이아웃 영역 bbox 오버레이
-  - P3: VLM OCR 결과 텍스트 오버레이, 표 구조 렌더링
+  - P2: 레이아웃 원시 탐지 bbox 오버레이
+  - P2.5-A: 정제 후 bbox (제거/병합 결과 비교)
+  - P3-A: 서식 분류 결과 (form_type + confidence)
+  - P3-B: VLM OCR 결과 텍스트 오버레이, 표 구조 렌더링
   - P4: 신뢰도 히트맵, 검증 오류 강조
-  - P5: 추출된 키-값 쌍 테이블
 
-### 2-2. 수동 검토 큐 (필수 — Phase 3 반드시 포함)
+### 2-3. 검토 큐 UI 고도화 (Phase 3)
 
-> 데이터 모델 및 적재 조건은 `docs/BACKEND.md` §3-3 참조.
-
-**적재 조건 (P4 판정)**:
-- CRITICAL `ValidationError` 발생 (산술 불일치, 코드 형식 오류 등)
-- LOW confidence 필드 존재 (필드 유형별 임계값 미달 — `docs/BACKEND.md` §5-2)
-- Fallback 경로 처리 문서 (`status == "partial"` — 항상 검토 대상)
-- VLM + Fallback 모두 불가 (원본 이미지만 적재)
-
-**큐 목록 화면**:
-- 우선순위별 정렬: 🔴 긴급 (CRITICAL / 완전 장애) > 🟡 일반 (LOW confidence / fallback)
-- 컬럼: 큐 ID, 문서 ID, 적재 시각, 우선순위, 사유, 상태, 담당자
-- 필터: 상태(대기/검토 중/완료), 우선순위, 사유, 날짜 범위
-- 대시보드: 대기 건수, 긴급 건수, 평균 대기 시간
-
-**개별 검토 화면**:
-- **좌측**: 원본 이미지 뷰어 (줌, 패닝, P2 레이아웃 bbox 오버레이)
-- **우측**: 추출 결과 편집 패널
-  - 필드별 값 + 신뢰도 표시 (LOW confidence 필드 🟡 강조)
-  - CRITICAL 오류 메시지 🔴 인라인 표시
-  - 필드 클릭 시 원본 이미지의 해당 영역 하이라이트
-  - 담당자 직접 수정 가능 (텍스트 인풋)
-- **하단**: 검토 액션
-  - `승인` → 수정된 값으로 P5 직렬화 → P6 DB 적재
-  - `반려` → 재스캔 요청 또는 폐기 사유 입력
-  - `메모` → 검토자 코멘트 저장
-
-**처리 흐름 (UI)**:
-```
-큐 목록 → 문서 선택 → 검토 화면 진입 (status: pending → in_review)
-    → 원본 이미지 + 자동 추출 결과 비교
-    → 담당자가 오류 필드 수정
-    → [승인] 클릭 → P5 → P6 DB 적재 (status: approved)
-    → 교정 데이터(원본 → 수정) 자동 축적 → VLM Fine-tuning 학습 데이터
-```
-
-**API 엔드포인트** (FastAPI):
-| Method | Path | 설명 |
-|--------|------|------|
-| GET | `/api/review-queue` | 큐 목록 조회 (필터/페이지네이션) |
-| GET | `/api/review-queue/{queue_id}` | 개별 항목 상세 |
-| PATCH | `/api/review-queue/{queue_id}` | 상태 변경 + 필드 수정 |
-| GET | `/api/review-queue/stats` | 큐 통계 |
-| GET | `/api/review-queue/{queue_id}/image` | 원본 이미지 반환 |
-
-### 2-3. 학습 데이터 어노테이션
-
-- PPOCRLabel 연동 또는 자체 어노테이션 도구
-- 레이아웃 영역 bbox 수정
-- OCR 정답 텍스트 입력
-- 표 구조 정답 HTML 편집
+- 대시보드: 대기 건수, 긴급 건수, 평균 대기 시간, 처리 경로별 분포
+- P2 레이아웃 bbox 오버레이 (클릭 시 해당 영역 하이라이트)
+- P2.5-A 정제 결과 시각화 (제거된 박스, 병합된 블록 표시)
+- 담당자 배정 관리
 
 ### 2-4. 기술 스택 (후보)
 
 - FastAPI (백엔드 API 서버)
 - React 또는 Vue.js (프론트엔드)
-- WebSocket (실시간 진행 상태)
+- WebSocket / SSE (실시간 진행 상태, 검토 큐 알림)
 
 ---
 
 ## 3. 관련 출력 형식
 
-최종 출력은 `PipelineOutput`으로 JSON / XML / CSV 형태입니다.
-상세 스키마는 `docs/BACKEND.md` §2 참조.
+최종 출력은 `PipelineOutput`으로 JSON / XML / CSV 형태.
+상세 스키마: `docs/BACKEND.md` §2 참조.

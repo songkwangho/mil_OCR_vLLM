@@ -1,13 +1,14 @@
 """파이프라인 오케스트레이터
 군수 OCR 시스템 v2
 
-P1~P6 전체 파이프라인을 6단계로 조율합니다.
-v1(12단계)에서 재작성.
+P1~P6 전체 파이프라인을 8단계(고도화)로 조율합니다.
 
-처리 경로:
-  주 경로:     P1 → P2 → P3(VLM) → P4 → P5 → P6
-  Fallback:    P1 → P2 → Fallback(T3~T5) → P4 → 검토 큐
-  완전 장애:   원본 이미지 + 메타데이터 → 검토 큐
+처리 경로 (주 경로):
+  P1 → P2 → P2.5-A → P3-A → P2.5-B → P2.5-C → P3-B → P4 → P5 → P6
+Fallback:
+  P1 → P2 → P2.5-A → Fallback(T3~T5) → P4 → 검토 큐
+완전 장애:
+  원본 이미지 + 메타데이터 → 검토 큐
 
 사용법:
     pipeline = PipelineOrchestrator(PipelineConfig(
@@ -34,6 +35,7 @@ from src.interfaces.types import (
     LayoutResult,
     PipelineOutput,
     PreprocessedImage,
+    RawLayoutResult,
     ValidatedResult,
     VLMResult,
 )
@@ -101,8 +103,11 @@ class PipelineResult:
 
     # 단계별 출력
     p1_result: Optional[PreprocessedImage] = None
-    p2_result: Optional[LayoutResult] = None
-    p3_result: Optional[VLMResult] = None
+    p2_raw_result: Optional[RawLayoutResult] = None  # P2 원시
+    p2_result: Optional[LayoutResult] = None          # P2.5-A 정제 후
+    p3a_form_type: Optional[str] = None               # P3-A 서식 분류
+    p3a_form_confidence: float = 0.0
+    p3_result: Optional[VLMResult] = None              # P3-B 추출 결과
     p4_result: Optional[ValidatedResult] = None
     output: Optional[PipelineOutput] = None
 
@@ -161,12 +166,58 @@ class PipelineOrchestrator:
                         self.cfg.layout_model_name)
         return self._components["p2"]
 
-    def _get_p3(self):
+    def _get_p2_5a(self):
+        """P2.5-A LayoutPostProcessor."""
+        if "p2_5a" not in self._components:
+            from src.preprocess.layout_postprocessor import LayoutPostProcessor
+            self._components["p2_5a"] = LayoutPostProcessor()
+            logger.info("오케스트레이터: P2.5-A 초기화 완료")
+        return self._components["p2_5a"]
+
+    def _get_p3a(self):
+        """P3-A FormClassifier."""
+        if "p3a" not in self._components:
+            from src.vlm.form_classifier import FormClassifier, FormClassifierConfig
+            config = FormClassifierConfig(vllm_base_url=self.cfg.vllm_base_url)
+            self._components["p3a"] = FormClassifier(config)
+            logger.info("오케스트레이터: P3-A 초기화 완료")
+        return self._components["p3a"]
+
+    def _get_p2_5b(self):
+        """P2.5-B InstructionRouter."""
+        if "p2_5b" not in self._components:
+            from src.vlm.instruction_router import InstructionRouter
+            self._components["p2_5b"] = InstructionRouter()
+            logger.info("오케스트레이터: P2.5-B 초기화 완료")
+        return self._components["p2_5b"]
+
+    def _get_p2_5c(self):
+        """P2.5-C ResolutionRouter."""
+        if "p2_5c" not in self._components:
+            from src.vlm.resolution_router import ResolutionRouter
+            self._components["p2_5c"] = ResolutionRouter()
+            logger.info("오케스트레이터: P2.5-C 초기화 완료")
+        return self._components["p2_5c"]
+
+    def _get_p3b(self):
+        """P3-B StructuredExtractor."""
+        if "p3b" not in self._components:
+            from src.vlm.structured_extractor import (
+                StructuredExtractor,
+                StructuredExtractorConfig,
+            )
+            config = StructuredExtractorConfig(vllm_base_url=self.cfg.vllm_base_url)
+            self._components["p3b"] = StructuredExtractor(config)
+            logger.info("오케스트레이터: P3-B 초기화 완료")
+        return self._components["p3b"]
+
+    def _get_p3_legacy(self):
+        """기존 Gemma4Engine (fallback/호환용)."""
         if "p3" not in self._components:
             from src.vlm.gemma4_engine import Gemma4Engine, Gemma4EngineConfig
             config = Gemma4EngineConfig(vllm_base_url=self.cfg.vllm_base_url)
             self._components["p3"] = Gemma4Engine(config)
-            logger.info("오케스트레이터: P3 초기화 완료")
+            logger.info("오케스트레이터: P3 (legacy) 초기화 완료")
         return self._components["p3"]
 
     def _get_p4(self):
@@ -281,8 +332,15 @@ class PipelineOrchestrator:
             result.status = PipelineStatus.FAILED
             return self._finalize(result)
 
-        # ─── P2: 구조 분석 ───
-        p2_out = self._run_step("P2", result, lambda: self._get_p2().analyze(p1_out))
+        # ─── P2: 레이아웃 탐지 (원시) ───
+        p2_raw = self._run_step("P2", result, lambda: self._get_p2().analyze(p1_out))
+        result.p2_raw_result = p2_raw
+        if p2_raw is None:
+            result.status = PipelineStatus.FAILED
+            return self._finalize(result)
+
+        # ─── P2.5-A: LayoutPostProcessor (정제) ───
+        p2_out = self._run_step("P2.5A", result, lambda: self._get_p2_5a().process(p2_raw))
         result.p2_result = p2_out
         if p2_out is None:
             result.status = PipelineStatus.FAILED
@@ -305,20 +363,63 @@ class PipelineOrchestrator:
             fallback_healthy=fallback_healthy,
         )
 
-        # ─── P3: VLM 통합 추론 / Fallback ───
+        # ─── VLM 주 경로: P3-A → P2.5-B → P2.5-C → P3-B ───
         p3_out: Optional[VLMResult] = None
 
         if path == "vlm":
             result.processing_path = ProcessingPath.VLM
-            p3_out = self._run_step(
-                "P3", result,
-                lambda: self._get_p3().process(p1_out, p2_out),
+
+            # P3-A: FormClassifier (서식 분류)
+            classify_result = self._run_step(
+                "P3A", result,
+                lambda: self._get_p3a().classify(p1_out.image_array, result.warnings),
             )
-            result.p3_result = p3_out
+            if classify_result is not None:
+                form_type, form_confidence = classify_result
+                result.p3a_form_type = form_type.value if hasattr(form_type, "value") else str(form_type)
+                result.p3a_form_confidence = form_confidence
+
+                # 스키마 로드
+                from src.domain.schema_registry import SchemaRegistry
+                registry = SchemaRegistry()
+                schema_id = result.p3a_form_type if result.p3a_form_type != "unknown" else "_fallback"
+                schema = registry.load(schema_id)
+                if schema is None:
+                    schema = registry.load("_fallback")
+                    schema_id = "_fallback"
+
+                # P2.5-B: InstructionRouter
+                instructions = self._run_step(
+                    "P2.5B", result,
+                    lambda: self._get_p2_5b().route_all(p2_out, form_type),
+                )
+
+                if instructions:
+                    # P2.5-C: ResolutionRouter
+                    groups = self._run_step(
+                        "P2.5C", result,
+                        lambda: self._get_p2_5c().route(p2_out, p1_out, instructions),
+                    )
+
+                    if groups:
+                        # P3-B: StructuredExtractor
+                        p3_out = self._run_step(
+                            "P3B", result,
+                            lambda: self._get_p3b().extract(
+                                groups=groups,
+                                doc_id=doc_input.doc_id,
+                                form_type=form_type,
+                                form_confidence=form_confidence,
+                                schema_id=schema_id,
+                                schema=schema,
+                                warnings=result.warnings,
+                            ),
+                        )
+                        result.p3_result = p3_out
 
             # VLM 실패 시 fallback 재시도
             if p3_out is None and self.cfg.fallback_enabled:
-                result.warnings.append("[P3] VLM 실패 → fallback 전환")
+                result.warnings.append("[P3] VLM 파이프라인 실패 → fallback 전환")
                 path = "fallback"
 
         if path == "fallback":

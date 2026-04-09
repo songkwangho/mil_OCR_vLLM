@@ -9,149 +9,223 @@
 
 - 모든 모델 가중치는 `models/` 디렉토리에 **사전 배치**
 - Gemma4 VLM은 **vLLM 로컬 서버**로 구동 (외부 통신 없음)
+- **Crop-then-Infer**: PP-DocLayout bbox 크롭 이미지를 영역별로 Gemma4에 전달 (전체 페이지 입력 지양)
+- **FormClassifier 선행**: 서식 분류 후 InstructionRouter가 도메인 맥락 포함 instruction 생성
+- **배치 병렬 처리**: 동일 pixel_budget 영역을 그룹화하여 vLLM 동시 전송
 - 모델 로드 실패 시:
   - P2 (레이아웃): HEURISTIC fallback (OpenCV 규칙 기반)
-  - P3 (VLM): **수준 B fallback 전환** → v1 PP-OCRv5 기반 경량 파이프라인 (§5 참조)
+  - P3 (VLM): **수준 B fallback 전환** → v1 PP-OCRv5 기반 경량 파이프라인
 
 ---
 
 ## 2. 모델 가중치 현황
 
-| 모델 | 위치 | 크기 | 형식 | 출처 | 상태 |
-|------|------|------|------|------|------|
-| Real-ESRGAN x2plus | `models/t1_sr/RealESRGAN_x2plus.pth` | 64MB | PyTorch (.pth) | xinntao/Real-ESRGAN | ⚠️ v1에서 이관 예정 (가중치 미배치) |
-| PP-DocLayout_plus-L | `models/t2_layout/PP-DocLayout_plus-L/` | 126MB | PaddlePaddle | PaddleOCR 3.0 | ⚠️ v1에서 이관 예정 (가중치 미배치) |
-| PP-DocLayoutV3 | `models/t2_layout/PP-DocLayoutV3/` | 132MB | PaddlePaddle | PaddleOCR 3.4 | ⚠️ 사전 배치 필요 (선택 사용) |
-| Gemma4 26B-A4B | `models/gemma4/gemma-4-26b-a4b-it/` | ~48GB (BF16) | SafeTensors | google/gemma-4-26b-a4b-it | ✅ 배치 완료 (2026-04-08 검증) |
+| 모델 | 위치 | 크기 | 형식 | 상태 |
+|------|------|------|------|------|
+| Real-ESRGAN x2plus | `models/t1_sr/RealESRGAN_x2plus.pth` | 64MB | PyTorch | ✅ 배치 완료 (v1에서 이관) |
+| PP-DocLayout_plus-L | `models/t2_layout/PP-DocLayout_plus-L/` | 126MB | PaddlePaddle | ✅ 배치 완료 (v1에서 이관, fusion 교차 사용) |
+| PP-DocLayoutV3 | `models/t2_layout/PP-DocLayoutV3/` | 132MB | PaddlePaddle | ✅ 배치 완료 (기본 모델) |
+| Gemma4 26B-A4B | `models/gemma4/gemma-4-26b-a4b-it/` | ~48GB (BF16) | SafeTensors | ✅ 배치 완료 (2026-04-08 검증) |
 
 ---
 
 ## 3. 컴포넌트별 추론 상세
 
-### 3-1. P1 — 화질 보정 + SR (`src/preprocess/preprocessor.py`)
+### 3-1. P1 — 화질 보정 + SR
 
 - v1 T1에서 이관
 - LOW DPI (< 150) 시 Real-ESRGAN x2 초해상도 적용
-- 이후 CLAHE 대비 강화 → 이진화 → 품질 점수 산출
+- CLAHE 대비 강화 → 이진화 → 품질 점수 산출
 - Input: `DocumentInput` → Output: `PreprocessedImage`
 
-### 3-2. P2 — 구조 분석 (`src/preprocess/layout_analyzer.py`)
+### 3-2. P2 — 레이아웃 탐지 (`src/preprocess/layout_analyzer.py`)
 
-**역할**: VLM이 처리할 입력을 관리 가능한 단위로 분해하고, 처리 순서를 보장하는 **전처리 게이트**
+**역할**: VLM 입력을 위한 영역 bbox 탐지. 정제(LayoutPostProcessor)와 분리되어 원시 탐지 결과만 반환.
 
-- v1 T2에서 이관 — **PP-DocLayout_plus-L** (기본) 또는 **PP-DocLayoutV3** (선택)
-- Input: `PreprocessedImage` → Output: `LayoutResult`
-- 모델 선택: `PipelineConfig.layout_model_name` 또는 `P2LayoutAnalyzerConfig.model_name`
+- PP-DocLayoutV3 (기본) / PP-DocLayout_plus-L (호환) — 교차 사용 가능
+- Input: `PreprocessedImage` → Output: `RawLayoutResult`
+- `TASK_PROMPTS` 딕셔너리 **제거** — InstructionRouter로 이전
+- 모델 선택: `PipelineConfig.layout_model_name`
+- Layout 추론은 별도 컨테이너(`layout :8082`)에서 HTTP로 수행
 
-**역할 1 — 페이지 분해 (Dense 페이지 문제 해결)**
-페이지 전체를 VLM에 입력하면 다단 컬럼, 표·수식·텍스트 혼재 환경에서 long-sequence 디코딩 지연과 누락이 발생합니다.
-구조 분석이 페이지를 영역별 bbox로 먼저 분리하면, VLM은 각 영역 crop 이미지만 보고 element-level 인식에만 집중할 수 있습니다.
+**Fusion 모드 (구현 완료)**:
 
-```
-페이지 전체 이미지
-       ↓ PP-DocLayout
-[table bbox]  [text bbox]  [formula bbox]  [seal bbox]
-       ↓ 각 crop 이미지 + task prompt
-VLM: "Table Recognition:" → 표 구조 인식
-VLM: "OCR:"              → 텍스트 인식
-```
+V3의 구조 검출 강점과 plus-L의 텍스트 검출 강점을 결합합니다.
+`LAYOUT_FUSION_MODE=true` 환경변수로 활성화.
 
-**역할 2 — 읽기 순서 보장**
-영역 간 읽기 순서를 결정합니다. 다단 컬럼 문서에서 "1열 상단 → 1열 하단 → 2열 상단" 같은 올바른 순서로 VLM 입력이 구성되어야 최종 JSON 출력의 구조가 올바릅니다.
+| P1 출력 DPI | fusion 전략 | 근거 |
+|-------------|------------|------|
+| **≥ 150** | V3(구조) + plus-L(텍스트), 50% 겹침 필터 | 고해상도에서 plus-L text 검출 양호 |
+| **< 150** | V3(HTTP 구조) + heuristic(로컬 텍스트), 50% 겹침 필터 | 저해상도에서 AI 모델보다 OpenCV heuristic이 text 세밀 검출 |
 
-**읽기 순서 결정 방식 — 모델 선택에 따라 다름**:
-
-| 모델 | 읽기 순서 결정 방식 | 설정 |
-|------|-------------------|------|
-| **PP-DocLayout_plus-L** (기본) | 좌표 기반 휴리스틱 (헤더/푸터 분리 → 다단 컬럼 x-center 클러스터링 → 컬럼 내 y 상→하) | — |
-| **PP-DocLayoutV3** | **모델 예측** (Transformer decoder의 `dec_order_head` + AntisymmetricPairwiseScorer → pairwise 선후 관계 학습) | `use_model_reading_order=True` (기본) |
-
-V3의 읽기 순서 원리:
-1. Transformer decoder 각 layer에서 query feature를 `dec_order_head` (Linear)로 투영
-2. `AntisymmetricPairwiseScorer`가 모든 검출 쌍 (i,j)에 대해 선후 관계 logit 계산 (반대칭: `logits[i,j] = -logits[j,i]`)
-3. Sigmoid → voting 기반 ranking 알고리즘으로 순서 디코딩
-4. 일부 라벨(image, table, header, footer 등)은 읽기 순서 예측에서 제외 (`SKIP_ORDER_LABELS`)
-
-> `use_model_reading_order=False`로 설정하면 V3 모델에서도 좌표 기반 휴리스틱을 사용합니다.
-
-**역할 3 — Task Prompt 결정**
-검출된 영역의 클래스 레이블이 VLM의 task prompt를 결정합니다:
-```python
-TASK_PROMPTS = {
-    "text":    "OCR:",
-    "table":   "Table Recognition:",
-    "formula": "Formula Recognition:",
-    "chart":   "Chart Recognition:",
-    "seal":    "Seal Recognition:",
-}
-# P2가 label을 주지 않으면 VLM은 어떤 태스크를 수행할지 모름
-```
-
-- 검출 영역 유형 (v2 RegionType): text, table, figure, header, footer, seal, formula, chart
-
-**PP-DocLayout_plus-L Pretrained 라벨 (20종) → v2 RegionType 매핑**:
-
-| PP-DocLayout 원본 라벨 | v2 RegionType | 비고 |
-|------------------------|---------------|------|
-| `paragraph_title`, `doc_title`, `header` | HEADER | 제목/헤더 |
-| `text`, `content`, `aside_text`, `number`, `abstract`, `algorithm` | TEXT | 일반 텍스트 |
-| `table` | TABLE | 표 |
-| `image`, `figure_title` | FIGURE | 이미지/그림 |
-| `formula`, `formula_number` | FORMULA | 수식 |
-| `chart` | CHART | 차트 |
-| `footer`, `footnote`, `reference`, `reference_content` | FOOTER | 하단/참조 |
-| `seal` | SEAL | 인장 |
-
-> 매핑 코드: `src/preprocess/layout_analyzer.py` `_ModelAnalyzer.LABEL_MAP`
-
-**PP-DocLayoutV3 추가 라벨 (6종) → v2 RegionType 매핑**:
-
-| V3 추가 라벨 | v2 RegionType | 비고 |
-|-------------|---------------|------|
-| `vertical_text` | TEXT | 세로 텍스트 |
-| `inline_formula` | FORMULA | 인라인 수식 |
-| `display_formula` | FORMULA | 디스플레이 수식 |
-| `header_image` | FIGURE | 헤더 이미지 |
-| `footer_image` | FIGURE | 푸터 이미지 |
-| `vision_footnote` | FOOTER | 시각적 각주 |
-
-> 매핑 코드: `src/preprocess/layout_analyzer.py` `_ModelAnalyzer.V3_EXTRA_LABELS`
+- Reading order: V3 구조 영역(V3 model order 유지) → 텍스트(좌상→우하 정렬)
+- fusion 서버 엔드포인트: `POST /layout/analyze` (`fusion_mode: true`)
 
 **PP-DocLayout_plus-L vs PP-DocLayoutV3 비교**:
 
-| 항목 | PP-DocLayout_plus-L (기본) | PP-DocLayoutV3 |
-|------|---------------------------|----------------|
+| 항목 | PP-DocLayout_plus-L | PP-DocLayoutV3 (기본) |
+|------|---------------------|----------------------|
 | 아키텍처 | RT-DETR | Mask RT-DETR |
-| 출력 | bbox | bbox + polygon mask + **reading order** |
-| 클래스 수 | 20종 | 25종 |
-| 읽기 순서 | ❌ (좌표 휴리스틱) | ✅ 모델 예측 (pairwise scoring) |
+| 출력 | bbox | bbox + polygon + reading order |
+| 라벨 | 20종 | 25종 (V3 신규 6종 포함) |
+| 읽기 순서 | 좌표 휴리스틱 | 모델 예측 (pairwise scoring) |
 | 모델 크기 | ~126MB | ~132MB |
-| 입력 크기 | 동적 | 고정 800×800 |
 
-- Fine-tuning 후 군수 서식 영역(수기 기입란 등) 검출 가능
+### 3-3. P2.5-A — LayoutPostProcessor (`src/preprocess/layout_postprocessor.py`)
 
-### 3-3. P3 — Gemma4 VLM 통합 추론 (`src/vlm/gemma4_engine.py`)
+**역할**: PP-DocLayout 원시 탐지 결과 정제. VLM이 의미 있는 크롭 이미지를 받도록 보장.
 
-**모델**: Gemma4 26B-A4B (MoE, 활성 4B)
+- 미소 박스 제거 (6px 미만 — PaddleOCR-VL 기준)
+- 중복 박스 제거 (IoU > 0.7, seal 영역은 0.5)
+- 인접 텍스트 블록 병합 (동일 컬럼 내)
+- Input: `RawLayoutResult` → Output: `LayoutResult`
+
+**이 단계가 없을 때 발생하는 문제**:
+- 6px 점 이미지를 VLM에 전달 → 무의미한 호출 낭비
+- 인장+텍스트 중복 bbox → 동일 영역 이중 처리
+- 단어 단위 분절 텍스트 → 문맥 없는 조각 인식
+
+### 3-4. P3-A — FormClassifier (`src/vlm/form_classifier.py`)
+
+**역할**: 서식 분류 전용 단일 VLM 호출. InstructionRouter의 도메인 맥락 생성을 위한 필수 선행 단계.
+
+| 항목 | 값 |
+|------|------|
+| pixel_budget | 140 토큰 (저해상도 — 분류 비용 최소화) |
+| 입력 | 전체 페이지 이미지 |
+| 출력 | form_type, form_confidence |
+| 호출 방식 | 단일 동기 호출 (배치 불필요) |
+
+```python
+# vLLM 호출 예시 (FormClassifier)
+response = client.chat.completions.create(
+    model="gemma-4-26b-a4b-it",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": full_page_base64}},
+            {"type": "text", "text": "이 문서의 서식 유형을 분류하세요."}
+        ]
+    }],
+    extra_body={
+        "guided_json": FORM_TYPE_SCHEMA,   # enum: supply_request | maintenance_record | ...
+        "mm_processor_kwargs": {"max_pixels": 140 * 28 * 28},  # 140 토큰
+    },
+)
+```
+
+### 3-5. P2.5-B — InstructionRouter (`src/vlm/instruction_router.py`)
+
+**역할**: region_type + form_type → 도메인 맥락 포함 InstructionSpec 생성.
+
+PaddleOCR-VL의 `"OCR:"` 2단어 프리픽스는 전용 학습 모델 기반이므로 범용 VLM에 그대로 적용 불가. Gemma4는 도메인 맥락, 출력 형식, 불확실성 처리까지 포함한 상세 instruction이 필요.
+
+```python
+# 기존 (instruction_builder.py — 제거 대상)
+TASK_PROMPTS = {"text": "OCR:", "table": "Table Recognition:", ...}
+
+# 개선 (instruction_router.py)
+# form_type="supply_request", region_type="text" →
+instruction = InstructionSpec(
+    system_prompt="군수 보급청구서 필드 추출 시스템입니다.",
+    user_instruction=(
+        "이 수기 기입란에서 한국어 텍스트를 인식하세요. "
+        "NSN 코드(NNNN-NN-NNN-NNNN) 형식이 있다면 정확히 추출하고, "
+        "불확실한 글자는 [?]로 표시하세요."
+    ),
+    json_schema=supply_request_field_schema,
+    pixel_budget=560,  # ResolutionRouter에서 결정
+)
+```
+
+### 3-6. P2.5-C — ResolutionRouter (`src/vlm/resolution_router.py`)
+
+**역할**: 영역 타입별 pixel_budget 할당 + bbox 크롭 + 배치 그룹화.
+
+```python
+PIXEL_BUDGET = {
+    "table":             1120,   # 셀 경계·미세 글씨 → 최고 해상도
+    "seal":               560,   # 원형 배치 텍스트
+    "handwritten_field":  560,   # 군수 서식 수기 기입란 (핵심)
+    "text":               280,   # 일반 텍스트
+    "formula":            280,
+    "chart":              280,
+    "figure":             140,
+    "header":             140,   # 저해상도로 충분
+    "footer":             140,
+}
+```
+
+**배치 그룹화 근거**: 동일 pixel_budget 영역끼리 묶어야 vLLM 내부 패딩 오버헤드가 없음. 해상도가 다른 이미지를 섞으면 최대 해상도에 맞춰 패딩 → VRAM 낭비 및 처리 지연.
+
+### 3-7. P3-B — StructuredExtractor (`src/vlm/structured_extractor.py`)
+
+**역할**: pixel_budget 기준 배치 그룹을 Gemma4에 병렬 전송하여 구조화 추출 수행.
+
+```python
+# pixel_budget=1120 그룹 배치 호출 예시
+response = client.chat.completions.create(
+    model="gemma-4-26b-a4b-it",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": crop_base64}},
+                {"type": "text", "text": instruction_spec.user_instruction}
+            ]
+        }
+        for crop in batch  # 동일 budget 그룹 배치
+    ],
+    extra_body={
+        "guided_json": instruction_spec.json_schema,
+        "logprobs": True,
+        "top_logprobs": 5,
+        "mm_processor_kwargs": {"max_pixels": pixel_budget * 28 * 28},
+    },
+)
+```
+
+**logprobs 기반 필드별 신뢰도 산출 (길이 편향 보정)**:
+
+```python
+def calc_field_confidence(
+    token_logprobs: list[float],
+    field_type: str,
+) -> float:
+    geo_mean = exp(mean(token_logprobs))
+    # 긴 필드(부대명 등)의 구조적 낮은 점수 보정
+    length_factor = min(1.0, sqrt(EXPECTED_TOKENS[field_type]
+                                   / max(len(token_logprobs), 1)))
+    return round(geo_mean * length_factor, 4)
+```
+
+### 3-8. P4 — 룰 검증 + 신뢰도 보정 (`src/postprocess/validator.py`)
+
+- `processing_path` 기반으로 임계값 프로파일 분기 (VLM / Fallback)
+- Fallback 경로는 임계값을 낮게 설정하되 `review_required = True` 강제
+- 룰 기반 교차검증 후 감점 적용
+
+### 3-9. P5 — 직렬화 / P6 — DB 적재
+
+- v1 T11/T12에서 이관 — JSON, XML, CSV 출력
+- DB 레코드에 `schema_id` (버전 포함) 함께 기록
+
+---
+
+## 4. Gemma4 VLM 서빙 설정
 
 | 항목 | 값 |
 |------|------|
 | 총 파라미터 | 26B |
 | 활성 파라미터 | 4B (MoE) |
 | 컨텍스트 길이 | 256K 토큰 |
-| 비전 입력 | 가변 해상도, 70~1120 토큰/이미지 |
+| 비전 입력 | 가변 해상도 70~1120 토큰/이미지 |
 | 한국어 지원 | ✅ (40+ 언어) |
 | 라이선스 | Apache 2.0 |
-| 추론 VRAM (BF16) | **~48GB** (실측) |
-| 추론 VRAM (AWQ 4-bit) | ~16GB (Phase 3 양자화 실험 예정) |
-| 추론 VRAM (FP8 Dynamic) | ~27GB (Phase 3 양자화 실험 예정) |
-
-**서빙 방식**: vLLM 로컬 서버
+| 추론 VRAM (BF16) | ~48GB |
 
 ```bash
-# vLLM v0.19.0+ 서버 시작 (오프라인, guided decoding + logprobs 활성화)
-# Gemma4 지원: vLLM >= v0.19.0 + transformers >= 5.5.0 필수
-# 주의: 기본 max_num_seqs=1024는 warmup 시 OOM 발생 → 128로 제한 필수
+# vLLM v0.19.0+ 서버 시작
 vllm serve models/gemma4/gemma-4-26b-a4b-it/ \
     --tensor-parallel-size 1 \
     --max-model-len 8192 \
@@ -160,235 +234,92 @@ vllm serve models/gemma4/gemma-4-26b-a4b-it/ \
     --gpu-memory-utilization 0.90
 ```
 
-> **운영 환경 (2026-04-08 검증 완료)**: vLLM v0.19.0 / H100 80GB (GPU #2) / BF16 / 모델 로드 48.5 GiB / 기동 ~120초
-
-**Guided Decoding — JSON Schema 기반 출력 구조 보장**
-
-군수 서식 유형별 JSON Schema를 사전 정의하여 `guided_json` 파라미터로 전달합니다.
-VLM 출력이 항상 유효한 JSON 구조임을 보장하여 **파싱 실패를 원천 차단**합니다.
-
-```python
-# vLLM API 호출 예시
-response = client.chat.completions.create(
-    model="gemma-4-26b-a4b-it",
-    messages=[{"role": "user", "content": [image, instruction]}],
-    extra_body={
-        "guided_json": supply_request_schema,   # 서식별 JSON Schema
-        "logprobs": True,                       # 토큰별 확률 반환
-        "top_logprobs": 5,                      # 상위 5개 후보
-    },
-)
-```
-
-JSON Schema 예시 (`src/domain/schemas/supply_request.json`):
-```json
-{
-  "type": "object",
-  "properties": {
-    "form_type": {"type": "string", "enum": ["supply_request"]},
-    "unit_code": {"type": "string"},
-    "request_date": {"type": "string"},
-    "items": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "nsn": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{3}-\\d{4}$"},
-          "item_name": {"type": "string"},
-          "quantity": {"type": "integer", "minimum": 1},
-          "unit_price": {"type": "integer", "minimum": 0},
-          "total": {"type": "integer", "minimum": 0}
-        },
-        "required": ["nsn", "item_name", "quantity", "unit_price", "total"]
-      }
-    }
-  },
-  "required": ["form_type", "unit_code", "items"]
-}
-```
-
-**logprobs 기반 필드별 신뢰도 산출**
-
-vLLM은 `logprobs` 옵션으로 각 출력 토큰의 로그 확률을 반환합니다.
-이를 필드값 토큰에 대한 확신도로 환산합니다.
-
-```python
-# logprobs → 필드 신뢰도 환산 로직
-def calc_field_confidence(token_logprobs: list[float]) -> float:
-    """필드값 토큰들의 평균 확률을 신뢰도로 환산.
-    
-    logprob = log(prob) → prob = exp(logprob)
-    필드 신뢰도 = 토큰 확률의 기하 평균
-    """
-    import math
-    if not token_logprobs:
-        return 0.0
-    probs = [math.exp(lp) for lp in token_logprobs]
-    # 기하 평균 (곱의 n-th root)
-    geo_mean = math.exp(sum(token_logprobs) / len(token_logprobs))
-    return round(geo_mean, 4)
-```
-
-수치 필드(수량·단가·합계)는 각 숫자 토큰의 logprob을 개별 추적하여 **자릿수 단위 정밀 신뢰도**를 산출합니다.
-
-**VLM instruction 태스크 — P2 영역 유형별 자동 분기**
-
-| P2 영역 유형 | VLM instruction | guided_json | logprobs 활용 |
-|-------------|----------------|------------|--------------|
-| `text` | "한국어 텍스트를 인식하고 오타를 교정하세요" | text_schema | 글자 단위 신뢰도 |
-| `table` | "표의 구조를 분석하고 각 셀 텍스트를 추출하세요" | table_schema | 셀 단위 신뢰도 |
-| `seal` | "인장/직인의 텍스트를 인식하세요" | seal_schema | 문자 단위 |
-| 전체 문서 | "서식 유형을 분류하고 모든 필드를 추출하세요" | **서식별 스키마** | **수치 필드: 자릿수 단위** |
-
-**처리 흐름**
-
-```
-P2 LayoutResult
-    │
-    ├─ 1. 전체 문서 → VLM (서식 분류 instruction)
-    │      → form_type 결정 → 해당 서식의 JSON Schema 로드
-    │
-    ├─ 2. 영역별 crop 생성
-    │
-    ├─ 3. 전체 문서 + 서식별 guided_json → VLM (필드 추출 instruction)
-    │      → guided_json으로 구조 보장
-    │      → logprobs로 필드별 토큰 확률 수집
-    │
-    ├─ 4. 표 영역 crop → VLM (표 인식 instruction)
-    │      → HTML 표 구조 + 셀 텍스트
-    │
-    └─ 5. VLMResult 조립
-         - fields: key-value 쌍 + logprobs 기반 confidence
-         - tables: HTML 표 구조
-         - form_type: 서식 분류
-         - domain_codes: 특수 코드
-         - corrections: 교정 로그
-```
-
-### 3-4. P4 — 룰 검증 + 신뢰도 보정 (`src/postprocess/validator.py`)
-
-- VLM logprobs 신뢰도를 1차 신뢰도로 사용
-- 룰 기반 교차검증으로 2차 보정:
-  - 산술 검증: `합계 == 수량 × 단가` 불일치 시 해당 필드 신뢰도 감점
-  - 날짜 검증: `청구일 <= 승인일` 위반 시 감점
-  - 코드 검증: NSN 형식 불일치 시 감점
-- `review_required` 결정: 보정된 신뢰도가 임계값 미달 필드 존재 시
-- Input: `VLMResult` → Output: `ValidatedResult`
-
-### 3-5. P5 — 직렬화 (`src/postprocess/serializer.py`)
-
-- v1 T11에서 이관 — JSON, XML, CSV 출력
-
-### 3-6. P6 — DB 적재 (`src/postprocess/db_loader.py`)
-
-- v1 T12에서 이관 — SQLAlchemy + SQLite
+> **운영 환경 (2026-04-08 검증)**: vLLM v0.19.0 / H100 80GB / BF16 / 모델 로드 48.5 GiB / 기동 ~120초
 
 ---
 
-## 4. SPOF 대비 — 추론 가용성
+## 5. SPOF 대비 — 추론 가용성
 
-> 상세 설계는 `docs/BACKEND.md` §3 참조. 여기서는 추론 환경 관점의 설정만 기술합니다.
-
-### 4-1. 수준 A — vLLM 헬스체크
-
-vLLM은 `/health` 엔드포인트를 기본 제공합니다. Docker Compose에서 이를 활용합니다.
+### 5-1. 수준 A — vLLM 헬스체크
 
 ```yaml
-# docker-compose.yml (vllm-server 서비스)
 healthcheck:
   test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
-  interval: 30s       # 30초마다 체크
-  timeout: 10s        # 10초 내 응답 없으면 실패
-  retries: 3          # 3회 연속 실패 시 unhealthy → Docker 재시작
-  start_period: 120s  # 모델 로드 대기 (~60-90초)
-restart: unless-stopped  # unhealthy 시 자동 재시작
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 120s
+restart: unless-stopped
 ```
 
-**오케스트레이터 측 감시**: 파이프라인 서비스는 매 요청 전 + 주기적으로 `VLLM_HEALTH_URL`을 polling하여 vLLM 상태를 캐싱합니다. 상세 로직은 `docs/BACKEND.md` §3-1 참조.
+### 5-2. 수준 B — 경량 Fallback 추론 환경
 
-### 4-2. 수준 B — 경량 Fallback 추론 환경
+| 모델 | 위치 | 크기 | 역할 | 상태 |
+|------|------|------|------|------|
+| DiT (서식 분류) | `models/fallback/t3_form_classifier/` | ~350MB | T3 서식 분류 | ⚠️ 가중치 미배치 |
+| PP-OCRv5 Korean | `models/fallback/t4_handwriting/` | ~15MB | T4 텍스트 인식 | ⚠️ 가중치 미배치 |
+| SLANeXt_wired | `models/fallback/t5_table_structure/` | ~30MB | T5 표 구조 인식 | ⚠️ 가중치 미배치 |
 
-VLM이 완전히 불가할 때 v1의 PP-OCRv5 기반 T1~T5를 별도 컨테이너(`fallback`)로 구동합니다.
+**Fallback vs VLM (고도화 후)**:
 
-| 모델 | 위치 | 크기 | 프레임워크 | 역할 |
-|------|------|------|-----------|------|
-| DiT (서식 분류) | `models/fallback/t3_form_classifier/` | ~350MB | PyTorch | T3 서식 분류 | ⚠️ 가중치 미배치 |
-| PP-OCRv5 Korean | `models/fallback/t4_handwriting/` | ~15MB | PaddlePaddle | T4 텍스트 인식 | ⚠️ 가중치 미배치 |
-| SLANeXt_wired | `models/fallback/t5_table_structure/` | ~30MB | PaddlePaddle | T5 표 구조 인식 | ⚠️ 가중치 미배치 |
-
-**Fallback vs VLM 비교**:
-
-| 항목 | VLM (주 경로) | Fallback |
-|------|-------------|----------|
-| VRAM | ~48GB (BF16) | 2~4GB |
-| 추론 속도 | ~3-5초/문서 | ~1-2초/문서 |
-| 텍스트 교정 | VLM 문맥 교정 | ❌ 없음 |
-| 서식 분류 | instruction 기반 | DiT 모델 기반 |
-| 표 구조 | VLM HTML 출력 | SLANeXt 셀 검출 |
+| 항목 | VLM 주 경로 (고도화) | Fallback |
+|------|---------------------|----------|
+| 서식 분류 | P3-A FormClassifier (저해상도) | DiT 모델 |
+| 텍스트 인식 | P3-B 영역별 크롭 고해상도 | PP-OCRv5 전체 페이지 |
+| 표 구조 | P3-B 표 전용 1120 토큰 | SLANeXt |
 | guided_json | ✅ 구조 보장 | ❌ 규칙 기반 매핑 |
-| logprobs 신뢰도 | ✅ 토큰 확률 | ❌ rec_score 사용 |
-| 결과 품질 | 높음 | 중간 (항상 검토 큐 적재) |
-
-**Fallback 컨테이너 구성**:
-- Base: PaddlePaddle 3.2.0 GPU + PyTorch (v1 unified-inference와 동일)
-- API: FastAPI 서버 (`:8081`) — 파이프라인에서 HTTP로 호출
-- 엔드포인트: `POST /fallback/process` (이미지 입력 → T1~T5 결과 반환)
-- 헬스체크: `GET /health`
+| 처리 경로 표시 | `processing_path="vlm"` | `processing_path="fallback"` |
+| P4 임계값 | VLM 프로파일 | Fallback 프로파일 (낮음) |
+| 결과 품질 | 높음 | 중간 (항상 검토 큐) |
 
 ---
 
-## 5. Docker 추론 환경
+## 6. Docker 추론 환경
 
 | 서비스 | 용도 | 프레임워크 | 헬스체크 |
 |--------|------|-----------|---------|
-| `vllm-server` | Gemma4 vLLM v0.19.0 서버 (guided decoding + logprobs) | vLLM + PyTorch + transformers 5.5.0 | `/health` (30s) |
-| **`layout`** | **P2 레이아웃 추론 (PP-DocLayoutV3 / plus-L)** | **PaddlePaddle CUDA 12.6** | **`/health` (30s)** |
-| `pipeline` | P1, P3~P6 파이프라인 (vLLM + layout 서버에 API 호출) | PyTorch | `/health` (30s) |
-| `fallback` | v1 PP-OCRv5 기반 경량 파이프라인 (T1~T5) | PaddlePaddle + PyTorch | `/health` (30s) |
-| `train` | Fine-tuning 환경 (profiles: training) | PyTorch + PaddlePaddle + PEFT | — |
+| `vllm-server` | Gemma4 vLLM 서버 | vLLM + PyTorch + transformers 5.5.0 (CUDA 12.x 내장) | `/health` (30s) |
+| `layout` | P2 레이아웃 탐지 (PP-DocLayoutV3 / plus-L, fusion 지원) | PaddlePaddle CUDA 12.6 | `/health` (30s) |
+| `pipeline` | P1, P2.5-A~C, P3-A~B, P4~P6 | PaddlePaddle + PyTorch CUDA 12.6 | `/health` (30s) |
+| `fallback` | v1 PP-OCRv5 기반 경량 파이프라인 | PaddlePaddle + PyTorch CUDA 12.6 | `/health` (30s) |
+| `train` | Fine-tuning 환경 | PaddlePaddle + PyTorch CUDA 12.6 + PEFT | — |
 
-**Layout 서비스 분리 배경**: PaddlePaddle(CUDA 11.8)과 PyTorch(CUDA 12.8)의 CUDA 버전 충돌을 방지하기 위해 P2 레이아웃 추론을 별도 컨테이너로 분리. `layout` 컨테이너는 PaddlePaddle CUDA 12.6 베이스로 H100(sm_90)을 지원합니다.
-
-**권장 구성 — 분리 모드**:
-- `vllm-server`: Gemma4 모델 로드 1회 → 상주 서빙 (OpenAI 호환 API) + `restart: unless-stopped`
-- `layout`: PP-DocLayout 모델 로드 1회 → 상주 서빙 (`POST /layout/analyze`) + `restart: unless-stopped`
-- `pipeline`: vLLM API(`http://vllm-server:8000`) + Layout API(`http://layout:8082`)로 추론 요청
-- `fallback`: VLM 불가 시 자동 전환 대상 — 항상 대기 상태로 유지
-- 장점: CUDA 격리, 모델 로드 오버헤드 제거, 파이프라인 재시작 시에도 모델 유지
+> **CUDA 11.8 → 12.6 전환**: H100(sm_90) GPU에서 CUDA 11.8 PaddlePaddle 빌드의 커널 미포함(error 209) 문제로 pipeline/fallback/train 모두 CUDA 12.6으로 전환 완료.
 
 ---
 
-## 6. 추론 파이프라인 스크립트
+## 7. 추론 파이프라인 스크립트
 
 | 스크립트 | 범위 |
 |----------|------|
-| `scripts/run_pipeline.py` | P1→P7 전체 파이프라인 |
-| `scripts/test_vlm.py` | P3 VLM 단독 테스트 |
+| `scripts/run_pipeline.py` | P1→P6 전체 파이프라인 |
+| `scripts/test_vlm.py` | P3-A/P3-B VLM 단독 테스트 |
 | `scripts/run_pipeline_with_outputs.py` | 전체 파이프라인 + 단계별 출력 저장 |
+| `scripts/evaluate_layout_detection.py` | PP-DocLayout 검출률 측정 (Phase 1 잔여) |
 
 ---
 
-## 7. 하드웨어 요구사항
+## 8. 하드웨어 요구사항
 
 | 용도 | VRAM | 권장 GPU | 비고 |
 |------|------|---------|------|
-| Gemma4 추론 (BF16) | **~48GB** | H100 80GB / A100 80GB | 현재 운영 구성 |
-| Gemma4 추론 (AWQ 4-bit) | **~16GB** | RTX 4090 24GB | Phase 3 실험 예정 |
-| Gemma4 추론 (FP8 Dynamic) | **~27GB** | A100 40GB | Phase 3 실험 예정 (vLLM 버그 해소 후) |
+| Gemma4 추론 (BF16) | ~48GB | H100 80GB | 현재 운영 |
+| Gemma4 추론 (AWQ 4-bit) | ~16GB | RTX 4090 24GB | Phase 3 실험 예정 |
+| Gemma4 추론 (FP8 Dynamic) | ~27GB | A100 40GB | vllm#39049 해소 후 |
 | PP-DocLayout 추론 | 4GB | GPU 4GB+ | PaddlePaddle |
 | Real-ESRGAN SR | 2GB | GPU 4GB+ | 타일 기반 |
 | Fallback (T3+T4+T5) | 2~4GB | GPU 4GB+ | v1 PP-OCRv5 기반 |
 
-### 양자화 옵션 상세 (Phase 3 실험 계획)
+### 양자화 옵션 (Phase 3 실험 계획)
 
-| 양자화 | 모델 | VRAM | 양자화 대상 | 품질 손실 | vLLM 호환 |
-|--------|------|------|-----------|----------|----------|
-| BF16 (현재) | google/gemma-4-26b-a4b-it | ~48GB | — | 기준 | v0.19.0 ✅ |
-| AWQ 4-bit | cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit | ~16GB | 어텐션만 INT4 (MoE 전문가 BF16 유지) | 최소 (~1-2%) | v0.19.0 ✅ |
-| FP8 Dynamic | RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic | ~27GB | 가중치 + 활성화 FP8 | ~0.3% | 주의: gibberish 버그 #39049 |
+| 양자화 | VRAM | 품질 손실 | vLLM 호환 |
+|--------|------|----------|----------|
+| BF16 (현재) | ~48GB | 기준 | v0.19.0 ✅ |
+| AWQ 4-bit | ~16GB | ~1-2% | v0.19.0 ✅ |
+| FP8 Dynamic | ~27GB | ~0.3% | vllm#39049 Open → 해소 후 |
 
 ### Upstream 버그 트래킹
 
 | 이슈 | 영향 | 상태 | 확인 트리거 | 미해소 시 대안 |
 |------|------|------|-----------|--------------|
-| `vllm-project/vllm#39049` (FP8 gibberish) | FP8 Dynamic 양자화 실험 차단 | Open (2026-04 기준) | Phase 3 착수(08월) + vLLM 릴리스마다 | AWQ 4-bit 우선 적용 |
+| `vllm-project/vllm#39049` (FP8 gibberish) | FP8 실험 차단 | Open (2026-04) | Phase 3 착수 + vLLM 릴리스마다 | AWQ 4-bit 우선 |
