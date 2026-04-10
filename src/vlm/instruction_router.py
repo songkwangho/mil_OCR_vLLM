@@ -71,6 +71,54 @@ _COT_INSTRUCTION = (
     "30~50 토큰으로 간략히 기술한 뒤 나머지 필드를 추출하세요."
 )
 
+# 군수 도메인 패턴 힌트 — 영어 룰 + 한국어 필드명 하이브리드
+# (KLOCR 논문, 다국어 프롬프팅 서베이 2025.05: VLM은 영어 지시 따르기 + 한국어 출력)
+_DOMAIN_PATTERN_HINTS = {
+    "supply_request": (
+        "\n\n[Format Rules]\n"
+        "- NSN 코드 형식: NNNN-NN-NNN-NNNN (13자리, 예: 1005-01-432-1234)\n"
+        "- K-NSN 형식: KN-NNNNN-NNNN\n"
+        "- quantity, unit_price, total은 정수\n"
+        "- date는 YYYY-MM-DD\n"
+        "- 불확실한 글자는 [?]로 표시\n"
+        "- 유사 문자 주의: ㄱ/ㅋ, ㄴ/ㄹ, 1/ㅣ, 0/O, 5/S, 6/G"
+    ),
+    "maintenance_record": (
+        "\n\n[Format Rules]\n"
+        "- equipment_id 형식: 알파벳+숫자 (예: K21-001)\n"
+        "- maintenance_date는 YYYY-MM-DD\n"
+        "- 불확실한 글자는 [?]로 표시\n"
+        "- 유사 문자 주의: 1/ㅣ, 0/O, 5/S"
+    ),
+    "inventory_sheet": (
+        "\n\n[Format Rules]\n"
+        "- NSN/K-NSN 코드: NNNN-NN-NNN-NNNN 또는 KN-NNNNN-NNNN\n"
+        "- stock_qty/disposal_qty는 정수 (음수 금지)\n"
+        "- 불확실한 글자는 [?]로 표시"
+    ),
+    "handover_doc": (
+        "\n\n[Format Rules]\n"
+        "- handover_date는 YYYY-MM-DD\n"
+        "- from_person/to_person은 한국어 성명\n"
+        "- 불확실한 글자는 [?]로 표시\n"
+        "- 유사 문자 주의: 1/ㅣ, 0/O"
+    ),
+    "inspection_report": (
+        "\n\n[Format Rules]\n"
+        "- inspection_date는 YYYY-MM-DD\n"
+        "- overall_result는 적합/부적합/조건부 적합 중 하나\n"
+        "- 불확실한 글자는 [?]로 표시"
+    ),
+}
+
+# OCR 힌트 부착 템플릿 (저신뢰 영역 보강)
+_OCR_HINT_TEMPLATE = (
+    "\n\n[OCR 힌트]\n"
+    "경량 OCR 인식 결과: {hint}\n"
+    "위 내용을 참고하여 보다 정확하게 추출하세요. "
+    "단, OCR 결과가 명백히 틀린 경우에는 이미지를 보고 직접 판단하세요."
+)
+
 # ─────────────────────────────────────────────
 #  region_type → 기본 pixel_budget 매핑
 # ─────────────────────────────────────────────
@@ -187,7 +235,13 @@ class InstructionRouter:
         if form_type_value and form_type_value != "other":
             user_instruction += _COT_INSTRUCTION
 
-        # 4) 1-shot 예시 부착 (form_type별 예시 존재 시)
+        # 4) 도메인 패턴 힌트 (NSN/K-NSN/유사문자 등) — 군수 경로만
+        if form_type_value:
+            pattern_hint = _DOMAIN_PATTERN_HINTS.get(form_type_value)
+            if pattern_hint:
+                user_instruction += pattern_hint
+
+        # 5) 1-shot 예시 부착 (form_type별 예시 존재 시)
         example = self._examples.get(form_type_value) if form_type_value else None
         if example:
             user_instruction += (
@@ -246,6 +300,30 @@ class InstructionRouter:
             region = layout.regions[idx]
             specs[region.region_id] = self.route(region, form_type)
         return specs
+
+    # ── OCR 힌트 부착 ──────────────────────
+
+    @staticmethod
+    def with_ocr_hint(spec: InstructionSpec, hint: str) -> InstructionSpec:
+        """기존 InstructionSpec의 user_instruction 끝에 OCR 힌트 블록을 부착.
+
+        새 InstructionSpec을 반환합니다 (원본 불변).
+        StructuredExtractor의 재시도 경로에서 호출됩니다.
+        """
+        if not hint:
+            return spec
+        new_instruction = spec.user_instruction + _OCR_HINT_TEMPLATE.format(hint=hint)
+        return InstructionSpec(
+            region_id=spec.region_id,
+            region_type=spec.region_type,
+            form_type=spec.form_type,
+            system_prompt=spec.system_prompt,
+            user_instruction=new_instruction,
+            json_schema=spec.json_schema,
+            pixel_budget=spec.pixel_budget,
+            ocr_hint=hint,
+            is_retry=spec.is_retry,
+        )
 
     # ── 기존 호환 API (flat lookup) ────────
 

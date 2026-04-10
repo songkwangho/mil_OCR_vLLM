@@ -201,7 +201,14 @@ class LayoutResult:
 
 @dataclass
 class InstructionSpec:
-    """InstructionRouter가 생성하는 영역별 VLM 호출 명세."""
+    """InstructionRouter가 생성하는 영역별 VLM 호출 명세.
+
+    ocr_hint: PaddleOCR 선행 결과 (저신뢰 영역 보강 — OCR-augmented 전략).
+              user_instruction에는 포함되지 않으며, StructuredExtractor가
+              호출 시점에 instruction 끝에 부착함.
+    is_retry: 재시도 호출 여부 (디버깅·통계용). True면 pixel_budget도
+              한 단계 상향된 값을 가짐.
+    """
     region_id: str
     region_type: RegionType
     form_type: Optional[FormType] = None
@@ -209,6 +216,8 @@ class InstructionSpec:
     user_instruction: str = ""
     json_schema: Optional[dict] = None
     pixel_budget: int = 280
+    ocr_hint: Optional[str] = None
+    is_retry: bool = False
 
 
 @dataclass
@@ -240,6 +249,7 @@ class FieldValue:
     token_logprobs: list[float]       # 해당 필드 토큰들의 개별 logprob
     is_flagged: bool = False          # 신뢰도 < 필드 유형별 임계값
     region_id: Optional[str] = None
+    was_retried: bool = False         # 저신뢰 재시도 발생 여부 (디버깅용)
 
 
 @dataclass
@@ -282,6 +292,7 @@ class VLMResult:
     processing_time_ms: float = 0.0
     processing_path: ProcessingPath = ProcessingPath.VLM
     warnings: list[str] = field(default_factory=list)
+    retry_count: int = 0              # 저신뢰 재시도 발생 횟수 (모니터링용)
 
 
 # ═══════════════════════════════════════════════

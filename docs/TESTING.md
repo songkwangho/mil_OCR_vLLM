@@ -10,13 +10,9 @@
 
 ```bash
 VLLM_BASE_URL=http://localhost:8100/v1 \
-VLLM_HEALTH_URL=http://localhost:8100/health \
 LAYOUT_SERVICE_URL=http://localhost:8082 \
-LAYOUT_MODEL_NAME=PP-DocLayoutV3 \
+LAYOUT_FUSION_MODE=false \
 HF_HUB_OFFLINE=1 \
-MODEL_ROOT=/home/team_gh/mil_OCR_v2/models \
-FALLBACK_ENABLED=false \
-CUDA_VISIBLE_DEVICES=0 \
 python scripts/run_pipeline_with_outputs.py --input-dir data/raw
 ```
 
@@ -37,13 +33,10 @@ docker run --rm --gpus device=0 --network host \
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
 | `VLLM_BASE_URL` | `http://localhost:8100/v1` | vLLM OpenAI 호환 API |
-| `VLLM_HEALTH_URL` | `http://localhost:8100/health` | vLLM 헬스체크 |
-| `LAYOUT_SERVICE_URL` | — | Layout HTTP 컨테이너 URL (설정 시 HTTP 모드) |
-| `LAYOUT_MODEL_NAME` | `PP-DocLayoutV3` | 레이아웃 모델 |
+| `LAYOUT_SERVICE_URL` | — | Layout HTTP 컨테이너 URL |
 | `LAYOUT_FUSION_MODE` | `false` | Fusion 모드 활성화 |
-| `MODEL_ROOT` | `<repo>/models` | PaddleOCR 가중치 루트 |
 | `FALLBACK_ENABLED` | `false` | Fallback 경로 활성화 |
-| `FALLBACK_BASE_URL` | (없음) | 설정 시 Fallback HTTP 컨테이너 사용, 미설정 시 `_DisabledFallback` |
+| `OCR_HINT_ENABLED` | `true` | OCR-augmented 힌트 활성화 |
 
 ---
 
@@ -57,6 +50,7 @@ docker run --rm --gpus device=0 --network host \
 | T4 | Other 문서 입력 | `form_type=other` 분류, 범용 OCR 경로, 검토 큐 미적재 |
 | T5 | Fallback 전환 | VLM 불가 시 Fallback 경로 전환 |
 | T6 | military 문서 검토 큐 | P4 실패 → 큐 적재 → 담당자 수정 → P6 재적재 |
+| T7 | OCR-augmented 힌트 | 저신뢰 영역 OCR 힌트 삽입 + 재시도 동작 확인 |
 
 ---
 
@@ -80,21 +74,21 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
     │   ├── result.json              ← LayoutResult (removed_count, merged_count)
     │   └── layout_visualization.png ← 정제 후 bbox (P2와 비교용)
     ├── P3A/
-    │   └── result.json              ← form_type, form_confidence
+    │   └── result.json              ← form_type, form_confidence, 추론 시간
     ├── P2.5B/
     │   └── result.json              ← {region_id → InstructionSpec}
     │                                   (system_prompt, user_instruction, json_schema,
-    │                                    pixel_budget, 1-shot 예시 포함)
+    │                                    pixel_budget, ocr_hint 포함 여부)
     ├── P2.5C/
     │   ├── result.json              ← pixel_budget 그룹 + 영역별 crop 메타
     │   └── crops/
-    │       ├── r_0001_table_b1120.png   ← 영역별 크롭 이미지 (vLLM 입력 그대로)
+    │       ├── r_0001_table_b1120.png  ← 영역별 크롭 이미지 (48px 정렬 완료)
     │       └── ...
-    ├── P3/
-    │   ├── result.json              ← fields[], tables[], domain_codes[]
-    │   ├── region_traces.json       ← 영역별 vLLM 호출 trace
-    │   │                               (입출력/소요시간/추출 필드 — raw_vlm_responses 대체)
-    │   └── raw_vlm_response.json    ← 집계 raw_json (있을 때만)
+    ├── P3B/
+    │   ├── result.json              ← fields[], tables[], domain_codes[], retry_count
+    │   └── raw_vlm_responses/
+    │       ├── batch_{budget}_{n}.json  ← pixel_budget별 배치 원본 응답
+    │       └── retry_{region_id}.json  ← 재시도 호출 응답 (해당 시)
     ├── P4/
     │   └── result.json              ← overall_confidence, validation_errors
     ├── P5/
@@ -109,10 +103,11 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 
 1. P2 → P2.5A 시각화 비교 → LayoutPostProcessor 정제 효과 확인
 2. P3A/result.json → form_type이 military/other로 올바르게 분류되었는지
-3. P2.5B/result.json → military 경로는 CoT 지시 + 1-shot 예시 포함 여부, other 경로는 범용 OCR instruction 확인
-4. P2.5C/crops/*.png → vLLM이 실제로 받은 이미지 (해상도 적절성)
-5. P3/region_traces.json → 영역별 응답·소요시간·추출 결과 (JSON parse 실패 원인 추적)
-6. P4/result.json → other 경로에서 룰 검증 스킵 확인, military 경로에서만 validation_errors 집계
+3. P2.5B/result.json → military 경로는 CoT 지시 + 1-shot 예시 + OCR 힌트 포함 여부
+4. P2.5C/crops/*.png → VLM이 실제로 받은 이미지 (48px 정렬, 해상도 적절성)
+5. P3B/result.json → retry_count 확인 → 재시도 발생 패턴 파악
+6. P3B/raw_vlm_responses/retry_*.json → 재시도 효과 측정
+7. P4/result.json → other 경로에서 룰 검증 스킵 확인
 
 ---
 
@@ -145,7 +140,12 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
         {"pixel_budget": 140, "region_count": 1, "ms": 380.1},
         {"pixel_budget": 560, "region_count": 2, "ms": 820.3},
         {"pixel_budget": 1120, "region_count": 3, "ms": 2650.0}
-      ]
+      ],
+      "retry_stats": {
+        "retry_count": 2,
+        "retried_fields": ["nsn", "quantity"],
+        "retry_ms": 950.2
+      }
     },
     {
       "doc_id": "일반공문서_001",
@@ -165,15 +165,16 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 
 통합 테스트 실행 시 콘솔에 다음을 빠짐없이 출력합니다.
 
-1. **환경 정보**: CUDA 버전, Fusion 모드, 서비스 URL, 테스트 이미지 수
+1. **환경 정보**: CUDA 버전, Fusion 모드, 서비스 URL, OCR 힌트 활성화 여부, 테스트 이미지 수
 2. **P2 탐지 결과**: 모드(Fusion ON/OFF), 탐지 영역 수
 3. **P2.5-A 정제 결과**: 제거된 박스 수, 병합된 블록 수
 4. **P3-A 분류 결과**: form_type, form_confidence, military/other 분기 표시
-5. **P3-B 배치 처리**: 그룹별 pixel_budget, 배치 크기, 추론 시간
-6. **P4 검증 결과**: overall_confidence, 오류 수, 검토 큐 적재 여부
-7. **실패 시**: 실패 단계, 에러 메시지, 스택 트레이스
-8. **문서별 요약**: `[PASS/FAIL] {doc_id} form={form_type} total=Xms P2=Xms P3A=Xms P3B=Xms`
-9. **전체 요약**: 총 처리 건수, military/other/review_queue 분포
+5. **P3-B 배치 처리**: 그룹별 pixel_budget, 배치 크기, 추론 시간, OCR 힌트 삽입 수
+6. **P3-B 재시도**: 재시도 발생 필드, 재시도 전/후 신뢰도
+7. **P4 검증 결과**: overall_confidence, 오류 수, 검토 큐 적재 여부
+8. **실패 시**: 실패 단계, 에러 메시지, 스택 트레이스
+9. **문서별 요약**: `[PASS/FAIL] {doc_id} form={form_type} total=Xms P3B=Xms retry={N}건`
+10. **전체 요약**: 총 처리 건수, military/other/review_queue 분포, 평균 재시도 비율
 
 ---
 
@@ -181,41 +182,22 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 
 | 일자 | 환경 | 케이스 | 결과 | 비고 |
 |------|------|--------|------|------|
-| 2026-04-08 | H100 / vLLM v0.19.0 | T1 기본 경로 | 3건 PASS | Phase 1 통합 테스트 (설계 미반영 상태, 전부 군수 오분류) |
-| 2026-04-10 | H100 / vLLM v0.19.0 (구 옵션) | T1 + T4 (Other 경로) | 3건 PASS, errors=0 | Other 경로 + CoT 스키마 + 1-shot + pixel_budget 상향 반영 후 재측정 |
-| (예정) | vLLM 재기동 후 | T1 + T4 | — | fp8 KV + speculative decoding 효과 측정 |
-| (예정) | — | T2, T3 | — | Fusion ON DPI 분기 검증 (군수 서식 샘플 확보 필요) |
-| (예정) | — | T5 | — | Fallback 전환 경로 (fallback 컨테이너 기동 필요) |
-| (예정) | — | T6 | — | 검토 큐 적재 → 담당자 수정 → DB 재적재 |
+| 2026-04-08 | H100 / vLLM v0.19.0 | T1 기본 경로 | 3건 PASS | Phase 1 통합 테스트 |
+| (예정) | vLLM 재기동 후 | T1 | — | vLLM 최적화 옵션 적용 후 성능 측정 |
+| (예정) | — | T2, T3 | — | Fusion ON DPI 분기 검증 |
+| (예정) | — | T4 | — | Other 문서 경로 |
+| (예정) | — | T5 | — | Fallback 전환 |
+| (예정) | — | T7 | — | OCR-augmented 힌트 효과 측정 |
 
-### 6-1. 2026-04-10 측정치 요약
+### 6-1. 향후 계획 타당성 및 문제점
 
-Phase 1-E 통합 테스트 (설계 반영 후):
+**[R1] vLLM 최적화 옵션 재기동 필요**
+docker-compose.yml 파일은 수정되었지만 기존 컨테이너는 구 옵션으로 기동 중입니다. `docker compose restart vllm-server` 후 동일 문서 처리 시간을 비교 측정해야 합니다.
 
-| 문서 | form_type 분류 | status | P3-B ms | total ms | validation_errors | 검토 큐 |
-|------|--------------|--------|---------|----------|-------------------|--------|
-| 국회공문서 | other (conf=1.00) | other_document | 15,212 | 19,292 | 0 | 미적재 |
-| 전역지원서_1 | other (conf=1.00) | other_document | 2,824 | 3,077 | 0 | 미적재 |
-| 전역지원서_2 | other (conf=1.00) | other_document | 4,122 | 4,386 | 0 | 미적재 |
-| **합계** | — | — | 22,158 | 26,755 | **0** | **0건** |
+**[R2] OCR-augmented가 모든 영역에 적용 시 처리 지연**
+PaddleOCR가 영역당 ~50ms이므로, 20개 영역 문서에서 최대 1초 추가됩니다. 선택적 적용 조건(logprobs < 0.80, NSN 패턴 필드)을 통합 테스트 T7에서 실측하여 임계값을 현실화합니다.
 
-**이전 측정치(설계 미반영, 2026-04-10 13:27)와 비교**:
+**[R3] 재시도 로직이 피크 처리량에 미치는 영향**
+MAX_RETRIES=1이어도 재시도가 집중되면 처리 지연이 발생합니다. T7 테스트에서 재시도 발생 비율을 측정하고, 5% 초과 시 임계값 조정을 검토합니다.
 
-| 지표 | 이전 | 현재 | 변화 |
-|------|------|------|------|
-| 총 처리 시간 | 60,057 ms | 26,755 ms | **-55%** |
-| form_type 오분류 | 3/3 (군수로 잘못 분류) | 0/3 | 완전 개선 |
-| validation_errors | 7건 (필수 필드 누락 오탐) | 0건 | 오탐 제거 |
-| 검토 큐 적재 | 3건 | 0건 | 운영 부담 제거 |
-
-### 6-2. 잔존 이슈 — CLAUDE.md 로드맵 참조
-
-통합 테스트에서 발견된 7개 잔존 이슈는 `CLAUDE.md` 개발 로드맵 "Phase 1 잔여 → 잔존 이슈" 섹션에 번호별로 기록되어 있습니다:
-
-1. **P3-B JSON parse 실패** 🔴 — guided_json 반환에 코드 펜스·자연어 섞임
-2. **P3-B 배치 동시 전송 미구현** 🔴 — `for cropped in regions:` 순차 호출
-3. **vLLM 재기동 미적용** 🟡 — 최적화 옵션은 파일에만 반영됨
-4. **Real-ESRGAN 미설치** 🟡 — `basicsr` 모듈 필요
-5. **warnings 중복 전파** 🟢 — P1 경고가 P3-B에도 중복 표시
-6. **빈 layout 시각화 저장** 🟢
-7. **RegionType handwritten_field/signature/checkbox 확장** 🟢
+**보완**: run_summary.json의 retry_stats 항목으로 재시도 패턴을 2주간 수집 후 임계값 현실화.

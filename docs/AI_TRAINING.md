@@ -40,12 +40,6 @@
 | Pretrained | `models/t2_layout/PP-DocLayout_plus-L/` |
 | Docker | `train` (PaddlePaddle 환경) |
 
-> **주의**: Phase 1 v2 `RegionType` enum에는 `HANDWRITTEN_FIELD`, `SIGNATURE`, `CHECKBOX`가 없습니다. PP-DocLayout이 이 카테고리들을 모두 `text` 라벨로 반환하기 때문에, 현재 P2.5-C는 `text: 560` pixel_budget으로 일괄 대응합니다. Fine-tuning 시 신규 카테고리를 추가하면 다음도 함께 업데이트해야 합니다 (CLAUDE.md 로드맵 Phase 1-E 잔존 이슈 #7):
-> - `src/interfaces/enums.py` `RegionType` enum 확장
-> - `src/vlm/resolution_router.py` `DEFAULT_PIXEL_BUDGETS`에 `handwritten_field: 1120`, `signature: 560`, `checkbox: 140` 추가
-> - `src/vlm/instruction_router.py` `_DEFAULT_PIXEL_BUDGETS` 동기화
-> - `configs/instruction_mappings.yaml` `region_instructions`에 신규 카테고리 프롬프트 추가
-
 **목표 수량 조정 기준** (Phase 1 잔여 검출률 측정 결과):
 
 | 검출률 | 목표 | 추가 조치 |

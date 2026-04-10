@@ -202,15 +202,32 @@ class PipelineOrchestrator:
             logger.info("오케스트레이터: P2.5-C 초기화 완료")
         return self._components["p2_5c"]
 
+    def _get_ocr_hint_provider(self):
+        """OCR-augmented 힌트 제공자 (선택적, 저신뢰 재시도 보강)."""
+        if "ocr_hint" not in self._components:
+            from src.vlm.ocr_hint_provider import OCRHintProvider, OCRHintConfig
+            cfg = OCRHintConfig()
+            provider = OCRHintProvider(cfg)
+            self._components["ocr_hint"] = provider
+            logger.info(
+                "오케스트레이터: OCRHintProvider 초기화 완료 (enabled=%s)",
+                provider.enabled,
+            )
+        return self._components["ocr_hint"]
+
     def _get_p3b(self):
-        """P3-B StructuredExtractor."""
+        """P3-B StructuredExtractor (OCRHintProvider 주입)."""
         if "p3b" not in self._components:
             from src.vlm.structured_extractor import (
                 StructuredExtractor,
                 StructuredExtractorConfig,
             )
             config = StructuredExtractorConfig(vllm_base_url=self.cfg.vllm_base_url)
-            self._components["p3b"] = StructuredExtractor(config)
+            ocr_provider = self._get_ocr_hint_provider()
+            self._components["p3b"] = StructuredExtractor(
+                config=config,
+                ocr_hint_provider=ocr_provider,
+            )
             logger.info("오케스트레이터: P3-B 초기화 완료")
         return self._components["p3b"]
 

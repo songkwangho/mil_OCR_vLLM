@@ -302,6 +302,7 @@ def save_p3(out_dir: Path, result: PipelineResult):
             "confidence": round(f.confidence, 4),
             "is_flagged": f.is_flagged,
             "region_id": getattr(f, "region_id", None),
+            "was_retried": getattr(f, "was_retried", False),
         })
 
     # 테이블 정보
@@ -335,6 +336,8 @@ def save_p3(out_dir: Path, result: PipelineResult):
         "tables": tables_data,
         "domain_codes": codes_data,
         "processing_time_ms": round(p3.processing_time_ms, 1),
+        "retry_count": getattr(p3, "retry_count", 0),
+        "retried_fields": [f["field_key"] for f in fields_data if f.get("was_retried")],
         "warnings": p3.warnings,
     })
 

@@ -35,13 +35,15 @@ DocumentInput
         region_type + form_type → instruction + 1-shot 예시
         military: 도메인 맥락 + 군수 JSON Schema
         other:    범용 OCR instruction + _general.json
+        저신뢰 영역: OCR 힌트 삽입 (ocr_hint_provider)
 
     P2.5-C: ResolutionRouter → dict[int, list[CroppedRegion]]
-        pixel_budget 할당 + bbox 크롭 + 배치 그룹화
+        pixel_budget 할당 + bbox 크롭(패딩 포함) + 48px 배수 정렬 + 배치 그룹화
 
     P3-B: StructuredExtractor → VLMResult
-        pixel_budget 기준 배치 → Gemma4 병렬 호출
+        pixel_budget 기준 배치 → Gemma4 병렬 호출 (temperature=0.0)
         CoT analysis 필드 포함 → logprobs 신뢰도 산출
+        저신뢰 필드(< 0.60) → pixel_budget 상향 + OCR 힌트 재시도
     │
     ▼
 [Stage 3 — 후처리]
@@ -135,19 +137,11 @@ class InstructionSpec:
     region_type: RegionType
     form_type: Optional[FormType] = None
     system_prompt: str = ""       # 도메인 맥락 (군수 서식) 또는 범용
-    user_instruction: str = ""    # 태스크 지시 + 1-shot 예시
+    user_instruction: str = ""    # 태스크 지시 + 1-shot 예시 + OCR 힌트(선택)
     json_schema: Optional[dict] = None  # guided_json (CoT analysis 필드 포함)
     pixel_budget: int = 560
-
-# form_type="supply_request", region_type="text":
-#   system_prompt: "군수 보급청구서 OCR 시스템입니다."
-#   user_instruction: "이 수기 기입란에서 NSN 코드(NNNN-NN-NNN-NNNN)와
-#                      수량을 인식하세요. 불확실한 글자는 [?]로 표시.\n
-#                      [예시]\n이미지: <example_crop>\n결과: {\"nsn\":\"1005-01-432-1234\",\"qty\":10}"
-#
-# form_type="other":
-#   system_prompt: "문서 OCR 시스템입니다."
-#   user_instruction: "이 영역의 텍스트를 인식하세요."
+    ocr_hint: Optional[str] = None      # PaddleOCR 선행 결과 (저신뢰 영역)
+    is_retry: bool = False              # 재시도 호출 여부
 ```
 
 ### 2-4. ResolutionRouter 출력
@@ -157,29 +151,31 @@ class InstructionSpec:
 class CroppedRegion:
     region_id: str
     region_type: RegionType
-    cropped_image: np.ndarray  # bbox 크롭 + 5~15% 패딩 (원본 이미지 맥락 포함)
+    cropped_image: np.ndarray  # bbox 크롭 + 패딩 + 48px 배수 정렬
     pixel_budget: int
     instruction_spec: InstructionSpec
 
-# pixel_budget 기준값 (Gemma4 공식 문서 기반, 2026-04-10 구현 완료)
+# pixel_budget 기준값 (Gemma4 공식 문서 기반)
 PIXEL_BUDGET = {
-    "table":    1120,   # 셀 경계·미세 글씨 → 최고 해상도
-    "seal":      560,   # 원형 배치 텍스트
-    "text":      560,   # 일반 텍스트 — 280에서 상향 (소형 폰트·수기 통합 대응)
-    "formula":   280,
-    "chart":     280,
-    "figure":    140,
-    "header":    140,   # 대형 텍스트, 저해상도로 충분
-    "footer":    140,
+    "table":             1120,  # 셀 경계·미세 글씨 → 최고 해상도
+    "handwritten_field": 1120,  # 수기 기입란 — 560에서 상향 (한국어 획 구분)
+    "seal":               560,  # 원형 배치 텍스트
+    "text":               560,  # 일반 텍스트 — 280에서 상향 (소형 폰트)
+    "formula":            280,
+    "chart":              280,
+    "figure":             140,
+    "header":             140,
+    "footer":             140,
 }
 
-# v2 RegionType에는 handwritten_field가 의도적으로 없음 (VLM이 내용으로 판별).
-# PP-DocLayout은 수기 영역을 text 라벨로 반환하므로, text 상향(280→560)으로 간접 대응.
-# Phase 2 PP-DocLayout Fine-tuning 시 handwritten_field/signature/checkbox 카테고리
-# 추가 검토 (CLAUDE.md 로드맵 Phase 2-C).
-
-# 크롭 패딩 — 단일 값 사용 (ResolutionRouterConfig.crop_padding, 기본 5px)
-# 영역 타입별 차등은 Phase 2-C에서 검토 (양식 레이블·경계선 맥락 포함 필요 시)
+# 크롭 패딩 비율 (원본 이미지 맥락 포함, 공백 패딩 금지)
+CROP_PADDING_RATIO = {
+    "table":             0.05,
+    "handwritten_field": 0.15,  # 양식 레이블·경계선 포함
+    "seal":              0.10,
+    "text":              0.05,
+    "default":           0.05,
+}
 ```
 
 ### 2-5. VLM 통합 추론 결과
@@ -191,10 +187,11 @@ class FieldValue:
     raw_value: str
     corrected_value: str
     data_type: str             # text, number, date, code
-    confidence: float          # logprobs 기하평균 기반
+    confidence: float          # logprobs 기하평균
     token_logprobs: list[float]
     is_flagged: bool = False
     region_id: Optional[str] = None
+    was_retried: bool = False  # 재시도 여부 (디버깅용)
 
 @dataclass
 class RecognizedTable:
@@ -221,6 +218,7 @@ class VLMResult:
     domain_codes: list[DomainCode]
     processing_path: ProcessingPath  # vlm | fallback
     processing_time_ms: float = 0.0
+    retry_count: int = 0       # 재시도 발생 횟수 (모니터링용)
     # raw_json: DB 적재 제외 — 파일 시스템(P3B/raw_vlm_responses/)에만 보존
     warnings: list[str] = field(default_factory=list)
 ```
@@ -351,7 +349,7 @@ class LayoutPostProcessor:
 
 ```python
 class FormClassifier:
-    PIXEL_BUDGET = 140  # 분류용 저해상도, 비용 최소화
+    PIXEL_BUDGET = 140
 
     def classify(
         self, image_rgb: np.ndarray,
@@ -360,7 +358,8 @@ class FormClassifier:
         """전체 페이지 이미지 → 저해상도 VLM 1회 호출.
         Returns: (form_type, confidence)
         """
-        # guided_json enum: supply_request|maintenance_record|...|unknown|other
+        # guided_json enum: supply_request|...|unknown|other
+        # temperature=0.0 — 분류 결정론적 출력
         # other → _general.json 스키마 사용, 군수 룰 검증 건너뜀
 ```
 
@@ -368,40 +367,43 @@ class FormClassifier:
 
 **파일**: `src/vlm/instruction_router.py`
 
+**프롬프트 설계 원칙**:
+- system_prompt를 **정적으로 유지** → prefix caching 효율 극대화
+- 가변 콘텐츠(실제 OCR 이미지)는 프롬프트 **끝에** 배치
+- **analysis 필드를 JSON Schema 최상단에** 배치 → CoT 효과
+- analysis 길이를 ~30~50 토큰으로 제한하는 문구 포함
+- **영어 지시문 + 한국어 필드명** 하이브리드 사용
+
 ```python
 class InstructionRouter:
-    def route(self, region: LayoutRegion, form_type: Optional[str]) -> InstructionSpec:
+    def route(
+        self,
+        region: LayoutRegion,
+        form_type: Optional[str],
+        ocr_hint: Optional[str] = None,
+    ) -> InstructionSpec:
         """
         military 경로:
           form_type="supply_request", region_type="text"
           → system_prompt: "군수 보급청구서 OCR 시스템입니다."
           → user_instruction: "이 수기 기입란에서 NSN 코드와 수량을 인식하세요.
+                               NSN 형식: NNNN-NN-NNN-NNNN. 불확실한 글자: [?].
+                               유사 문자 주의: ㄱ/ㅋ, 1/ㅣ, 0/O
                                [예시] <1-shot 이미지> → <정답 JSON>"
-          → json_schema: supply_request_field_schema (analysis 필드 최상단)
+          → + OCR 힌트 (해당 시)
 
         other 경로:
           form_type="other"
           → system_prompt: "문서 OCR 시스템입니다."
           → user_instruction: "이 영역의 텍스트를 인식하세요."
-          → json_schema: _general_schema (범용 key-value)
-
-        form_type=None:
-          → user_instruction: "한국어 텍스트를 인식하세요." (FormClassifier 미수행)
+          → json_schema: _general_schema (CoT 없음)
         """
 
-# JSON Schema CoT 구조 (모든 군수 서식 스키마에 공통 적용)
-# {
-#   "analysis": {"type": "string",
-#                "description": "영역 텍스트 품질, 모호한 문자 간략 기술 (~30~50 토큰)"},
-#   ... 실제 필드들 ...
-# }
-# analysis 필드를 최상단에 배치 → VLM이 답변 전 사고 과정 거침 → 정확도 향상
+    def _build_with_ocr_hint(
+        self, instruction: str, ocr_hint: str
+    ) -> str:
+        return instruction + f"\n[OCR 힌트] 경량 OCR 인식 결과: {ocr_hint}\n위 내용을 참고하여 보다 정확하게 추출하세요."
 ```
-
-**1-shot 예시 관리**:
-- 서식 유형별 대표 예시 1개를 `configs/instruction_examples/{form_type}.yaml`에 저장
-- system_prompt를 정적으로 유지 → prefix caching 효율 극대화
-- 가변 콘텐츠(실제 OCR 이미지)는 프롬프트 끝에 배치
 
 ### 3-4. P2.5-C ResolutionRouter
 
@@ -410,14 +412,34 @@ class InstructionRouter:
 ```python
 class ResolutionRouter:
     def route(
-        self, layout: LayoutResult, preprocessed: PreprocessedImage,
+        self,
+        layout: LayoutResult,
+        preprocessed: PreprocessedImage,
         instructions: dict[str, InstructionSpec],
     ) -> dict[int, list[CroppedRegion]]:
-        """bbox 크롭 + 패딩 + pixel_budget 할당 + 배치 그룹화.
+        """bbox 크롭 + 패딩 + 48px 배수 정렬 + 배치 그룹화.
         반환: {pixel_budget → [CroppedRegion, ...]}
         동일 budget끼리 그룹화 → vLLM 패딩 오버헤드 없음.
-        크롭 크기를 48px 배수로 맞춰 SigLIP 패치 효율 최적화.
+        48px 배수 정렬 → SigLIP 3×3 패치 풀링 효율 최적화.
         """
+
+    def _crop_with_padding(
+        self, image: np.ndarray, bbox: BoundingBox,
+        padding_ratio: float
+    ) -> np.ndarray:
+        """공백 패딩이 아닌 원본 이미지의 실제 주변 콘텐츠를 포함.
+        경계를 넘어가는 경우 이미지 가장자리로 클리핑.
+        """
+
+    def _align_to_48px(self, image: np.ndarray) -> np.ndarray:
+        """크롭 이미지를 48px 배수로 리사이즈.
+        SigLIP: 16×16 패치 → 3×3 블록 average pooling = 48px 배수가 최적.
+        패딩에 토큰이 낭비되지 않도록 보장.
+        """
+        h, w = image.shape[:2]
+        new_h = max(48, round(h / 48) * 48)
+        new_w = max(48, round(w / 48) * 48)
+        return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 ```
 
 ### 3-5. P3-B StructuredExtractor
@@ -426,17 +448,31 @@ class ResolutionRouter:
 
 ```python
 class StructuredExtractor:
+    RETRY_THRESHOLD = 0.60   # 이하면 재시도
+    MAX_RETRIES = 1          # 과도한 지연 방지
+    RETRY_BUDGET_MAP = {140: 280, 280: 560, 560: 1120, 1120: 1120}
+
     def extract(
-        self, groups: dict[int, list[CroppedRegion]],
+        self,
+        groups: dict[int, list[CroppedRegion]],
         doc_id: str, form_type: FormType,
         form_confidence: float, schema_id: str,
         schema: Optional[dict] = None,
         warnings: Optional[list[str]] = None,
     ) -> VLMResult:
         """각 pixel_budget 그룹 → vLLM 배치 호출.
-        guided_json(CoT 포함) + logprobs → 필드 추출 + 신뢰도 산출.
-        도메인 코드 자동 감지 (NSN/K-NSN 패턴).
+        저신뢰 필드 감지 시 pixel_budget 상향 + OCR 힌트로 재시도.
         """
+
+    def _process_batch(
+        self, batch: list[CroppedRegion], pixel_budget: int
+    ) -> list[dict]:
+        """temperature=0.0으로 결정론적 OCR 출력 보장."""
+
+    def _retry_low_confidence_fields(
+        self, fields: list[FieldValue], region_map: dict[str, CroppedRegion]
+    ) -> list[FieldValue]:
+        """logprobs < RETRY_THRESHOLD 필드 → pixel_budget 상향 + OCR 힌트 재시도."""
 ```
 
 **logprobs 신뢰도 산출**:
@@ -444,6 +480,8 @@ class StructuredExtractor:
 ```python
 def calc_field_confidence(token_logprobs: list[float]) -> float:
     """기하 평균: exp(mean(logprobs))
+    한국어 subword 토크나이제이션 특성상 개별 토큰 확률이 낮게 나타날 수 있어,
+    임계값을 영어 대비 5~10% 낮게 설정 (PIPELINE.md §4-1 임계값 테이블 참조).
     길이 편향 보정(length_factor)은 Phase 2 SFT 후 실측 데이터 기반으로 도입 예정.
     """
     if not token_logprobs:
@@ -465,9 +503,10 @@ def calc_field_confidence(token_logprobs: list[float]) -> float:
 | 코드 (code/NSN) | 0.97 | 0.75 | |
 | 날짜 (date) | 0.95 | 0.70 | |
 | 수량 (quantity) | 0.95 | 0.70 | |
-| 일반 텍스트 | 0.90 | 0.65 | 한국어 특성상 영어 대비 5~10% 낮게 설정 |
+| 일반 텍스트 | 0.90 | 0.65 | 한국어 subword 특성상 영어 대비 5~10% 낮게 설정 |
 | 서명 | 0.70 | 0.50 | |
 
+> **재시도 임계값**: 0.60 이하 → pixel_budget 상향 + OCR 힌트로 1회 재시도
 > **other 문서**: 군수 임계값 적용 안 함. 전체 신뢰도만 산출.
 
 ### 4-2. P4 룰 검증으로 보정 (military 경로만)
@@ -476,16 +515,19 @@ def calc_field_confidence(token_logprobs: list[float]) -> float:
 - NSN 형식 불일치 → 해당 필드 신뢰도 **-0.15**
 - 날짜 순서 위반 → 해당 필드 신뢰도 **-0.10**
 
-### 4-3. NSN 패턴 강제 (guidance 백엔드 전환)
+### 4-3. NSN 패턴 강제 전략
 
-xgrammar는 JSON Schema 내 `pattern` (regex) 제약을 미지원. NSN 코드 형식 강제 시:
-
-```python
-# 방법 1: 별도 guided_regex 호출
-extra_body={"guided_regex": r"\d{4}-\d{2}-\d{3}-\d{4}"}
-
-# 방법 2: guidance 백엔드 전환 (--guided-decoding-backend guidance)
-# JSON Schema 내 pattern 제약 완전 지원, 복잡한 스키마 타임아웃 없음
+```
+우선순위:
+1. InstructionRouter 프롬프트 힌트 (기본 — xgrammar 유지)
+   user_instruction: "NSN 코드는 NNNN-NN-NNN-NNNN 형식 13자리입니다."
+   
+2. guided_regex (특정 필드에만 패턴 강제 필요 시)
+   extra_body={"guided_regex": r"\d{4}-\d{2}-\d{3}-\d{4}"}
+   
+3. guidance 백엔드 전환 (NSN 형식 강제가 절대적으로 필요한 경우)
+   --guided-decoding-backend guidance
+   JSON Schema 내 pattern 제약 완전 지원
 ```
 
 ---
@@ -505,7 +547,6 @@ class VLMHealthMonitor:
         self._consecutive_failures += 1
         if self._consecutive_failures >= 3:
             self._healthy = False
-            logger.error("vLLM 서버 비정상 — fallback 전환 대기")
 ```
 
 ### 5-2. 수준 B — 경량 Fallback
@@ -521,23 +562,23 @@ class FallbackPolicy:
 
 | 항목 | VLM 주 경로 | Fallback |
 |------|------------|---------|
-| 서식 분류 | P3-A FormClassifier | DiT 모델 |
-| 텍스트 인식 | P3-B 크롭 고해상도 | PP-OCRv5 전체 페이지 |
-| 표 구조 | P3-B 1120 토큰 | SLANeXt |
-| guided_json | ✅ 구조 보장 | ❌ 규칙 기반 매핑 |
+| 서식 분류 | P3-A (저해상도) | DiT 모델 |
+| 텍스트 인식 | P3-B 크롭 고해상도 | PP-OCRv5 |
+| 표 구조 | P3-B 1120토큰 | SLANeXt |
+| guided_json | ✅ | ❌ 규칙 기반 |
+| OCR-augmented | ✅ 저신뢰 영역 | ❌ |
 | P4 임계값 | VLM 프로파일 | Fallback 프로파일 (낮음) |
-| 결과 | 높은 품질 | 중간 (항상 검토 큐) |
 
 ### 5-3. 수준 C — 수동 검토 큐
 
 | 조건 | 우선순위 |
 |------|---------|
 | CRITICAL ValidationError | 🔴 긴급 |
-| LOW confidence 필드 | 🟡 일반 |
+| LOW confidence 필드 (재시도 후에도 임계값 미달) | 🟡 일반 |
 | Fallback 경로 처리 | 🟡 일반 |
 | VLM + Fallback 모두 불가 | 🔴 긴급 |
 
-> **other 문서는 검토 큐 미적재** — 군수 업무 대상이 아니므로 별도 처리.
+> **other 문서는 검토 큐 미적재** — 군수 업무 대상이 아님.
 
 ---
 
@@ -549,10 +590,9 @@ class FallbackPolicy:
 [Pipeline 컨테이너 :8080]
   ├── P1 Preprocessor          (in-process)
   ├── P2 LayoutAnalyzer        HTTP POST → [Layout :8082]
-  │     └── PP-DocLayoutV3 / Fusion 모드
   ├── P2.5-A LayoutPostProcessor (in-process)
   ├── P3-A FormClassifier      HTTP POST → [vLLM :8100]
-  ├── P2.5-B InstructionRouter (in-process)
+  ├── P2.5-B InstructionRouter (in-process, OCRHintProvider 포함)
   ├── P2.5-C ResolutionRouter  (in-process)
   ├── P3-B StructuredExtractor HTTP POST → [vLLM :8100]
   ├── Fallback                 HTTP POST → [Fallback :8081]
@@ -561,7 +601,7 @@ class FallbackPolicy:
   └── P6 DBLoader              (in-process, SQLite)
 ```
 
-**Layout 분리 사유**: PaddlePaddle ↔ PyTorch CUDA 충돌 방지. 전체 CUDA 12.6 통일.
+**Layout 분리 사유**: PaddlePaddle ↔ PyTorch CUDA 충돌 방지.
 
 ### 6-2. Phase 3 목표: 비동기 메시지 기반
 
@@ -575,8 +615,8 @@ class FallbackPolicy:
 - 모든 함수·클래스에 docstring 필수
 - 컴포넌트 간 데이터 전달은 `src/interfaces/types.py`의 dataclass 사용
 - 오케스트레이터(`pipeline/orchestrator.py`)만 컴포넌트를 순서대로 호출
-- `TASK_PROMPTS` 딕셔너리 `layout_analyzer.py`/`types.py`에 두지 않음 — `InstructionRouter` 일원화
 - VLM instruction/response는 **반드시 guided_json으로 구조화**
+- 모든 VLM 호출에 `temperature=0.0` 설정 (결정론적 OCR)
 - `VLMResult.raw_json`은 DB 적재 제외 — `P3B/raw_vlm_responses/`에만 보존
 - P4는 `processing_path` + `form_type(other 여부)` 기반으로 임계값·룰 프로파일 분기
 - Python 3.10+
@@ -585,37 +625,33 @@ class FallbackPolicy:
 
 | 모듈 | 책임 | 하지 않는 것 |
 |------|------|-------------|
-| `vlm_client.py` | vLLM HTTP 통신, 이미지 base64 인코딩, logprobs 파싱 | 이미지 크롭, 도메인 코드 감지 |
-| `resolution_router.py` | bbox 크롭 + 패딩, pixel_budget 할당, 배치 그룹화 | VLM 통신 |
-| `structured_extractor.py` | 배치 VLM 호출, 필드 추출, 도메인 코드 감지, VLMResult 조립 | 이미지 크롭 |
-| `form_classifier.py` | 서식 분류 VLM 1회 호출 (military/other 분류 포함) | 필드 추출, 크롭 |
+| `vlm_client.py` | vLLM HTTP 통신, base64 인코딩, logprobs 파싱 | 이미지 크롭, 도메인 코드 감지 |
+| `resolution_router.py` | bbox 크롭 + 패딩 + 48px 정렬 + 배치 그룹화 | VLM 통신 |
+| `structured_extractor.py` | 배치 VLM 호출, 필드 추출, 재시도, VLMResult 조립 | 이미지 크롭 |
+| `form_classifier.py` | 서식 분류 VLM 1회 호출 (military/other) | 필드 추출, 크롭 |
+| `ocr_hint_provider.py` | PaddleOCR 선행 실행, 힌트 문자열 생성 | VLM 호출, 크롭 |
 
 ---
 
 ## 8. 핵심 의존성
 
 ```txt
-# Stage 1 — 전처리
 opencv-python>=4.9.0
 scikit-image>=0.22.0
 Pillow>=10.0.0
 numpy>=1.26.0
 realesrgan
 basicsr
-
-# Stage 2 — VLM
+paddlepaddle-gpu    # OCR-augmented (PaddleOCR)
+paddleocr>=2.8.0
 vllm>=0.19.0
 torch
 transformers>=5.5.0
-
-# Stage 3 — 후처리
 pydantic>=2.6.0
 lxml>=5.1.0
 pandas>=2.2.0
 sqlalchemy>=2.0.0
 pyyaml
-
-# VLM 클라이언트
 openai
 httpx
 ```

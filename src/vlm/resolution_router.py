@@ -1,14 +1,19 @@
 """P2.5-C — ResolutionRouter
 
-영역 타입별 pixel_budget 할당 + bbox 크롭 + 배치 그룹화.
-모든 영역에 동일 해상도를 적용하면 표/수기 기입란에서 부족하고
-헤더/푸터에서 낭비가 발생합니다.
+영역 타입별 pixel_budget 할당 + bbox 크롭 + 48px 정렬 + 배치 그룹화.
 
-동일 pixel_budget끼리 그룹화해야 vLLM 내부 패딩 오버헤드가 없음.
-해상도가 다른 이미지를 섞으면 최대 해상도에 맞춰 패딩 → VRAM 낭비.
+핵심 메커니즘:
+  1. 영역 타입별 pixel_budget 차등 할당 (table/handwritten 1120, text/seal 560, ...)
+  2. CROP_PADDING_RATIO 비율 패딩 (원본 이미지 맥락 포함, 공백 패딩 금지)
+  3. 48px 배수 정렬 — SigLIP 16×16 패치 + 3×3 average pooling 효율 최적화
+  4. 동일 pixel_budget끼리 그룹화 → vLLM 내부 패딩 오버헤드 제거
 
 Input:  LayoutResult + PreprocessedImage + dict[str, InstructionSpec]
 Output: dict[int, list[CroppedRegion]]  — pixel_budget별 배치 그룹
+
+Reference:
+  - AI_INFERENCE.md §4-5: PIXEL_BUDGET, CROP_PADDING_RATIO, 48px 정렬 근거
+  - PIPELINE.md §3-4: ResolutionRouter._align_to_48px
 """
 
 from __future__ import annotations
@@ -50,6 +55,21 @@ DEFAULT_PIXEL_BUDGETS: dict[str, int] = {
 }
 
 
+# 영역 타입별 패딩 비율 (bbox 대비) — 공백 패딩이 아닌 원본 이미지 맥락 포함
+# AI_INFERENCE.md §4-5: handwritten_field 0.15 (양식 레이블·경계선 포함)
+DEFAULT_CROP_PADDING_RATIO: dict[str, float] = {
+    "table":             0.05,   # 5% — 열/행 헤더 포함
+    "handwritten_field": 0.15,   # 15% — 양식 레이블·경계선 (현재 RegionType에는 없음, 확장 대비)
+    "seal":              0.10,
+    "text":              0.05,
+    "default":           0.05,
+}
+
+
+# SigLIP 패치 크기: 16×16 패치 → 3×3 블록 average pooling = 48px 단위
+SIGLIP_PATCH_ALIGN = 48
+
+
 @dataclass
 class ResolutionRouterConfig:
     """P2.5-C 설정."""
@@ -57,8 +77,14 @@ class ResolutionRouterConfig:
     # 영역 타입별 pixel_budget (기본값 오버라이드 가능)
     pixel_budgets: Optional[dict[str, int]] = None
 
-    # 크롭 패딩 (px) — bbox 주변 여유
-    crop_padding: int = 5
+    # 크롭 패딩 비율 (영역 타입별, 0.0~1.0). None이면 DEFAULT 사용.
+    crop_padding_ratio: Optional[dict[str, float]] = None
+
+    # 최소 패딩 픽셀 (영역이 작아 비율 적용 시 0이 되는 경우 대비)
+    min_crop_padding_px: int = 4
+
+    # 48px 배수 정렬 활성화 (SigLIP 패치 효율)
+    align_to_siglip_patch: bool = True
 
 
 class ResolutionRouter:
@@ -75,10 +101,19 @@ class ResolutionRouter:
         self._budgets = dict(DEFAULT_PIXEL_BUDGETS)
         if self.cfg.pixel_budgets:
             self._budgets.update(self.cfg.pixel_budgets)
+        self._padding_ratios = dict(DEFAULT_CROP_PADDING_RATIO)
+        if self.cfg.crop_padding_ratio:
+            self._padding_ratios.update(self.cfg.crop_padding_ratio)
 
     def get_pixel_budget(self, region_type: str) -> int:
         """영역 타입에 대한 pixel_budget 반환."""
         return self._budgets.get(region_type, 280)
+
+    def get_padding_ratio(self, region_type: str) -> float:
+        """영역 타입에 대한 패딩 비율 반환."""
+        return self._padding_ratios.get(
+            region_type, self._padding_ratios.get("default", 0.05)
+        )
 
     def route(
         self,
@@ -111,13 +146,15 @@ class ResolutionRouter:
                 )
                 continue
 
-            # bbox 크롭
+            # bbox 크롭 + 영역 타입별 비율 패딩 + 48px 배수 정렬
             crop = self._crop_region(image_rgb, region)
             if crop.size == 0:
                 logger.warning(
                     "[P2.5-C] 빈 크롭: %s — 스킵", region.region_id
                 )
                 continue
+            if self.cfg.align_to_siglip_patch:
+                crop = self._align_to_48px(crop)
 
             # pixel_budget: InstructionSpec에 명시되어 있으면 사용, 아니면 기본값
             budget = spec.pixel_budget or self.get_pixel_budget(
@@ -149,15 +186,51 @@ class ResolutionRouter:
     def _crop_region(
         self, image_rgb: np.ndarray, region: LayoutRegion,
     ) -> np.ndarray:
-        """bbox 크롭 (패딩 적용, 이미지 경계 클램프)."""
+        """bbox 크롭 + 영역 타입별 비율 패딩 (원본 이미지 맥락 포함, 경계 클램프).
+
+        공백 패딩이 아닌 원본 이미지의 실제 주변 콘텐츠를 포함합니다.
+        영역이 작은 경우 비율 패딩이 0이 되지 않도록 min_crop_padding_px 적용.
+        """
         h, w = image_rgb.shape[:2]
-        pad = self.cfg.crop_padding
         b = region.bbox
+        bbox_w = max(1, b.x2 - b.x1)
+        bbox_h = max(1, b.y2 - b.y1)
 
-        x1 = max(0, b.x1 - pad)
-        y1 = max(0, b.y1 - pad)
-        x2 = min(w, b.x2 + pad)
-        y2 = min(h, b.y2 + pad)
+        rt = (
+            region.region_type.value
+            if hasattr(region.region_type, "value")
+            else str(region.region_type)
+        )
+        ratio = self.get_padding_ratio(rt)
+        pad_x = max(self.cfg.min_crop_padding_px, int(bbox_w * ratio))
+        pad_y = max(self.cfg.min_crop_padding_px, int(bbox_h * ratio))
 
-        crop = image_rgb[y1:y2, x1:x2]
-        return crop
+        x1 = max(0, b.x1 - pad_x)
+        y1 = max(0, b.y1 - pad_y)
+        x2 = min(w, b.x2 + pad_x)
+        y2 = min(h, b.y2 + pad_y)
+
+        return image_rgb[y1:y2, x1:x2]
+
+    def _align_to_48px(self, image: np.ndarray) -> np.ndarray:
+        """크롭 이미지를 48px 배수로 리사이즈하여 SigLIP 패치 낭비 방지.
+
+        SigLIP은 16×16 패치로 분할 후 3×3 블록 단위로 average pooling합니다.
+        크롭 크기가 48px 배수가 아니면 패딩 픽셀에 토큰이 낭비됩니다.
+
+        - 가장 가까운 48px 배수로 리사이즈 (Lanczos)
+        - 최소 한 변 48px 보장
+        - 원본이 작아 round 결과가 0이면 48로 보정
+        """
+        h, w = image.shape[:2]
+        if h == 0 or w == 0:
+            return image
+
+        align = SIGLIP_PATCH_ALIGN
+        new_h = max(align, round(h / align) * align)
+        new_w = max(align, round(w / align) * align)
+
+        if new_h == h and new_w == w:
+            return image
+
+        return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
