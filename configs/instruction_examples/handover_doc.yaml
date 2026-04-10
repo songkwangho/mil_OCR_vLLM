@@ -1,0 +1,14 @@
+# 1-shot 예시 — 인수인계서
+form_type: handover_doc
+example_description: "인계자/인수자 서명과 품목 목록이 있는 인수인계서 예시입니다."
+example_response: |
+  {
+    "analysis": "인계자·인수자 서명 선명, 날짜 형식 YYYY-MM-DD 확인",
+    "form_type": "handover_doc",
+    "from_person": "김철수",
+    "to_person": "이영희",
+    "handover_date": "2026-03-15",
+    "items": [
+      {"item_no": 1, "item_name": "노트북", "quantity": 1, "serial_number": "SN-A1B2C3"}
+    ]
+  }

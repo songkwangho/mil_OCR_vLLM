@@ -105,13 +105,23 @@ class AnalysisMode(str, Enum):
 # ──────────────────────────────────────────────
 
 class FormType(str, Enum):
-    """서식 유형 (P3 VLM 분류)."""
+    """서식 유형 (P3 VLM 분류).
+
+    military 서식 (supply_request ~ inspection_report): 군수 처리 경로
+    unknown: 군수 서식인데 유형 불명 → military 경로 유지 (_fallback.json)
+    other: 군수 서식이 아닌 일반 문서 → 범용 OCR 경로 (_general.json, 룰 검증 없음)
+    """
     SUPPLY_REQUEST = "supply_request"
     MAINTENANCE_RECORD = "maintenance_record"
     INVENTORY_SHEET = "inventory_sheet"
     HANDOVER_DOC = "handover_doc"
     INSPECTION_REPORT = "inspection_report"
     UNKNOWN = "unknown"
+    OTHER = "other"
+
+    def is_military(self) -> bool:
+        """군수 처리 경로 여부 (other 제외)."""
+        return self != FormType.OTHER
 
 
 class CodeType(str, Enum):
@@ -164,9 +174,10 @@ class OutputFormat(str, Enum):
 class PipelineStatus(str, Enum):
     """파이프라인 최종 상태."""
     SUCCESS = "success"
-    PARTIAL = "partial"        # fallback 경로 처리 (정확도 ↓)
-    REVIEW = "review"          # 수동 검토 필요
+    PARTIAL = "partial"                # fallback 경로 처리 (정확도 ↓)
+    REVIEW = "review"                  # 수동 검토 필요
     FAILED = "failed"
+    OTHER_DOCUMENT = "other_document"  # 군수 서식 아님 → 범용 OCR 경로, 검토 큐 미적재
 
 
 class ProcessingPath(str, Enum):

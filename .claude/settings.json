@@ -21,7 +21,8 @@
       "Bash(/home/team_gh/toy_dev/miniforge3/envs/dl/bin/python -u -c ':*)",
       "Bash(awk '{print \"PID=\" $2, \"CPU=\" $3, \"RSS_GB=\" $6/1024/1024}')",
       "Bash(kill 2635512)",
-      "Bash(python3 -c ':*)"
+      "Bash(python3 -c ':*)",
+      "Bash(wc -l /home/team_gh/mil_OCR_v2/CLAUDE.md /home/team_gh/mil_OCR_v2/docs/*.md)"
     ]
   }
 }

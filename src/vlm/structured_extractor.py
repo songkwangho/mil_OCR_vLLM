@@ -320,7 +320,10 @@ class StructuredExtractor:
             field_logprobs = extract_field_logprobs(logprobs, text, schema)
 
             for key, value in parsed.items():
-                if key == "form_type":
+                # 메타 필드 스킵:
+                # - form_type: 스키마 분류 결과 (이미 form_classifier가 확정)
+                # - analysis: CoT 사고 과정 (값이 아닌 추론 보조 정보 — DB 저장 대상 아님)
+                if key in ("form_type", "analysis"):
                     continue
 
                 val_str = (

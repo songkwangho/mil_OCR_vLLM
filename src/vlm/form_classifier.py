@@ -39,12 +39,18 @@ class FormClassifierConfig:
     temperature: float = 0.0
     request_timeout: float = 30.0
 
-    # 분류 instruction
+    # 분류 instruction (other 분기 포함)
     classify_instruction: str = (
         "이 문서의 서식 유형을 분류하세요. "
-        "다음 중 하나로 답하세요: "
-        "supply_request, maintenance_record, inventory_sheet, "
-        "handover_doc, inspection_report, unknown"
+        "군수(military) 서식이면 해당 유형을, 군수 서식이 아닌 일반 문서는 'other'로 분류하세요.\n"
+        "다음 중 하나로 답하세요:\n"
+        "- supply_request: 보급청구서\n"
+        "- maintenance_record: 정비기록서\n"
+        "- inventory_sheet: 물자현황표\n"
+        "- handover_doc: 인수인계서\n"
+        "- inspection_report: 검사보고서\n"
+        "- unknown: 군수 서식이지만 유형 불명\n"
+        "- other: 군수 서식이 아닌 일반 문서 (공문서, 지시문, 개인 서류 등)"
     )
 
 

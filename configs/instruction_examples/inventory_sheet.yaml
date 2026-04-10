@@ -1,0 +1,13 @@
+# 1-shot 예시 — 물자현황표
+form_type: inventory_sheet
+example_description: "부대 물자현황표 품목/재고수량 예시입니다."
+example_response: |
+  {
+    "analysis": "표 구조 뚜렷, 열 헤더 인쇄체, 수량은 수기 기입",
+    "form_type": "inventory_sheet",
+    "unit_code": "1232부대",
+    "report_date": "2026-04-01",
+    "items": [
+      {"item_no": 1, "item_name": "탄약통", "stock_qty": 50, "location": "창고 A-3"}
+    ]
+  }

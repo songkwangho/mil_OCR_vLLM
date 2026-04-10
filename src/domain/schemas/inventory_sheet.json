@@ -8,6 +8,10 @@
   "description": "군수 물자현황표 필드 추출 스키마 (guided_json용)",
   "type": "object",
   "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "영역 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술 (답변 전 사고 과정)"
+    },
     "form_type": {
       "type": "string",
       "enum": ["inventory_sheet"]
@@ -73,5 +77,5 @@
       "description": "비고"
     }
   },
-  "required": ["form_type", "unit_code", "report_date", "items"]
+  "required": ["analysis", "form_type", "unit_code", "report_date", "items"]
 }

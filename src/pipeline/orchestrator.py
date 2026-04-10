@@ -393,12 +393,23 @@ class PipelineOrchestrator:
                 result.p3a_form_type = form_type.value if hasattr(form_type, "value") else str(form_type)
                 result.p3a_form_confidence = form_confidence
 
-                # 스키마 로드
+                # 스키마 로드 — form_type별 분기
                 from src.domain.schema_registry import SchemaRegistry
+                from src.interfaces.enums import FormType as _FT
                 registry = SchemaRegistry()
-                schema_id = result.p3a_form_type if result.p3a_form_type != "unknown" else "_fallback"
+
+                if form_type == _FT.OTHER:
+                    # other 문서: 범용 스키마, 군수 룰 검증 없음
+                    schema_id = "_general"
+                elif form_type == _FT.UNKNOWN:
+                    # 군수 서식인데 유형 불명
+                    schema_id = "_fallback"
+                else:
+                    schema_id = result.p3a_form_type
+
                 schema = registry.load(schema_id)
                 if schema is None:
+                    # 최종 fallback
                     schema = registry.load("_fallback")
                     schema_id = "_fallback"
 
@@ -496,8 +507,12 @@ class PipelineOrchestrator:
                 json_out, xml_out, csv_rows = serialized
 
         # ─── P6: DB 적재 ───
+        from src.interfaces.enums import FormType as _FT
         status = PipelineStatus.SUCCESS
-        if p4_out.review_required:
+        if p3_out.form_type == _FT.OTHER:
+            # other 문서: 범용 OCR 결과, 검토 큐 미적재
+            status = PipelineStatus.OTHER_DOCUMENT
+        elif p4_out.review_required:
             status = PipelineStatus.REVIEW
         elif result.processing_path == ProcessingPath.FALLBACK:
             status = PipelineStatus.PARTIAL

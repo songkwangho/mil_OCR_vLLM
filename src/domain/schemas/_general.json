@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "_general",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2026-04-10",
+  "x-mil-ocr-deprecated": false,
+  "title": "범용 문서 (other)",
+  "description": "군수 서식이 아닌 일반 문서용 범용 OCR 스키마. 영역별 텍스트만 추출하며 군수 도메인 룰 검증 없음.",
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "영역 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술"
+    },
+    "content": {
+      "type": "string",
+      "description": "영역 내 전체 텍스트 (자연어 그대로)"
+    }
+  },
+  "required": ["analysis", "content"]
+}

@@ -27,6 +27,12 @@ services:
     environment:
       - HF_HUB_OFFLINE=1
       - VLLM_NO_USAGE_STATS=1
+    # AI_INFERENCE.md §3 최적화 설정 — 2026-04-10 적용:
+    # - fp8 KV Cache: 메모리 50% 절감, 동시처리 2배 (H100 FP8 텐서 코어)
+    # - chunked prefill: 온라인 서빙 throughput 최적화
+    # - mm-cache-preprocessor: 멀티모달 prefix caching (동일 system_prompt TTFT 3~10배 단축)
+    # - xgrammar: 반복 서식 스키마 캐싱
+    # - ngram speculative decoding: 구조화 JSON 반복 패턴 가속 (1.2~1.5배)
     command:
       - "/models/gemma4/gemma-4-26b-a4b-it/"
       - "--host"
@@ -35,13 +41,25 @@ services:
       - "8000"
       - "--tensor-parallel-size"
       - "1"
+      - "--dtype"
+      - "bfloat16"
       - "--max-model-len"
       - "8192"
       - "--max-num-seqs"
-      - "128"
+      - "64"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--kv-cache-dtype"
+      - "fp8"
+      - "--mm-cache-preprocessor"
+      - "--guided-decoding-backend"
+      - "xgrammar"
+      - "--speculative-config"
+      - '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_max":4,"prompt_lookup_min":1}'
       - "--trust-remote-code"
       - "--gpu-memory-utilization"
-      - "0.90"
+      - "0.92"
+      - "--disable-log-requests"
     # ── 수준 A: 헬스체크 + 자동 재시작 ──
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]

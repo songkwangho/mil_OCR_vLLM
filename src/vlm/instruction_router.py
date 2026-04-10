@@ -55,19 +55,36 @@ _SYSTEM_PROMPTS: dict[str, str] = {
     "inventory_sheet": "군수 물자현황표 필드 추출 시스템입니다.",
     "handover_doc": "군수 인수인계서 필드 추출 시스템입니다.",
     "inspection_report": "군수 검사보고서 필드 추출 시스템입니다.",
-    "other": "기타 서식 필드 추출 시스템입니다.",
+    "unknown": "군수 서식 OCR 시스템입니다.",
+    "other": "문서 OCR 시스템입니다.",
 }
 
 _DEFAULT_SYSTEM_PROMPT = "군수 서식 OCR 시스템입니다."
+
+# other 경로 전용 instruction — 군수 도메인 맥락 없음
+_OTHER_REGION_INSTRUCTION = "이 영역의 텍스트를 인식하세요."
+
+# CoT(analysis) 안내 — 군수 경로에만 추가
+_COT_INSTRUCTION = (
+    "\n\n[사고 과정]\n"
+    "답변 JSON 최상단의 analysis 필드에 이미지 품질, 레이아웃, 모호한 문자를 "
+    "30~50 토큰으로 간략히 기술한 뒤 나머지 필드를 추출하세요."
+)
 
 # ─────────────────────────────────────────────
 #  region_type → 기본 pixel_budget 매핑
 # ─────────────────────────────────────────────
 
 _DEFAULT_PIXEL_BUDGETS: dict[str, int] = {
+    # 설계 업데이트 (2026-04-10): PIPELINE.md §2-4 기준
+    # - table: 1120 유지 (셀 경계·미세 글씨)
+    # - seal: 560 유지 (원형 배치 텍스트)
+    # - text: 280 → 560 상향 (소형 폰트·수기 대응)
+    # - handwritten_field: v2 RegionType에 없음 (VLM이 내용으로 판별) →
+    #   실측 상 수기 영역은 text로 반환되므로 text 상향으로 간접 대응
     "table": 1120,
     "seal": 560,
-    "text": 280,
+    "text": 560,
     "formula": 280,
     "chart": 280,
     "figure": 140,
@@ -75,7 +92,7 @@ _DEFAULT_PIXEL_BUDGETS: dict[str, int] = {
     "footer": 140,
 }
 
-_FALLBACK_PIXEL_BUDGET = 280
+_FALLBACK_PIXEL_BUDGET = 560
 
 
 class InstructionRouter:
@@ -95,6 +112,7 @@ class InstructionRouter:
         self,
         config_path: str = "configs/instruction_mappings.yaml",
         schema_registry: Optional[SchemaRegistry] = None,
+        examples_dir: str = "configs/instruction_examples",
     ) -> None:
         self._task_prompts: dict[str, str] = {}
         self._region_instructions: dict[str, str] = {}
@@ -105,6 +123,11 @@ class InstructionRouter:
 
         self._schema_registry = schema_registry or SchemaRegistry()
 
+        # 1-shot 예시 로드 (prefix caching 효율을 위해 정적으로 캐시)
+        self._examples_dir = self._resolve_path(examples_dir)
+        self._examples: dict[str, dict] = {}  # form_type → {description, response}
+        self._load_examples()
+
     # ── form_type 인식 라우팅 API ──────────
 
     def route(
@@ -114,23 +137,44 @@ class InstructionRouter:
     ) -> InstructionSpec:
         """영역 + 서식 유형에 대응하는 VLM 호출 명세를 생성합니다.
 
-        Args:
-            region: 레이아웃 영역 (region_id, region_type 포함).
-            form_type: 서식 유형. None이면 범용 instruction 생성.
+        military 경로: 도메인 맥락 + 1-shot 예시 + CoT(analysis) 지시 + 군수 스키마.
+        other 경로: 범용 OCR instruction + _general 스키마 (도메인/CoT/1-shot 없음).
+        form_type=None: FormClassifier 미수행 시 최소 instruction.
 
         Returns:
-            InstructionSpec with system_prompt, user_instruction,
-            json_schema, pixel_budget 등 모든 필드 채워짐.
+            InstructionSpec — system_prompt, user_instruction,
+            json_schema, pixel_budget 등 모든 필드 채움.
         """
         region_type_value = region.region_type.value
         form_type_value = form_type.value if form_type else None
+        is_other = form_type == FormType.OTHER
+
+        # ── other 경로: 범용 OCR (도메인 맥락 없음) ──
+        if is_other:
+            system_prompt = _SYSTEM_PROMPTS["other"]
+            user_instruction = _OTHER_REGION_INSTRUCTION
+            json_schema = self._schema_registry.load("_general")
+            pixel_budget = _DEFAULT_PIXEL_BUDGETS.get(
+                region_type_value, _FALLBACK_PIXEL_BUDGET
+            )
+            return InstructionSpec(
+                region_id=region.region_id,
+                region_type=region.region_type,
+                form_type=form_type,
+                system_prompt=system_prompt,
+                user_instruction=user_instruction,
+                json_schema=json_schema,
+                pixel_budget=pixel_budget,
+            )
+
+        # ── military 경로: 도메인 맥락 + CoT + 1-shot 예시 ──
 
         # 1) region_instruction (YAML 기반)
         region_instruction = self._region_instructions.get(
             region_type_value, _DEFAULT_REGION_INSTRUCTION
         )
 
-        # 2) form_type 기반 extraction context 추가
+        # 2) form_type 기반 extraction context
         if form_type_value:
             extraction = self._extraction_instructions.get(
                 form_type_value, _DEFAULT_EXTRACTION_INSTRUCTION
@@ -139,7 +183,21 @@ class InstructionRouter:
         else:
             user_instruction = region_instruction
 
-        # 3) system_prompt
+        # 3) CoT(analysis) 지시 추가 (군수 경로만)
+        if form_type_value and form_type_value != "other":
+            user_instruction += _COT_INSTRUCTION
+
+        # 4) 1-shot 예시 부착 (form_type별 예시 존재 시)
+        example = self._examples.get(form_type_value) if form_type_value else None
+        if example:
+            user_instruction += (
+                "\n\n[예시]\n"
+                f"{example.get('description', '')}\n"
+                "예시 결과:\n"
+                f"{example.get('response', '')}"
+            )
+
+        # 5) system_prompt
         if form_type_value:
             system_prompt = _SYSTEM_PROMPTS.get(
                 form_type_value, _DEFAULT_SYSTEM_PROMPT
@@ -147,12 +205,14 @@ class InstructionRouter:
         else:
             system_prompt = _DEFAULT_SYSTEM_PROMPT
 
-        # 4) json_schema (SchemaRegistry)
+        # 6) json_schema (SchemaRegistry)
         json_schema: Optional[dict] = None
         if form_type_value:
-            json_schema = self._schema_registry.load(form_type_value)
+            # unknown → _fallback, 그 외 → form_type
+            schema_id = "_fallback" if form_type_value == "unknown" else form_type_value
+            json_schema = self._schema_registry.load(schema_id)
 
-        # 5) pixel_budget
+        # 7) pixel_budget
         pixel_budget = _DEFAULT_PIXEL_BUDGETS.get(
             region_type_value, _FALLBACK_PIXEL_BUDGET
         )
@@ -215,6 +275,46 @@ class InstructionRouter:
             os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
         )
         return os.path.join(project_root, config_path)
+
+    def _load_examples(self) -> None:
+        """configs/instruction_examples/*.yaml 1-shot 예시 로드.
+
+        prefix caching 최적화를 위해 정적으로 캐시합니다. 서식별 예시가
+        system_prompt 이후 user_instruction에 포함되면 동일 유형 요청에서
+        KV 블록이 재사용되어 TTFT가 3~10배 단축됩니다.
+        """
+        if not os.path.isdir(self._examples_dir):
+            logger.info(
+                "InstructionRouter: 예시 디렉토리 없음 — %s (1-shot 비활성)",
+                self._examples_dir,
+            )
+            return
+
+        for filename in sorted(os.listdir(self._examples_dir)):
+            if not filename.endswith((".yaml", ".yml")):
+                continue
+            form_type = filename.rsplit(".", 1)[0]
+            try:
+                with open(
+                    os.path.join(self._examples_dir, filename),
+                    "r",
+                    encoding="utf-8",
+                ) as f:
+                    data = yaml.safe_load(f) or {}
+                self._examples[form_type] = {
+                    "description": data.get("example_description", ""),
+                    "response": data.get("example_response", ""),
+                }
+            except Exception as e:
+                logger.warning(
+                    "InstructionRouter: 예시 로드 실패 (%s): %s", filename, e
+                )
+
+        logger.info(
+            "InstructionRouter: %d개 1-shot 예시 로드 완료 (%s)",
+            len(self._examples),
+            self._examples_dir,
+        )
 
     def _load(self, path: str) -> None:
         """YAML 설정 파일 로드."""

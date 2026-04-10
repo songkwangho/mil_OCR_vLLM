@@ -37,9 +37,11 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 DEFAULT_PIXEL_BUDGETS: dict[str, int] = {
+    # 설계 업데이트 (2026-04-10): PIPELINE.md §2-4 기준
+    # text 280 → 560 상향 (소형 폰트·수기 대응)
     "table":    1120,   # 셀 경계·미세 글씨 → 최고 해상도
     "seal":      560,   # 원형 배치 텍스트
-    "text":      280,   # 일반 텍스트
+    "text":      560,   # 일반 텍스트 — 상향 (소형 폰트 대응)
     "formula":   280,
     "chart":     280,
     "figure":    140,

@@ -8,6 +8,10 @@
   "description": "서식 유형 미분류 시 범용 key-value 추출 스키마",
   "type": "object",
   "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "영역 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술 (답변 전 사고 과정)"
+    },
     "form_type": {
       "type": "string",
       "enum": ["unknown"]
@@ -71,5 +75,5 @@
       "description": "비고"
     }
   },
-  "required": ["form_type"]
+  "required": ["analysis", "form_type"]
 }

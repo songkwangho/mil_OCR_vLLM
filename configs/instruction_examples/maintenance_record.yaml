@@ -1,0 +1,13 @@
+# 1-shot 예시 — 정비기록서
+form_type: maintenance_record
+example_description: "장비 식별번호와 정비 내용이 기록된 정비기록서 예시입니다."
+example_response: |
+  {
+    "analysis": "장비 식별번호 명확, 정비 유형 인쇄, 수기 서명 부분 확인됨",
+    "form_type": "maintenance_record",
+    "equipment_id": "K21-001",
+    "maintenance_type": "정기",
+    "maintenance_date": "2026-03-28",
+    "technician_name": "홍길동",
+    "result": "완료"
+  }

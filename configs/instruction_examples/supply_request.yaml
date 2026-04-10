@@ -1,0 +1,15 @@
+# 1-shot 예시 — 보급청구서
+# InstructionRouter가 user_instruction에 부착하여 prefix caching 효율을 높임.
+# 동일 form_type 요청 간 [예시] 블록이 KV 캐시 재사용 대상이 됨.
+form_type: supply_request
+example_description: "수기 NSN 코드와 수량이 있는 보급청구서 기입란 예시입니다."
+example_response: |
+  {
+    "analysis": "수기 필체 선명, NSN 형식 확인, 수량 숫자 명확",
+    "form_type": "supply_request",
+    "unit_code": "1232부대",
+    "request_date": "2026-04-05",
+    "items": [
+      {"item_no": 1, "nsn": "1005-01-432-1234", "item_name": "소총 정비부품", "quantity": 10, "unit_price": 12000, "total": 120000}
+    ]
+  }

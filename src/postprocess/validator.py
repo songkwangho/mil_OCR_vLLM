@@ -281,16 +281,24 @@ class P4Validator:
 
         Returns:
             ValidatedResult
+
+        Note:
+            form_type == OTHER 인 경우 군수 도메인 룰 검증(산술/코드/날짜/필수 필드)을
+            모두 건너뜁니다. 신뢰도 산출만 수행하고, review_required는 False로 고정.
         """
+        from src.interfaces.enums import FormType
+
         fields = list(vlm_result.fields)  # 복사본 (보정 반영용)
         form_type = vlm_result.form_type.value
+        is_other = vlm_result.form_type == FormType.OTHER
 
-        # ── 1. 룰 검증 실행 ───
+        # ── 1. 룰 검증 실행 (other는 건너뜀) ───
         all_errors: list[ValidationError] = []
-        all_errors.extend(_validate_arithmetic(fields))
-        all_errors.extend(_validate_code_format(fields))
-        all_errors.extend(_validate_date_logic(fields))
-        all_errors.extend(_validate_missing_fields(fields, form_type))
+        if not is_other:
+            all_errors.extend(_validate_arithmetic(fields))
+            all_errors.extend(_validate_code_format(fields))
+            all_errors.extend(_validate_date_logic(fields))
+            all_errors.extend(_validate_missing_fields(fields, form_type))
 
         # error_id 재번호 부여
         for i, err in enumerate(all_errors):
@@ -340,12 +348,17 @@ class P4Validator:
         # ── 4. 판정 ───
         flagged_fields = [f.field_key for f in adjusted_fields if f.is_flagged]
         has_critical = any(e.severity == Severity.CRITICAL for e in all_errors)
-        review_required = (
-            has_critical
-            or bool(flagged_fields)
-            or overall < OVERALL_CONFIDENCE_THRESHOLD
-            or processing_path == ProcessingPath.FALLBACK
-        )
+
+        if is_other:
+            # other 문서는 군수 업무 대상이 아니므로 검토 큐 미적재
+            review_required = False
+        else:
+            review_required = (
+                has_critical
+                or bool(flagged_fields)
+                or overall < OVERALL_CONFIDENCE_THRESHOLD
+                or processing_path == ProcessingPath.FALLBACK
+            )
 
         logger.info(
             "[P4][%s] 검증 완료: errors=%d (critical=%s), flagged=%d, "
