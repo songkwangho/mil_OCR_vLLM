@@ -8,8 +8,9 @@
 ## 1. 현재 상태
 
 - 프론트엔드 UI 미구현
-- 모든 추론/테스트는 CLI 스크립트로 수행
-- 결과 출력은 `data/pipeline_outputs/<trial_id>/` 디렉토리에 JSON + 이미지로 저장
+- 모든 추론/테스트는 CLI 스크립트(`scripts/run_pipeline_with_outputs.py`) 또는 Pipeline FastAPI 서버([src/pipeline/server.py](../src/pipeline/server.py))로 수행
+- 결과 출력은 `data/pipeline_outputs/<YYYYMMDD_HHMMSS>/` 디렉토리에 JSON + 이미지 + 영역 trace로 저장 (BACKEND.md §11-2 참조)
+- 백엔드 HTTP 서버는 이미 구현 완료 — 향후 UI는 이 엔드포인트들을 호출
 
 ---
 
@@ -62,13 +63,51 @@
     → 교정 데이터 자동 export (SFT/DPO/FormClassifier 형식)
 ```
 
-**API 엔드포인트** (FastAPI MVP):
+**API 엔드포인트** (FastAPI MVP — 신규 구현 예정):
 | Method | Path | 설명 |
 |--------|------|------|
 | GET | `/api/review-queue` | 큐 목록 조회 |
 | GET | `/api/review-queue/{queue_id}` | 개별 항목 상세 |
 | PATCH | `/api/review-queue/{queue_id}` | 상태 변경 + 필드 수정 |
 | GET | `/api/review-queue/{queue_id}/image` | 원본 이미지 반환 |
+
+### 2-1-1. Pipeline HTTP 서버 (구현 완료)
+
+[src/pipeline/server.py](../src/pipeline/server.py) — Dockerfile.pipeline 컨테이너 엔트리포인트. 검토 큐 UI 외에도 신규 문서 처리 요청을 받는 진입점입니다.
+
+| Method | Path | 설명 |
+|--------|------|------|
+| `GET` | `/health` | 서비스 상태 (`vlm_healthy`, `layout_service`, `fallback_enabled`) |
+| `POST` | `/pipeline/run` | JSON 바디 (`doc_id`, `image_b64`, `file_ext`, `source_type`, `dpi_hint`, `metadata`) → `RunResponse` |
+| `POST` | `/pipeline/upload` | 멀티파트 파일 업로드 → `RunResponse` |
+
+**RunResponse 스키마**:
+```python
+{
+  "doc_id": str,
+  "status": str,                  # success | partial | review | failed
+  "processing_path": str,         # vlm | fallback | none
+  "form_type": Optional[str],     # P3-A 분류 결과
+  "form_confidence": float,
+  "fields": [
+    {"field_key", "raw_value", "corrected_value", "confidence", "is_flagged"}
+  ],
+  "table_count": int,
+  "total_ms": float,
+  "timings": {"P1", "P2", "P2.5A", "P3A", "P2.5B", "P2.5C", "P3B", "P4", "P5", "P6"},
+  "errors": [str],
+  "warnings": [str]
+}
+```
+
+### 2-1-2. Fallback HTTP 서버 (구현 완료)
+
+[src/fallback/server.py](../src/fallback/server.py) — Dockerfile.fallback 컨테이너 엔트리포인트. 오케스트레이터가 VLM 불가 시 호출하며, UI에서 직접 호출할 일은 거의 없음.
+
+| Method | Path | 설명 |
+|--------|------|------|
+| `GET` | `/health` | 서비스 상태 (`t3_loaded`, `t4_loaded`, `t5_loaded`) |
+| `POST` | `/fallback/process` | `{doc_id, image_b64, dpi, regions, reading_order}` → `VLMResult` 호환 응답 |
 
 ### 2-2. 문서 처리 UI (Phase 3)
 
@@ -101,3 +140,20 @@
 
 최종 출력은 `PipelineOutput`으로 JSON / XML / CSV 형태.
 상세 스키마: `docs/BACKEND.md` §2 참조.
+
+### 3-1. 단계별 시각화 데이터 (`data/pipeline_outputs/<ts>/<doc>/`)
+
+Pipeline 컨테이너가 생성하는 단계별 결과는 검토 큐 UI 시각화에 그대로 활용할 수 있습니다 (BACKEND.md §11-2 전체 구조 참조):
+
+| 단계 | 파일 | UI 활용 |
+|------|------|---------|
+| P1 | `preprocessed.png`, `binary.png`, `result.json` | 전처리 전/후 비교, SR 적용 여부 |
+| P2 | `layout_visualization.png`, `result.json` | PP-DocLayout 원시 검출 bbox 오버레이 (정제 전) |
+| P2.5A | `layout_visualization.png`, `result.json` | LayoutPostProcessor 정제 후 bbox (P2와 비교 — 제거/병합 효과) |
+| P3A | `result.json` | form_type, form_confidence 표시 |
+| P2.5B | `result.json` | 영역별 instruction (system_prompt, user_instruction, json_schema, pixel_budget) — 인스트럭션 라우팅 검증 |
+| P2.5C | `crops/*.png`, `result.json` | vLLM이 받은 실제 크롭 이미지 + pixel_budget 그룹화 결과 |
+| P3 | `result.json`, `region_traces.json` | 영역별 vLLM 호출 trace (요청/응답/소요시간/추출 필드) |
+| P4 | `result.json` | 신뢰도 히트맵, ValidationError 인라인 표시 |
+| P5 | `output.json/xml/csv` | 최종 직렬화 출력 |
+| P6 | `result.json` | DB 적재 결과 + review_queue_id |

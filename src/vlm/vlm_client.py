@@ -1,12 +1,14 @@
-"""VLM 공용 유틸리티 — 이미지 인코딩, 크롭, VLM 클라이언트, logprobs/코드 감지.
+"""VLM 공용 유틸리티 — vLLM HTTP 통신 + 이미지 base64 인코딩 + logprobs 파싱.
 
-gemma4_engine.py에서 추출한 공통 함수·클래스를 제공합니다.
+책임 경계:
+  - 이 모듈: vLLM HTTP 통신, 이미지 base64 인코딩, logprobs 파싱, HTML 표 파싱
+  - 이미지 크롭: ResolutionRouter (resolution_router.py) 전담
+  - 도메인 코드 감지: StructuredExtractor (structured_extractor.py) 내부
 
 제공 API:
   - encode_image_base64(image_rgb, max_size) — RGB 이미지 → base64 PNG
-  - crop_region(image_rgb, region)           — LayoutRegion bbox 크롭
   - extract_field_logprobs(...)              — VLM logprobs → 필드별 토큰 logprob 매핑
-  - detect_domain_codes(parsed_json)         — JSON에서 도메인 코드 패턴 자동 감지
+  - parse_html_cells(html)                   — HTML 표 → 셀 목록
   - VLMClient                                — vLLM OpenAI 호환 API 래퍼
 """
 
@@ -21,22 +23,7 @@ from typing import Any, Optional
 import cv2
 import numpy as np
 
-from src.interfaces.enums import CodeType
-from src.interfaces.types import DomainCode, LayoutRegion
-
 logger = logging.getLogger(__name__)
-
-
-# ─────────────────────────────────────────────
-#  도메인 코드 패턴
-# ─────────────────────────────────────────────
-
-_CODE_PATTERNS: list[tuple[str, CodeType]] = [
-    (r"\d{4}-\d{2}-\d{3}-\d{4}", CodeType.NSN),           # NSN
-    (r"KN-\d{5}-\d{4}", CodeType.K_NSN),                   # K-NSN
-    (r"\d{2,4}부대", CodeType.UNIT_CODE),                   # 부대코드
-    (r"\d{4}-\d{2}-\d{2}", CodeType.DATE),                  # 날짜
-]
 
 
 # ─────────────────────────────────────────────
@@ -64,27 +51,6 @@ def encode_image_base64(image_rgb: np.ndarray, max_size: int = 1120) -> str:
     image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
     _, buf = cv2.imencode(".png", image_bgr)
     return base64.b64encode(buf.tobytes()).decode("utf-8")
-
-
-def crop_region(image_rgb: np.ndarray, region: LayoutRegion) -> np.ndarray:
-    """이미지에서 LayoutRegion의 bbox 영역을 크롭.
-
-    좌표가 이미지 경계를 벗어나면 자동으로 클램프합니다.
-
-    Args:
-        image_rgb: (H, W, 3) RGB numpy 배열.
-        region: bbox 정보를 담은 LayoutRegion.
-
-    Returns:
-        크롭된 (h, w, 3) numpy 배열.
-    """
-    bb = region.bbox
-    h, w = image_rgb.shape[:2]
-    x1 = max(0, bb.x1)
-    y1 = max(0, bb.y1)
-    x2 = min(w, bb.x2)
-    y2 = min(h, bb.y2)
-    return image_rgb[y1:y2, x1:x2]
 
 
 # ─────────────────────────────────────────────
@@ -175,46 +141,6 @@ def extract_field_logprobs(
             result[key] = (sample, data_type)
 
     return result
-
-
-# ─────────────────────────────────────────────
-#  도메인 코드 자동 감지
-# ─────────────────────────────────────────────
-
-def detect_domain_codes(parsed_json: dict) -> list[DomainCode]:
-    """VLM 출력 JSON에서 도메인 코드 패턴을 자동 감지.
-
-    Args:
-        parsed_json: VLM이 출력한 파싱된 JSON dict.
-
-    Returns:
-        감지된 ``DomainCode`` 목록.
-    """
-    codes: list[DomainCode] = []
-    seen: set[str] = set()
-
-    def _scan_value(val: Any) -> None:
-        if isinstance(val, str):
-            for pattern, code_type in _CODE_PATTERNS:
-                for match in re.finditer(pattern, val):
-                    raw = match.group()
-                    if raw not in seen:
-                        seen.add(raw)
-                        codes.append(DomainCode(
-                            code_type=code_type,
-                            raw_value=raw,
-                            normalized_value=raw,
-                            confidence=0.9,
-                        ))
-        elif isinstance(val, dict):
-            for v in val.values():
-                _scan_value(v)
-        elif isinstance(val, list):
-            for item in val:
-                _scan_value(item)
-
-    _scan_value(parsed_json)
-    return codes
 
 
 # ─────────────────────────────────────────────

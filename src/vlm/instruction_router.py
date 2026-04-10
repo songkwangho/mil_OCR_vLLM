@@ -55,6 +55,7 @@ _SYSTEM_PROMPTS: dict[str, str] = {
     "inventory_sheet": "군수 물자현황표 필드 추출 시스템입니다.",
     "handover_doc": "군수 인수인계서 필드 추출 시스템입니다.",
     "inspection_report": "군수 검사보고서 필드 추출 시스템입니다.",
+    "other": "기타 서식 필드 추출 시스템입니다.",
 }
 
 _DEFAULT_SYSTEM_PROMPT = "군수 서식 OCR 시스템입니다."

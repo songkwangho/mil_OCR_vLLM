@@ -13,6 +13,11 @@ DocumentInput
 [Stage 1 — 전처리]
     P1:     화질 보정 + SR          → PreprocessedImage
     P2:     레이아웃 탐지            → RawLayoutResult  (PP-DocLayout 원시 탐지)
+        ├── Fusion OFF: V3 단독 탐지
+        └── Fusion ON (LAYOUT_FUSION_MODE=true):
+            ├── DPI ≥ 150: V3(구조) + plus-L(텍스트), 50% 겹침 필터
+            └── DPI < 150: V3(구조) + OpenCV heuristic(텍스트), 50% 겹침 필터
+            reading_order: V3 구조 영역 순서 → 텍스트 좌상→우하 정렬
     P2.5-A: LayoutPostProcessor     → LayoutResult     (정제 완료)
         ① 미소 박스 제거 (6px 미만)
         ② 중복 박스 제거 (IoU > 0.7)
@@ -25,7 +30,7 @@ DocumentInput
 
     P2.5-B: InstructionRouter       → list[InstructionSpec]
         region_type + form_type → 도메인 맥락 포함 instruction 생성
-        (TASK_PROMPTS 딕셔너리 대체 — layout_analyzer/types.py에서 제거)
+        (TASK_PROMPTS 딕셔너리를 대체하여 일원화 완료)
 
     P2.5-C: ResolutionRouter        → list[CroppedRegion]
         영역 타입별 pixel_budget 할당:
@@ -210,7 +215,7 @@ class VLMResult:
     fields: list[FieldValue]
     tables: list[RecognizedTable]
     domain_codes: list[DomainCode]
-    raw_json: str = ""         # VLM 원본 JSON 응답 (디버깅용)
+    raw_json: str = ""         # VLM 원본 JSON 응답 (디버깅/파이프라인 내부 전용, DB 적재 제외)
     processing_time_ms: float = 0.0
     processing_path: ProcessingPath = ProcessingPath.VLM
     warnings: list[str] = field(default_factory=list)
@@ -241,6 +246,15 @@ class ValidatedResult:
     processing_path: ProcessingPath = ProcessingPath.VLM
 
 @dataclass
+class CorrectedField:
+    """검토 큐에서 담당자가 수정한 필드 (JSONPath 기반 중첩 지원)."""
+    field_path: str            # JSONPath 형식: "items[0].quantity", "nsn"
+    original_value: str
+    corrected_value: str
+    corrected_by: str = ""
+    corrected_at: Optional[datetime] = None
+
+@dataclass
 class ReviewQueueItem:
     queue_id: str                    # RQ-20260407-001
     doc_id: str
@@ -256,7 +270,7 @@ class ReviewQueueItem:
     status: ReviewStatus = ReviewStatus.PENDING
     reviewer: Optional[str] = None
     reviewed_at: Optional[datetime] = None
-    corrected_fields: dict[str, str] = field(default_factory=dict)
+    corrected_fields: dict[str, CorrectedField] = field(default_factory=dict)
     reviewer_notes: str = ""
 
 @dataclass
@@ -272,6 +286,49 @@ class PipelineOutput:
     review_queue_id: Optional[str] = None
     processing_ms: float = 0.0
 ```
+
+### 2-7. PipelineResult — 단계별 결과 보관소
+
+오케스트레이터가 단계마다 채워가는 컨테이너입니다. P1~P6 출력물뿐 아니라 **P2.5-B/C 중간 산출물**과 **P3-B 영역별 trace**도 보관하므로, 디버깅·시각화·검토 큐 적재 시 단계별 입출력을 그대로 재구성할 수 있습니다.
+
+```python
+@dataclass
+class PipelineResult:
+    doc_id: str
+    status: PipelineStatus = PipelineStatus.SUCCESS
+    processing_path: ProcessingPath = ProcessingPath.VLM
+
+    # 단계별 출력
+    p1_result: Optional[PreprocessedImage] = None
+    p2_raw_result: Optional[RawLayoutResult] = None       # P2 원시
+    p2_result: Optional[LayoutResult] = None              # P2.5-A 정제 후
+    p3a_form_type: Optional[str] = None                   # P3-A 서식 분류
+    p3a_form_confidence: float = 0.0
+    p2_5b_instructions: Optional[dict] = None             # P2.5-B {region_id → InstructionSpec}
+    p2_5c_groups: Optional[dict] = None                   # P2.5-C {pixel_budget → [CroppedRegion, ...]}
+    p3b_trace: list = field(default_factory=list)         # P3-B 영역별 vLLM 호출 trace
+    p3_result: Optional[VLMResult] = None
+    p4_result: Optional[ValidatedResult] = None
+    output: Optional[PipelineOutput] = None
+
+    # 실행 시간 / 진단 정보
+    timings: dict[str, float] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+```
+
+**주요 필드 설명**:
+
+| 필드 | 출처 단계 | 용도 |
+|------|-----------|------|
+| `p2_raw_result` | P2 PP-DocLayout | 정제 전 검출 결과 — P2.5-A 효과 측정 |
+| `p2_result` | P2.5-A LayoutPostProcessor | 정제 완료 결과 — VLM 입력 |
+| `p2_5b_instructions` | P2.5-B InstructionRouter | `{region_id → InstructionSpec}` — 영역별 system_prompt + user_instruction + json_schema |
+| `p2_5c_groups` | P2.5-C ResolutionRouter | `{pixel_budget → [CroppedRegion, ...]}` — 배치 그룹화 결과, 각 CroppedRegion에 크롭 이미지 포함 |
+| `p3b_trace` | P3-B StructuredExtractor | 영역별 vLLM 호출 메타데이터 — `region_id`, `pixel_budget`, `elapsed_ms`, `instruction`, `system_prompt`, `raw_response`, `fields`, `field_count`, `table_count`, `status` |
+| `p3_result` | P3-B StructuredExtractor | 집계된 `VLMResult` (필드/표/도메인 코드) |
+
+`p3b_trace`는 `StructuredExtractor.extract()`에 옵션 매개변수로 전달되며, 전달하지 않으면 수집하지 않습니다(운영 시 메모리 절약). 디버깅·통합 테스트·검토 큐 시각화에 사용됩니다.
 
 ---
 
@@ -377,7 +434,7 @@ class FormClassifier:
 
 **파일**: `src/vlm/instruction_router.py`
 
-**역할**: region_type과 form_type을 조합하여 도메인 맥락이 포함된 상세 InstructionSpec을 생성합니다. 기존 `instruction_builder.py`와 `TASK_PROMPTS` 딕셔너리를 대체하며, 레이아웃 모델과 VLM instruction 로직의 결합을 해소합니다.
+**역할**: region_type과 form_type을 조합하여 도메인 맥락이 포함된 상세 InstructionSpec을 생성합니다. 기존 `instruction_builder.py`의 `TASK_PROMPTS` 딕셔너리를 대체 완료하여, 레이아웃 모델과 VLM instruction 로직의 결합을 해소했습니다.
 
 PaddleOCR-VL의 `"OCR:"` 2단어 프리픽스는 전용 학습 모델이기 때문에 가능합니다. 범용 VLM인 Gemma4는 도메인 맥락, 출력 형식, 불확실성 처리까지 포함한 상세 instruction이 필요합니다.
 
@@ -438,13 +495,22 @@ class StructuredExtractor:
         schema_id: str,
         schema: Optional[dict] = None,
         warnings: Optional[list[str]] = None,
+        trace: Optional[list[dict]] = None,
     ) -> VLMResult:
         """
         각 pixel_budget 그룹 내 영역을 순차 vLLM 호출.
         guided_json + logprobs로 필드 추출 + 도메인 코드 자동 감지.
         결과를 region_id 기준으로 재조립하여 VLMResult 구성.
+
+        trace: 호출자가 빈 리스트를 전달하면 영역별 메타데이터를 dict로 채워 넣음.
+               기록 항목: region_id, region_type, pixel_budget, elapsed_ms,
+               status (ok/error/skipped), field_count, table_count, domain_code_count,
+               instruction, system_prompt, raw_response, fields[]. 디버깅·시각화·통합
+               테스트 검증용. None이면 수집하지 않음(운영 시 메모리 절약).
         """
 ```
+
+오케스트레이터는 항상 `result.p3b_trace` 빈 리스트를 전달하여 단계별 진단을 보관하며, 통합 테스트 스크립트는 이를 `data/pipeline_outputs/<ts>/<doc>/P3/region_traces.json`으로 직렬화합니다.
 
 ---
 
@@ -493,7 +559,7 @@ class VLMHealthMonitor:
             logger.error("vLLM 서버 비정상 — fallback 전환 대기")
 ```
 
-### 4-2. 수준 B — 경량 Fallback
+### 4-2. 수준 B — 경량 Fallback (HTTP 컨테이너 분리 모드 전제)
 
 **전환 정책**:
 
@@ -516,6 +582,39 @@ class FallbackPolicy:
 - `processing_path = "fallback"` → P4에서 Fallback 임계값 적용 (VLM 대비 낮게 설정)
 - `review_required = True` (항상)
 - guided_json / logprobs 없음 → PP-OCRv5 rec_score 사용
+
+**컨테이너 분리 필수**:
+
+`OCRFallbackService`(in-process)는 v1 소스(`/home/team_gh/mil_OCR`)를 sys.path에 추가하여 T3/T4/T5 모듈을 import하는데, v1과 v2가 동일한 `src.interfaces.enums` 네임스페이스를 사용하면서 `ClassificationMode`, `Orientation`, `ContentType` 등 v1 전용 enum이 v2 enums에서 제거되어 import 오류 + 메모리 폭주를 유발합니다.
+
+따라서 fallback은 **반드시 별도 컨테이너(`Dockerfile.fallback`)에서 기동**하고 `FallbackHTTPClient`로 호출해야 합니다.
+
+**오케스트레이터 동작** ([src/pipeline/orchestrator.py](../src/pipeline/orchestrator.py)):
+
+```python
+def _get_fallback_service(self):
+    if self.cfg.fallback_base_url:
+        # Docker 분리 모드 — HTTP 클라이언트 사용
+        return FallbackHTTPClient(base_url=self.cfg.fallback_base_url)
+    else:
+        # fallback_base_url 미설정 — _DisabledFallback 더미 (항상 unhealthy)
+        # in-process v1 모듈 import는 v2 enums와 충돌하여 사용 불가
+        class _DisabledFallback:
+            def is_healthy(self) -> bool:
+                return False
+            def process(self, *args, **kwargs):
+                return None
+        return _DisabledFallback()
+```
+
+→ `fallback_base_url` 미설정 시 fallback은 **사실상 비활성**되며, VLM 불가 시 검토 큐만 활성화됩니다(수준 C).
+
+**Fallback HTTP 서버**: [src/fallback/server.py](../src/fallback/server.py)
+
+| Method | Path | 설명 |
+|--------|------|------|
+| `GET` | `/health` | 서비스 상태 확인 (`t3_loaded`, `t4_loaded`, `t5_loaded`) |
+| `POST` | `/fallback/process` | `image_b64 + regions + reading_order` → `VLMResult` 호환 응답 |
 
 ### 4-3. 수동 검토 큐
 
@@ -564,25 +663,24 @@ DB 레코드에 스키마 버전을 함께 기록하여 서식 개정 후 마이
 
 ## 6. logprobs 신뢰도 산출
 
-### 6-1. 필드별 신뢰도 (길이 편향 보정 포함)
+### 6-1. 필드별 신뢰도 (기하평균 + 길이 편향 보정)
 
 ```python
 def calc_field_confidence(
     token_logprobs: list[float],
-    field_type: str,
+    field_type: str = "text",
 ) -> float:
-    """
-    기존: geometric_mean(exp(logprob)) — 토큰 수 많을수록 구조적 낮은 점수
-    개선: 필드 유형별 기대 토큰 수 기반 보정 계수 적용
-
-    예: "부대명: 수도방위사령부 예하 1경비단" (긴 텍스트)
-        vs "NSN: 1005-01-432-1234" (짧은 코드)
-        → 동일 유형 임계값 적용 전 편향 보정 필요
-    """
     geo_mean = exp(mean(token_logprobs))
+    # 긴 필드는 토큰 수가 많아 기하평균이 구조적으로 낮아지므로
+    # 필드 유형별 기대 토큰 수 기반 보정 계수 적용
     length_factor = min(1.0, sqrt(EXPECTED_TOKENS[field_type]
-                                   / max(len(token_logprobs), 1)))
+                                  / len(token_logprobs)))
     return round(geo_mean * length_factor, 4)
+
+EXPECTED_TOKENS = {
+    "amount": 4, "code": 5, "date": 3, "quantity": 2,
+    "number": 3, "text": 5, "signature": 2,
+}
 ```
 
 ### 6-2. 필드 유형별 임계값 — 처리 경로 분리
@@ -695,15 +793,60 @@ httpx
 - 오케스트레이터(`pipeline/orchestrator.py`)만 컴포넌트를 순서대로 호출
 - `TASK_PROMPTS` 딕셔너리를 `layout_analyzer.py` / `types.py`에 두지 않음 — `InstructionRouter`에서 일원화
 - VLM instruction/response는 **반드시 guided_json으로 구조화**
-- 신뢰도는 logprobs 기반 산출 (길이 편향 보정) → P4 룰 검증으로 보정
+- 신뢰도는 logprobs 기하평균 + 길이 편향 보정(`length_factor`) → P4 룰 검증으로 보정
 - P4는 `processing_path` 기반으로 임계값 프로파일 분기
 - Python 3.10+
+
+**모듈 책임 경계**:
+
+| 모듈 | 책임 | 하지 않는 것 |
+|------|------|-------------|
+| `vlm_client.py` | vLLM HTTP 통신, 이미지 base64 인코딩, logprobs 파싱, HTML 표 파싱 | 이미지 크롭, 도메인 코드 감지 |
+| `resolution_router.py` | bbox 크롭 + 패딩, pixel_budget 할당, 배치 그룹화 | VLM 통신 |
+| `structured_extractor.py` | 배치 VLM 호출, 필드 추출, 도메인 코드 감지, VLMResult 조립, 영역별 trace 옵션 기록 | 이미지 크롭 (ResolutionRouter 출력 수신) |
+| `form_classifier.py` | 서식 분류 전용 VLM 1회 호출, logprobs 신뢰도 | 필드 추출, 크롭 |
+| `pipeline/server.py` | Pipeline FastAPI HTTP 래퍼 (`/pipeline/run`, `/pipeline/upload`) | 단계 컴포넌트 직접 호출 (오케스트레이터를 통해서만) |
+| `fallback/server.py` | Fallback FastAPI HTTP 래퍼 (`/fallback/process`) | v1 모듈 직접 import (컨테이너 내에서만) |
+
+### 10-1. 알려진 함정 — 무한 루프 / 메모리 폭주
+
+오케스트레이터 `_run_step()` 헬퍼에서 단계 결과의 `output.warnings`를 `result.warnings`로 전파할 때 **동일 리스트 참조**가 발생할 수 있습니다. P3-B `StructuredExtractor.extract()`가 `warnings=result.warnings`를 받아 `VLMResult.warnings`에 그대로 저장하면, `_run_step`이 반환된 `VLMResult.warnings`를 순회하면서 동일 리스트에 `append()`하여 **무한 루프 + OOM**을 유발합니다.
+
+수정 방식 ([src/pipeline/orchestrator.py](../src/pipeline/orchestrator.py)):
+
+```python
+if hasattr(output, "warnings") and output.warnings:
+    # 동일 리스트 참조 시 무한 루프 방지: 스냅샷 복사 후 순회
+    warnings_snapshot = list(output.warnings)
+    for w in warnings_snapshot:
+        prefixed = f"[{name}] {w}"
+        if prefixed not in result.warnings:
+            result.warnings.append(prefixed)
+```
+
+**원칙**: 단계 출력의 컬렉션(warnings/errors 등)을 외부에서 순회하면서 같은 컬렉션에 추가할 경우, 반드시 스냅샷을 만들고 순회해야 합니다.
 
 ---
 
 ## 11. 통합 테스트 절차 및 결과 기록
 
 ### 11-1. 실행 방식
+
+**옵션 A — 호스트에서 직접 실행** (Layout 컨테이너 + vLLM 컨테이너만 기동된 상태):
+
+```bash
+VLLM_BASE_URL=http://localhost:8100/v1 \
+VLLM_HEALTH_URL=http://localhost:8100/health \
+LAYOUT_SERVICE_URL=http://localhost:8082 \
+LAYOUT_MODEL_NAME=PP-DocLayoutV3 \
+HF_HUB_OFFLINE=1 \
+MODEL_ROOT=/home/team_gh/mil_OCR_v2/models \
+FALLBACK_ENABLED=false \
+CUDA_VISIBLE_DEVICES=0 \
+python scripts/run_pipeline_with_outputs.py --input-dir data/raw
+```
+
+**옵션 B — Pipeline 컨테이너 내부 실행**:
 
 ```bash
 docker run --rm --gpus device=0 --network host \
@@ -714,6 +857,19 @@ docker run --rm --gpus device=0 --network host \
   mil_ocr_v2-pipeline \
   python scripts/run_pipeline_with_outputs.py [--input-dir data/raw]
 ```
+
+**환경변수 정리**:
+
+| 환경변수 | 기본값 | 설명 |
+|----------|--------|------|
+| `VLLM_BASE_URL` | `http://localhost:8100/v1` | vLLM OpenAI 호환 API |
+| `VLLM_HEALTH_URL` | `http://localhost:8100/health` | vLLM 헬스체크 |
+| `LAYOUT_SERVICE_URL` | (없음 → in-process) | 설정 시 layout HTTP 컨테이너 사용 |
+| `LAYOUT_MODEL_NAME` | `PP-DocLayoutV3` | 레이아웃 모델 |
+| `LAYOUT_FUSION_MODE` | `false` | V3 + plus-L 융합 모드 |
+| `MODEL_ROOT` | `<repo>/models` | PaddleOCR 모델 가중치 루트 |
+| `FALLBACK_ENABLED` | `false` | fallback 경로 활성화 |
+| `FALLBACK_BASE_URL` | (없음) | 설정 시 fallback HTTP 컨테이너 사용. 미설정 시 `_DisabledFallback` |
 
 ### 11-2. 결과 저장 구조
 
@@ -729,26 +885,44 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
     │   ├── preprocessed.png
     │   └── binary.png
     ├── P2/
-    │   ├── result.json            ← RawLayoutResult (정제 전)
-    │   └── layout_visualization.png
+    │   ├── result.json                  ← RawLayoutResult (정제 전 bbox/reading_order)
+    │   └── layout_visualization.png     ← P2 원시 검출 시각화 (정제 전)
     ├── P2.5A/
-    │   └── result.json            ← LayoutResult (정제 후, removed/merged 수 포함)
+    │   ├── result.json                  ← LayoutResult (정제 후, removed/merged 수 포함)
+    │   └── layout_visualization.png     ← 정제 후 bbox 시각화 (P2와 비교용)
     ├── P3A/
-    │   └── result.json            ← form_type, form_confidence, 추론 시간
-    ├── P3B/
-    │   ├── result.json            ← fields[], tables[], domain_codes[], logprobs
-    │   └── raw_vlm_responses/
-    │       ├── batch_{budget}_{n}.json   ← pixel_budget별 배치 응답
+    │   └── result.json                  ← form_type, form_confidence
+    ├── P2.5B/
+    │   └── result.json                  ← {region_id → InstructionSpec}
+    │                                       (system_prompt, user_instruction, json_schema, pixel_budget)
+    ├── P2.5C/
+    │   ├── result.json                  ← pixel_budget별 그룹 + 영역별 crop 메타
+    │   └── crops/
+    │       ├── r_0001_table_b1120.png   ← 영역별 크롭 이미지 (vLLM 입력 그대로)
+    │       ├── r_0002_text_b280.png
     │       └── ...
+    ├── P3/
+    │   ├── result.json                  ← VLMResult (fields[], tables[], domain_codes[])
+    │   ├── region_traces.json           ← 영역별 vLLM 호출 trace
+    │   │                                   (pixel_budget 그룹 요약 + 입출력 + 소요시간)
+    │   └── raw_vlm_response.json        ← VLM 원본 JSON (있을 때만)
     ├── P4/
-    │   └── result.json
+    │   └── result.json                  ← ValidatedResult + ValidationError 목록
     ├── P5/
     │   ├── output.json
     │   ├── output.xml
-    │   └── output.csv
+    │   └── output.csv (선택)
     └── P6/
-        └── result.json
+        └── result.json                  ← PipelineOutput 요약
 ```
+
+**디버깅 흐름**:
+
+1. P2 → P2.5A 시각화 비교 → LayoutPostProcessor 정제 효과 확인
+2. P2.5B/result.json → 영역별 instruction이 form_type 맥락을 포함하는지 검증
+3. P2.5C/crops/*.png → vLLM이 받은 실제 이미지 확인 (해상도 적절성)
+4. P3/region_traces.json → 영역별 vLLM 응답·소요시간·필드 추출 결과 검증
+5. P4/result.json → 룰 검증 결과 + 검토 큐 적재 사유
 
 ### 11-3. 단계별 타이밍 기록 (run_summary.json)
 
@@ -786,3 +960,9 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 5. **P3-B 배치 처리**: 그룹별 배치 크기, 각 배치 추론 시간
 6. **실패 시**: 실패 단계, 에러 메시지, 스택 트레이스
 7. **전체 요약**: `[PASS/FAIL] {doc_id} total=Xms P1=Xms P2=Xms P2.5A=Xms P3A=Xms P3B=Xms ...`
+
+### 11-5. 통합 테스트 실행 이력
+
+| 일자 | 환경 | 결과 | 비고 |
+|------|------|------|------|
+| 2026-04-10 | Layout 컨테이너(8082) + vLLM 컨테이너(8100) + 호스트 conda(`dl`) | 3건 PASS, errors=0 | Phase 1-E 통과. P1→P6 end-to-end 성공. P3-B 영역별 trace, P2/P2.5A 시각화, P2.5B/C 단계별 출력 모두 검증. P3-B fields=0 (저해상도 입력 + Real-ESRGAN 미설치 영향 — Phase 2-A에서 개선) |

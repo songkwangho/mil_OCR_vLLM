@@ -66,6 +66,7 @@ __all__ = [
     # P5 직렬화 / P6 DB 적재
     "PipelineOutput",
     # 검토 큐
+    "CorrectedField",
     "ReviewQueueItem",
     "ReviewQueueStats",
 ]
@@ -277,7 +278,7 @@ class VLMResult:
     fields: list[FieldValue]          # guided_json 추출 키-값 쌍 + logprobs 신뢰도
     tables: list[RecognizedTable]
     domain_codes: list[DomainCode]
-    raw_json: str = ""                # VLM 원본 JSON 응답
+    raw_json: str = ""                # VLM 원본 JSON 응답 (디버깅 전용, P6 DB 적재 제외)
     processing_time_ms: float = 0.0
     processing_path: ProcessingPath = ProcessingPath.VLM
     warnings: list[str] = field(default_factory=list)
@@ -355,6 +356,21 @@ class PipelineOutput:
 # ═══════════════════════════════════════════════
 
 @dataclass
+class CorrectedField:
+    """검토 큐에서 담당자가 수정한 필드 (JSONPath 기반 중첩 지원).
+
+    items[0].quantity 같은 중첩 필드 교정 시 경로 추적 가능.
+    교정 데이터는 VLM Fine-tuning SFT/DPO 학습 데이터로 자동 축적.
+    """
+
+    field_path: str            # JSONPath 형식: "items[0].quantity", "nsn"
+    original_value: str
+    corrected_value: str
+    corrected_by: str = ""
+    corrected_at: Optional[datetime] = None
+
+
+@dataclass
 class ReviewQueueItem:
     """수동 검토 큐의 개별 항목.
 
@@ -383,7 +399,7 @@ class ReviewQueueItem:
     status: ReviewStatus = ReviewStatus.PENDING
     reviewer: Optional[str] = None
     reviewed_at: Optional[datetime] = None
-    corrected_fields: dict[str, str] = field(default_factory=dict)
+    corrected_fields: dict[str, CorrectedField] = field(default_factory=dict)
     reviewer_notes: str = ""
 
 

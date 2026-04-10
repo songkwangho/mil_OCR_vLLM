@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -34,6 +35,54 @@ from src.interfaces.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────
+#  도메인 코드 패턴 (P3-B 내부 책임)
+# ─────────────────────────────────────────────
+
+_CODE_PATTERNS: list[tuple[str, CodeType]] = [
+    (r"\d{4}-\d{2}-\d{3}-\d{4}", CodeType.NSN),           # NSN
+    (r"KN-\d{5}-\d{4}", CodeType.K_NSN),                   # K-NSN
+    (r"\d{2,4}부대", CodeType.UNIT_CODE),                   # 부대코드
+    (r"\d{4}-\d{2}-\d{2}", CodeType.DATE),                  # 날짜
+]
+
+
+def _detect_domain_codes(parsed_json: dict) -> list[DomainCode]:
+    """VLM 출력 JSON에서 도메인 코드 패턴을 자동 감지.
+
+    Args:
+        parsed_json: VLM이 출력한 파싱된 JSON dict.
+
+    Returns:
+        감지된 DomainCode 목록.
+    """
+    codes: list[DomainCode] = []
+    seen: set[str] = set()
+
+    def _scan_value(val: Any) -> None:
+        if isinstance(val, str):
+            for pattern, code_type in _CODE_PATTERNS:
+                for match in re.finditer(pattern, val):
+                    raw = match.group()
+                    if raw not in seen:
+                        seen.add(raw)
+                        codes.append(DomainCode(
+                            code_type=code_type,
+                            raw_value=raw,
+                            normalized_value=raw,
+                            confidence=0.9,
+                        ))
+        elif isinstance(val, dict):
+            for v in val.values():
+                _scan_value(v)
+        elif isinstance(val, list):
+            for item in val:
+                _scan_value(item)
+
+    _scan_value(parsed_json)
+    return codes
 
 
 @dataclass
@@ -85,6 +134,7 @@ class StructuredExtractor:
         schema_id: str,
         schema: Optional[dict] = None,
         warnings: Optional[list[str]] = None,
+        trace: Optional[list[dict]] = None,
     ) -> VLMResult:
         """pixel_budget별 배치 그룹 → VLMResult.
 
@@ -96,6 +146,9 @@ class StructuredExtractor:
             schema_id: guided_json 스키마 ID
             schema: JSON Schema (guided_json용)
             warnings: 경고 수집 리스트
+            trace: 영역별 vLLM 호출 trace 수집 리스트 (옵션). 호출자가 빈 리스트를
+                전달하면 영역별 입출력/소요시간/추출 결과가 dict로 채워집니다.
+                디버깅·결과 검증용.
 
         Returns:
             VLMResult
@@ -118,9 +171,23 @@ class StructuredExtractor:
             )
 
             for cropped in regions:
+                region_t0 = time.time()
                 try:
                     result = self._process_single(cropped, schema, warnings)
+                    region_ms = (time.time() - region_t0) * 1000
                     if result is None:
+                        if trace is not None:
+                            trace.append({
+                                "region_id": cropped.region_id,
+                                "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
+                                "pixel_budget": cropped.pixel_budget,
+                                "elapsed_ms": round(region_ms, 1),
+                                "status": "skipped",
+                                "field_count": 0,
+                                "table_count": 0,
+                                "domain_code_count": 0,
+                                "raw_response": "",
+                            })
                         continue
 
                     fields, tables, codes, raw = result
@@ -130,7 +197,33 @@ class StructuredExtractor:
                     if raw:
                         raw_json_parts.append(raw)
 
+                    if trace is not None:
+                        trace.append({
+                            "region_id": cropped.region_id,
+                            "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
+                            "pixel_budget": cropped.pixel_budget,
+                            "elapsed_ms": round(region_ms, 1),
+                            "status": "ok",
+                            "field_count": len(fields),
+                            "table_count": len(tables),
+                            "domain_code_count": len(codes),
+                            "instruction": cropped.instruction_spec.user_instruction,
+                            "system_prompt": cropped.instruction_spec.system_prompt,
+                            "raw_response": raw,
+                            "fields": [
+                                {
+                                    "field_key": f.field_key,
+                                    "raw_value": f.raw_value,
+                                    "data_type": f.data_type,
+                                    "confidence": round(f.confidence, 4),
+                                    "is_flagged": f.is_flagged,
+                                }
+                                for f in fields
+                            ],
+                        })
+
                 except Exception as e:
+                    region_ms = (time.time() - region_t0) * 1000
                     warnings.append(
                         f"Region {cropped.region_id} failed: {e}"
                     )
@@ -138,6 +231,15 @@ class StructuredExtractor:
                         "[P3-B] 영역 처리 실패 (%s): %s",
                         cropped.region_id, e,
                     )
+                    if trace is not None:
+                        trace.append({
+                            "region_id": cropped.region_id,
+                            "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
+                            "pixel_budget": cropped.pixel_budget,
+                            "elapsed_ms": round(region_ms, 1),
+                            "status": "error",
+                            "error": f"{type(e).__name__}: {e}",
+                        })
 
         processing_time_ms = (time.time() - t0) * 1000
 
@@ -172,11 +274,7 @@ class StructuredExtractor:
         Returns:
             (fields, tables, domain_codes, raw_json) 또는 None
         """
-        from src.vlm.vlm_client import (
-            encode_image_base64,
-            extract_field_logprobs,
-            detect_domain_codes,
-        )
+        from src.vlm.vlm_client import encode_image_base64, extract_field_logprobs
         from src.vlm.logprobs_scorer import calc_field_confidence, is_flagged
 
         spec = cropped.instruction_spec
@@ -236,7 +334,7 @@ class StructuredExtractor:
                 if key in field_logprobs:
                     token_lps, data_type = field_logprobs[key]
 
-                confidence = calc_field_confidence(token_lps)
+                confidence = calc_field_confidence(token_lps, data_type)
                 flagged = is_flagged(confidence, data_type)
 
                 fields.append(FieldValue(
@@ -250,8 +348,8 @@ class StructuredExtractor:
                     region_id=cropped.region_id,
                 ))
 
-            # 도메인 코드 감지
-            domain_codes = detect_domain_codes(parsed)
+            # 도메인 코드 감지 (P3-B 내부 책임)
+            domain_codes = _detect_domain_codes(parsed)
 
         return fields, [], domain_codes, text
 
@@ -273,7 +371,7 @@ class StructuredExtractor:
                 for lp in logprobs
             ]
             if all_lps:
-                confidence = calc_field_confidence(all_lps)
+                confidence = calc_field_confidence(all_lps, "text")
 
         cells = parse_html_cells(html)
 

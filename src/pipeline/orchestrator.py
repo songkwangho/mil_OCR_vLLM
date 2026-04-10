@@ -107,6 +107,9 @@ class PipelineResult:
     p2_result: Optional[LayoutResult] = None          # P2.5-A 정제 후
     p3a_form_type: Optional[str] = None               # P3-A 서식 분류
     p3a_form_confidence: float = 0.0
+    p2_5b_instructions: Optional[dict] = None         # P2.5-B InstructionRouter (region_id → InstructionSpec)
+    p2_5c_groups: Optional[dict] = None               # P2.5-C ResolutionRouter (pixel_budget → [CroppedRegion])
+    p3b_trace: list = field(default_factory=list)     # P3-B 영역별 vLLM 호출 trace
     p3_result: Optional[VLMResult] = None              # P3-B 추출 결과
     p4_result: Optional[ValidatedResult] = None
     output: Optional[PipelineOutput] = None
@@ -258,9 +261,9 @@ class PipelineOrchestrator:
 
     def _get_fallback_service(self):
         if "fallback" not in self._components:
-            # fallback_base_url이 설정된 경우 HTTP 클라이언트 사용 (Docker 분리 모드)
-            # 미설정 시 in-process fallback (개발/테스트용)
-            if self.cfg.fallback_base_url and self.cfg.fallback_base_url != "http://localhost:8081":
+            # fallback_base_url이 설정되어 있으면 HTTP 클라이언트 사용 (Docker 분리 모드)
+            # v1 모듈은 별도 컨테이너에서만 로드해야 함 (v2 enums 충돌 방지)
+            if self.cfg.fallback_base_url:
                 from src.fallback.fallback_http_client import FallbackHTTPClient
                 self._components["fallback"] = FallbackHTTPClient(
                     base_url=self.cfg.fallback_base_url,
@@ -268,13 +271,20 @@ class PipelineOrchestrator:
                 logger.info("오케스트레이터: Fallback HTTP 클라이언트 초기화 (url=%s)",
                             self.cfg.fallback_base_url)
             else:
-                from src.fallback.ocr_fallback_service import (
-                    OCRFallbackService,
-                    OCRFallbackConfig,
+                # fallback_base_url 미설정: fallback 비활성화 처리
+                logger.warning(
+                    "오케스트레이터: fallback_base_url 미설정 — "
+                    "in-process fallback은 v1/v2 enums 충돌로 사용 불가. "
+                    "fallback을 사용하려면 fallback 컨테이너를 기동하고 "
+                    "fallback_base_url을 설정하세요."
                 )
-                config = OCRFallbackConfig(device=self.cfg.device)
-                self._components["fallback"] = OCRFallbackService(config)
-                logger.info("오케스트레이터: Fallback in-process 초기화 완료")
+                # 헬스체크 시 항상 unhealthy로 응답하는 더미 반환
+                class _DisabledFallback:
+                    def is_healthy(self) -> bool:
+                        return False
+                    def process(self, *args, **kwargs):
+                        return None
+                self._components["fallback"] = _DisabledFallback()
         return self._components["fallback"]
 
     def _get_review_queue(self):
@@ -298,8 +308,12 @@ class PipelineOrchestrator:
             logger.info("오케스트레이터: %s 완료 (%.1fms)", name, elapsed)
 
             if hasattr(output, "warnings") and output.warnings:
-                for w in output.warnings:
-                    result.warnings.append(f"[{name}] {w}")
+                # 동일 리스트 참조 시 무한 루프 방지: 스냅샷 복사 후 순회
+                warnings_snapshot = list(output.warnings)
+                for w in warnings_snapshot:
+                    prefixed = f"[{name}] {w}"
+                    if prefixed not in result.warnings:
+                        result.warnings.append(prefixed)
 
             return output
         except Exception as e:
@@ -393,6 +407,7 @@ class PipelineOrchestrator:
                     "P2.5B", result,
                     lambda: self._get_p2_5b().route_all(p2_out, form_type),
                 )
+                result.p2_5b_instructions = instructions
 
                 if instructions:
                     # P2.5-C: ResolutionRouter
@@ -400,9 +415,10 @@ class PipelineOrchestrator:
                         "P2.5C", result,
                         lambda: self._get_p2_5c().route(p2_out, p1_out, instructions),
                     )
+                    result.p2_5c_groups = groups
 
                     if groups:
-                        # P3-B: StructuredExtractor
+                        # P3-B: StructuredExtractor (trace 수집)
                         p3_out = self._run_step(
                             "P3B", result,
                             lambda: self._get_p3b().extract(
@@ -413,6 +429,7 @@ class PipelineOrchestrator:
                                 schema_id=schema_id,
                                 schema=schema,
                                 warnings=result.warnings,
+                                trace=result.p3b_trace,
                             ),
                         )
                         result.p3_result = p3_out

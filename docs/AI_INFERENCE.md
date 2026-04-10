@@ -44,7 +44,7 @@
 
 - PP-DocLayoutV3 (기본) / PP-DocLayout_plus-L (호환) — 교차 사용 가능
 - Input: `PreprocessedImage` → Output: `RawLayoutResult`
-- `TASK_PROMPTS` 딕셔너리 **제거** — InstructionRouter로 이전
+- `TASK_PROMPTS` 딕셔너리 제거 완료 — InstructionRouter로 일원화
 - 모델 선택: `PipelineConfig.layout_model_name`
 - Layout 추론은 별도 컨테이너(`layout :8082`)에서 HTTP로 수행
 
@@ -121,10 +121,10 @@ response = client.chat.completions.create(
 PaddleOCR-VL의 `"OCR:"` 2단어 프리픽스는 전용 학습 모델 기반이므로 범용 VLM에 그대로 적용 불가. Gemma4는 도메인 맥락, 출력 형식, 불확실성 처리까지 포함한 상세 instruction이 필요.
 
 ```python
-# 기존 (instruction_builder.py — 제거 대상)
-TASK_PROMPTS = {"text": "OCR:", "table": "Table Recognition:", ...}
+# 기존 (instruction_builder.py — Legacy 래퍼로 유지, 신규 코드에서 사용 금지)
+# TASK_PROMPTS = {"text": "OCR:", "table": "Table Recognition:", ...}
 
-# 개선 (instruction_router.py)
+# 현재 (instruction_router.py)
 # form_type="supply_request", region_type="text" →
 instruction = InstructionSpec(
     system_prompt="군수 보급청구서 필드 추출 시스템입니다.",
@@ -185,18 +185,55 @@ response = client.chat.completions.create(
 )
 ```
 
-**logprobs 기반 필드별 신뢰도 산출 (길이 편향 보정)**:
+**영역별 trace 수집 (옵션)**:
+
+`extract()`에 `trace: Optional[list[dict]] = None` 매개변수를 전달하면, 각 vLLM 호출별 메타데이터가 dict로 누적됩니다. 디버깅·통합 테스트 검증·검토 큐 시각화에 사용합니다.
+
+```python
+extractor = StructuredExtractor(cfg)
+trace: list[dict] = []
+result = extractor.extract(
+    groups=groups,
+    doc_id=doc_id,
+    form_type=form_type,
+    form_confidence=form_confidence,
+    schema_id=schema_id,
+    schema=schema,
+    warnings=warnings,
+    trace=trace,            # ← 여기서 영역별 메타데이터를 수집
+)
+# trace[i] 예시:
+# {
+#   "region_id": "r_0004", "region_type": "table",
+#   "pixel_budget": 1120, "elapsed_ms": 3951.9, "status": "ok",
+#   "field_count": 0, "table_count": 1, "domain_code_count": 0,
+#   "instruction": "...", "system_prompt": "...",
+#   "raw_response": "...", "fields": [...],
+# }
+```
+
+오케스트레이터는 항상 `result.p3b_trace` 빈 리스트를 전달하여 trace를 수집하고, 통합 테스트 스크립트가 `data/pipeline_outputs/<ts>/<doc>/P3/region_traces.json`으로 직렬화합니다(BACKEND.md §11-2 참조).
+
+**logprobs 기반 필드별 신뢰도 산출 (길이 편향 보정 포함)**:
 
 ```python
 def calc_field_confidence(
     token_logprobs: list[float],
-    field_type: str,
+    field_type: str = "text",
 ) -> float:
     geo_mean = exp(mean(token_logprobs))
-    # 긴 필드(부대명 등)의 구조적 낮은 점수 보정
+    # 긴 필드(부대명 등)는 짧은 필드 대비 구조적으로 낮은 점수를 받으므로
+    # 필드 유형별 기대 토큰 수 기반 보정 계수 적용
     length_factor = min(1.0, sqrt(EXPECTED_TOKENS[field_type]
-                                   / max(len(token_logprobs), 1)))
+                                  / len(token_logprobs)))
     return round(geo_mean * length_factor, 4)
+```
+
+```python
+EXPECTED_TOKENS = {
+    "amount": 4, "code": 5, "date": 3, "quantity": 2,
+    "number": 3, "text": 5, "signature": 2,
+}
 ```
 
 ### 3-8. P4 — 룰 검증 + 신뢰도 보정 (`src/postprocess/validator.py`)
@@ -209,6 +246,7 @@ def calc_field_confidence(
 
 - v1 T11/T12에서 이관 — JSON, XML, CSV 출력
 - DB 레코드에 `schema_id` (버전 포함) 함께 기록
+- **`VLMResult.raw_json`은 DB 적재 대상에서 제외** — guided_json으로 구조가 보장되므로 민감정보 이중 저장 방지. 디버깅 시에만 `data/pipeline_outputs/` 단계별 출력에서 확인
 
 ---
 
@@ -252,7 +290,7 @@ healthcheck:
 restart: unless-stopped
 ```
 
-### 5-2. 수준 B — 경량 Fallback 추론 환경
+### 5-2. 수준 B — 경량 Fallback 추론 환경 (HTTP 컨테이너 분리 모드 전제)
 
 | 모델 | 위치 | 크기 | 역할 | 상태 |
 |------|------|------|------|------|
@@ -272,17 +310,47 @@ restart: unless-stopped
 | P4 임계값 | VLM 프로파일 | Fallback 프로파일 (낮음) |
 | 결과 품질 | 높음 | 중간 (항상 검토 큐) |
 
+**컨테이너 분리 필수 — in-process 사용 금지**:
+
+`OCRFallbackService` (in-process)는 v1 소스(`mil_OCR`)를 sys.path에 추가하여 T3/T4/T5 모듈을 import하는데, v1과 v2가 동일한 `src.interfaces.enums` 네임스페이스를 사용하면서 v1 전용 enum (`ClassificationMode`, `Orientation`, `ContentType`)이 v2 enums에서 제거되어 import 오류 + 메모리 폭주를 유발합니다.
+
+따라서 fallback은 **반드시 별도 컨테이너에서 기동**해야 합니다:
+
+```bash
+docker compose up -d fallback
+# fallback 컨테이너가 8081 포트에서 src/fallback/server.py(FastAPI) 기동
+```
+
+오케스트레이터는 `fallback_base_url` 환경변수가 설정되어 있으면 `FallbackHTTPClient`를 사용하고, 미설정 시 `_DisabledFallback` 더미를 반환합니다(BACKEND.md §4-2 참조). 더미 상태에서는 VLM 불가 시 검토 큐만 활성화됩니다.
+
+**Fallback HTTP 서버 엔드포인트** ([src/fallback/server.py](../src/fallback/server.py)):
+
+| Method | Path | 설명 |
+|--------|------|------|
+| `GET` | `/health` | 서비스 상태 (`t3_loaded`, `t4_loaded`, `t5_loaded`) |
+| `POST` | `/fallback/process` | `{doc_id, image_b64, dpi, regions, reading_order}` → `VLMResult` 호환 응답 |
+
 ---
 
 ## 6. Docker 추론 환경
 
-| 서비스 | 용도 | 프레임워크 | 헬스체크 |
-|--------|------|-----------|---------|
-| `vllm-server` | Gemma4 vLLM 서버 | vLLM + PyTorch + transformers 5.5.0 (CUDA 12.x 내장) | `/health` (30s) |
-| `layout` | P2 레이아웃 탐지 (PP-DocLayoutV3 / plus-L, fusion 지원) | PaddlePaddle CUDA 12.6 | `/health` (30s) |
-| `pipeline` | P1, P2.5-A~C, P3-A~B, P4~P6 | PaddlePaddle + PyTorch CUDA 12.6 | `/health` (30s) |
-| `fallback` | v1 PP-OCRv5 기반 경량 파이프라인 | PaddlePaddle + PyTorch CUDA 12.6 | `/health` (30s) |
-| `train` | Fine-tuning 환경 | PaddlePaddle + PyTorch CUDA 12.6 + PEFT | — |
+| 서비스 | 포트 | 용도 | 엔트리포인트 | 프레임워크 | 헬스체크 |
+|--------|------|------|--------------|-----------|---------|
+| `vllm-server` | 8100→8000 | Gemma4 vLLM 서버 | `vllm serve` | vLLM v0.19.0 + transformers 5.5.0 (CUDA 12.x 내장) | `/health` (30s) |
+| `layout` | 8082 | P2 레이아웃 탐지 (PP-DocLayoutV3 / plus-L, fusion 지원) | `uvicorn src.preprocess.layout_server:app` | PaddlePaddle 3.2 CUDA 12.6 | `/health` (30s) |
+| `pipeline` | 8080 | P1, P2.5-A~C, P3-A~B, P4~P6 오케스트레이션 | `python -m src.pipeline.server` | PyTorch CUDA 12.6 + openai SDK + httpx (PaddleOCR 미포함, layout HTTP 호출) | `/health` (30s) |
+| `fallback` | 8081 | v1 PP-OCRv5 기반 경량 파이프라인 | `uvicorn src.fallback.server:app` | PaddlePaddle + PyTorch CUDA 12.6 | `/health` (30s) |
+| `train` | — | Fine-tuning 환경 | (수동 실행) | PaddlePaddle + PyTorch CUDA 12.6 + PEFT | — |
+
+> **CUDA 11.8 → 12.6 업그레이드 이유**: 기존 PaddlePaddle CUDA 11.8 빌드는 H100 (sm_90) 커널이 누락되어 `CUDA error 209: no kernel image is available for execution on the device`가 발생합니다. 모든 GPU 컨테이너는 CUDA 12.6 베이스 이미지(`paddlepaddle/paddle:3.2.0-gpu-cuda12.6-cudnn9.5`)를 사용해야 합니다.
+
+**Pipeline HTTP 서버 엔드포인트** ([src/pipeline/server.py](../src/pipeline/server.py)):
+
+| Method | Path | 설명 |
+|--------|------|------|
+| `GET` | `/health` | 서비스 상태 (`vlm_healthy`, `layout_service`, `fallback_enabled`) |
+| `POST` | `/pipeline/run` | JSON 바디 (`doc_id`, `image_b64`, `file_ext`, `source_type`, `dpi_hint`, `metadata`) → `RunResponse` (status, processing_path, fields[], timings, errors, warnings) |
+| `POST` | `/pipeline/upload` | 멀티파트 파일 업로드 → `RunResponse` |
 
 > **CUDA 11.8 → 12.6 전환**: H100(sm_90) GPU에서 CUDA 11.8 PaddlePaddle 빌드의 커널 미포함(error 209) 문제로 pipeline/fallback/train 모두 CUDA 12.6으로 전환 완료.
 

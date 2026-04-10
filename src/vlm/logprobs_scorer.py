@@ -6,6 +6,9 @@ vLLM이 반환하는 토큰별 logprob을 필드 신뢰도(0.0~1.0)로 변환합
   - 필드값 토큰들의 logprob → 기하 평균 (geometric mean)
   - logprob = log(prob) → prob = exp(logprob)
   - geo_mean = exp(mean(logprobs))
+  - 길이 편향 보정: length_factor = min(1.0, sqrt(expected_tokens / actual_tokens))
+    긴 필드(부대명 등)는 토큰 수가 많아 기하평균이 구조적으로 낮아지므로,
+    필드 유형별 기대 토큰 수 기반 보정 계수를 적용합니다.
 
 필드 유형별 임계값:
   - 금액:    0.99 (미달 시 is_flagged + review)
@@ -50,6 +53,23 @@ PENALTY_DATE_LOGIC = 0.10
 
 
 # ─────────────────────────────────────────────
+#  필드 유형별 기대 토큰 수 (길이 편향 보정용)
+# ─────────────────────────────────────────────
+
+EXPECTED_TOKENS: dict[str, int] = {
+    "amount":    4,   # "12000000" → ~3-4 토큰
+    "code":      5,   # "1005-01-432-1234" → ~5 토큰
+    "date":      3,   # "2026-04-09" → ~3 토큰
+    "quantity":  2,   # "10" → ~1-2 토큰
+    "number":    3,   # 일반 숫자
+    "text":      5,   # 일반 텍스트
+    "signature": 2,   # 서명
+}
+
+DEFAULT_EXPECTED_TOKENS = 5
+
+
+# ─────────────────────────────────────────────
 #  data_type → 필드 유형 매핑
 # ─────────────────────────────────────────────
 
@@ -76,14 +96,25 @@ _DATA_TYPE_TO_FIELD_TYPE: dict[str, str] = {
 #  핵심 함수
 # ─────────────────────────────────────────────
 
-def calc_field_confidence(token_logprobs: list[float]) -> float:
+def calc_field_confidence(
+    token_logprobs: list[float],
+    field_type: str = "text",
+) -> float:
     """필드값 토큰들의 logprob → 신뢰도(0.0~1.0) 환산.
 
-    기하 평균: geo_mean = exp(mean(logprobs))
+    기하 평균 + 길이 편향 보정:
+      geo_mean = exp(mean(logprobs))
+      length_factor = min(1.0, sqrt(expected_tokens / actual_tokens))
+      confidence = geo_mean * length_factor
+
+    긴 필드(부대명 등)는 토큰 수가 많아 기하평균이 구조적으로 낮아지므로,
+    필드 유형별 기대 토큰 수 기반 보정 계수를 적용합니다.
 
     Args:
         token_logprobs: 해당 필드 토큰들의 개별 logprob 값 목록.
             vLLM logprobs 응답에서 추출. 예: [-0.02, -0.05, -0.01]
+        field_type: 필드 유형 (text, number, code, date 등).
+            EXPECTED_TOKENS 매핑에서 기대 토큰 수를 참조.
 
     Returns:
         필드 신뢰도 (0.0~1.0)
@@ -91,14 +122,18 @@ def calc_field_confidence(token_logprobs: list[float]) -> float:
     if not token_logprobs:
         return 0.0
 
-    # logprobs가 모두 0.0이면 완벽한 신뢰도
     mean_logprob = sum(token_logprobs) / len(token_logprobs)
 
     # 매우 낮은 logprob 클램핑 (-20 이하는 실질적으로 0)
     mean_logprob = max(mean_logprob, -20.0)
 
     geo_mean = math.exp(mean_logprob)
-    return round(min(1.0, max(0.0, geo_mean)), 4)
+
+    # 길이 편향 보정: 긴 필드의 구조적 낮은 점수 보정
+    expected = EXPECTED_TOKENS.get(field_type, DEFAULT_EXPECTED_TOKENS)
+    length_factor = min(1.0, math.sqrt(expected / max(len(token_logprobs), 1)))
+
+    return round(min(1.0, max(0.0, geo_mean * length_factor)), 4)
 
 
 def get_threshold(data_type: str) -> float:
@@ -173,7 +208,8 @@ class LogprobsScorer:
         Returns:
             FieldConfidenceResult
         """
-        confidence = calc_field_confidence(token_logprobs)
+        field_type = _DATA_TYPE_TO_FIELD_TYPE.get(data_type, "text")
+        confidence = calc_field_confidence(token_logprobs, field_type)
         threshold = get_threshold(data_type)
         flagged = confidence < threshold
 

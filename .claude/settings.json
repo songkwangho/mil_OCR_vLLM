@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(VLLM_BASE_URL=http://localhost:8100/v1 VLLM_HEALTH_URL=http://localhost:8100/health conda run -n dl --no-banner python scripts/run_pipeline_with_outputs.py --input-dir data/raw)",
+      "Bash(VLLM_BASE_URL=http://localhost:8100/v1 VLLM_HEALTH_URL=http://localhost:8100/health conda run -n dl python /home/team_gh/mil_OCR_v2/scripts/run_pipeline_with_outputs.py --input-dir data/raw)",
+      "Bash(awk '{print $11, $12, \"RSS=\" $6/1024 \"MB\", \"CPU=\" $3 \"%\"}')",
+      "Bash(awk '{print \"PID=\" $2, \"CPU=\" $3 \"%\", \"MEM=\" $6/1024/1024 \"GB\", \"TIME=\" $10}')",
+      "Bash(kill 1452935)",
+      "Bash(nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader)",
+      "Bash(/home/team_gh/toy_dev/miniforge3/envs/dl/bin/python -u scripts/run_pipeline_with_outputs.py --input-dir data/raw)",
+      "Bash(ls -la /home/team_gh/mil_OCR_v2/src/fallback/*.py)",
+      "Bash(python3 -c \"import sys; sys.path.insert\\(0, '/home/team_gh/mil_OCR_v2'\\); from src.pipeline import orchestrator; print\\(dir\\(orchestrator\\)\\)\")",
+      "Bash(curl -s http://localhost:8082/health)",
+      "Bash(/home/team_gh/toy_dev/miniforge3/envs/dl/bin/python -u /home/team_gh/mil_OCR_v2/scripts/run_pipeline_with_outputs.py --input-dir data/raw)",
+      "Bash(awk '{print \"PID=\" $2, \"CPU=\" $3 \"%\", \"MEM=\" $6/1024 \"MB\", \"ELAPSED=\" $10}')",
+      "Bash(kill 1817490)",
+      "Bash(awk '{print \"PID=\" $2, \"CPU=\" $3, \"VSZ=\" $5/1024/1024 \"GB\", \"RSS=\" $6/1024/1024 \"GB\"}')",
+      "Bash(kill 1934649)",
+      "Bash(awk '{print \"PID=\" $2, \"CPU=\" $3 \"%\", \"RSS=\" $6/1024 \"MB\"}')",
+      "Bash(kill 2549164)",
+      "Bash(/home/team_gh/toy_dev/miniforge3/envs/dl/bin/python -u -c ':*)",
+      "Bash(awk '{print \"PID=\" $2, \"CPU=\" $3, \"RSS_GB=\" $6/1024/1024}')",
+      "Bash(kill 2635512)",
+      "Bash(python3 -c ':*)"
+    ]
+  }
+}
