@@ -19,6 +19,13 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
+_DEFAULT_VERSION = "v1"
+
+# form_type 별칭 → schema_id
+_SCHEMA_ALIASES: dict[str, str] = {
+    "other": "official_document",
+    "unknown": "_fallback",
+}
 
 
 class SchemaRegistry:
@@ -49,16 +56,29 @@ class SchemaRegistry:
             self._loaded = True
             return
 
-        for path in sorted(self._dir.glob("*.json")):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    schema = json.load(f)
+        # schemas/ 최상위 + schemas/v1/, schemas/v2/... 모두 스캔
+        scan_dirs = [self._dir]
+        for sub in sorted(self._dir.iterdir()):
+            if sub.is_dir() and sub.name.startswith("v"):
+                scan_dirs.append(sub)
 
-                schema_id = schema.get("$id", path.stem)
-                self._schemas.setdefault(schema_id, []).append(schema)
+        seen: set[tuple[str, str]] = set()
+        for d in scan_dirs:
+            for path in sorted(d.glob("*.json")):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        schema = json.load(f)
 
-            except Exception as e:
-                logger.warning("SchemaRegistry: 스키마 로드 실패 (%s): %s", path.name, e)
+                    schema_id = schema.get("$id", path.stem)
+                    version = schema.get("x-mil-ocr-version", "0.0.0")
+                    key = (schema_id, version)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    self._schemas.setdefault(schema_id, []).append(schema)
+
+                except Exception as e:
+                    logger.warning("SchemaRegistry: 스키마 로드 실패 (%s): %s", path.name, e)
 
         self._loaded = True
         logger.info(
@@ -79,6 +99,44 @@ class SchemaRegistry:
             if not schema.get("x-mil-ocr-deprecated", False):
                 return schema
 
+        return None
+
+    def get(self, form_type_or_id: str, version: Optional[str] = None) -> Optional[dict]:
+        """form_type 또는 schema_id(+version)로 스키마 조회.
+
+        `form_type:version` 형식(예: ``"supply_request:v1"``)도 지원합니다.
+        ``"other"`` → ``"official_document"``, ``"unknown"`` → ``"_fallback"``
+        별칭이 적용됩니다.
+
+        Args:
+            form_type_or_id: 서식명 / schema_id / 별칭, 또는 ``"id:version"`` 형식.
+            version: ``"1.0.0"`` 또는 ``"v1"`` 등 특정 버전. None이면 최신.
+
+        Returns:
+            스키마 dict. 해당 id/version이 없으면 None.
+        """
+        # "form_type:version" 분리
+        raw = form_type_or_id
+        if ":" in raw and version is None:
+            raw, version = raw.split(":", 1)
+
+        schema_id = _SCHEMA_ALIASES.get(raw, raw)
+
+        self._ensure_loaded()
+        versions = self._schemas.get(schema_id)
+        if not versions:
+            return None
+
+        if version is None:
+            return self._latest_active(schema_id)
+
+        # version 매칭 — "v1" → "1.0.0" prefix, 아니면 정확 매칭
+        target = version.lstrip("v")
+        for schema in reversed(versions):
+            ver = schema.get("x-mil-ocr-version", "0.0.0")
+            if ver == version or ver.startswith(target):
+                if not schema.get("x-mil-ocr-deprecated", False):
+                    return schema
         return None
 
     def load(self, schema_id: str) -> Optional[dict]:

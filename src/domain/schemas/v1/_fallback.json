@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "_fallback",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2026-04-01",
+  "x-mil-ocr-deprecated": false,
+  "title": "unknown (군수 서식 유형 불명)",
+  "description": "FormType.UNKNOWN 전용 — 군수 서식으로 분류되었으나 세부 유형을 판정하지 못한 경우의 범용 폴백 스키마",
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "이미지 영역 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술"
+    },
+    "title": {
+      "type": "string",
+      "description": "문서 제목 (있는 경우)"
+    },
+    "date": {
+      "type": "string",
+      "description": "문서 일자 (YYYY-MM-DD, 문자열)"
+    },
+    "unit_code": {
+      "type": "string",
+      "description": "부대 코드 (문자열로 보존, 앞자리 0 손실 방지)"
+    },
+    "author": {
+      "type": "string",
+      "description": "작성자"
+    },
+    "content": {
+      "type": "string",
+      "description": "본문 주요 텍스트 요약"
+    },
+    "fields": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {"type": "string"},
+          "value": {"type": "string"}
+        },
+        "required": ["key", "value"]
+      },
+      "description": "key-value 쌍으로 추출된 자유 필드 목록"
+    }
+  },
+  "required": ["analysis"]
+}

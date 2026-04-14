@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "handover_doc",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2026-04-01",
+  "x-mil-ocr-deprecated": false,
+  "title": "인수인계서",
+  "description": "DOMAIN.md §2-4 — 인수인계서 필드 추출 스키마 (guided_json용)",
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "이미지 영역 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술"
+    },
+    "from_person": {
+      "type": "string",
+      "description": "인계자"
+    },
+    "to_person": {
+      "type": "string",
+      "description": "인수자"
+    },
+    "date": {
+      "type": "string",
+      "description": "인수인계 일자 (YYYY-MM-DD)"
+    },
+    "items": {
+      "type": "string",
+      "description": "인수인계 항목 목록"
+    }
+  },
+  "required": ["analysis"]
+}

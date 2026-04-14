@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supply_request",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2026-04-01",
+  "x-mil-ocr-deprecated": false,
+  "title": "보급청구서",
+  "description": "DOMAIN.md §2-1 — 보급청구서 필드 추출 스키마 (guided_json용)",
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "이미지 영역 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술"
+    },
+    "unit_code": {
+      "type": "string",
+      "description": "청구 부대 코드 (숫자 2~4자리 + 한글 부대명, 앞자리 0 보존)"
+    },
+    "request_date": {
+      "type": "string",
+      "description": "청구 일자 (YYYY-MM-DD, 문자열로 보존)"
+    },
+    "nsn": {
+      "type": "string",
+      "description": "NATO 재고번호 NNNN-NN-NNN-NNNN"
+    },
+    "item_name": {
+      "type": "string",
+      "description": "품목명"
+    },
+    "quantity": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "청구 수량 (양의 정수)"
+    },
+    "unit_price": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "단가 (원)"
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "합계 = quantity × unit_price"
+    },
+    "requester": {
+      "type": "string",
+      "description": "청구자 서명/이름"
+    }
+  },
+  "required": ["analysis"]
+}

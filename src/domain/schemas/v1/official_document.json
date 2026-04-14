@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "official_document",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2026-04-14",
+  "x-mil-ocr-deprecated": false,
+  "title": "공문서 (other 경로 S7 전용)",
+  "description": "DOMAIN.md §4-3 — Skill Registry 최종 집계용 범용 공문서 스키마",
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "문서 구조, 품질, 특이사항 간략 기술"
+    },
+    "document_type": {
+      "type": "string"
+    },
+    "header": {
+      "type": "object",
+      "properties": {
+        "organization": {"type": "string"},
+        "document_number": {"type": "string"},
+        "date": {"type": "string"},
+        "classification": {"type": "string"}
+      }
+    },
+    "recipient": {"type": "string"},
+    "subject": {"type": "string"},
+    "body": {"type": "string"},
+    "attachments": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "approval_table": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "role": {"type": "string"},
+          "name": {
+            "type": "object",
+            "properties": {
+              "value": {"type": "string"},
+              "confidence": {"type": "number"}
+            }
+          },
+          "date": {
+            "type": "object",
+            "properties": {
+              "value": {"type": "string"},
+              "confidence": {"type": "number"}
+            }
+          },
+          "signature_present": {"type": "boolean"},
+          "stamp_present": {"type": "boolean"}
+        }
+      }
+    },
+    "official_seal": {
+      "type": "object",
+      "properties": {
+        "detected": {"type": "boolean"},
+        "text": {
+          "type": "object",
+          "properties": {
+            "value": {"type": "string"},
+            "confidence": {"type": "number"}
+          }
+        }
+      }
+    },
+    "footer": {
+      "type": "object",
+      "properties": {
+        "handler": {"type": "string"},
+        "contact": {"type": "string"},
+        "file_number": {"type": "string"}
+      }
+    },
+    "low_confidence_fields": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "overall_confidence": {"type": "number"}
+  },
+  "required": ["analysis", "document_type"]
+}

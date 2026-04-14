@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inspection_report",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2026-04-01",
+  "x-mil-ocr-deprecated": false,
+  "title": "검사보고서",
+  "description": "검사보고서 필드 추출 스키마 (guided_json용). DOMAIN.md §2에 상세 명세 없음 — 일반 필드 최소 집합.",
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "이미지 영역 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술"
+    },
+    "inspection_date": {
+      "type": "string",
+      "description": "검사 일자 (YYYY-MM-DD)"
+    },
+    "inspector": {
+      "type": "string",
+      "description": "검사자 서명/이름"
+    },
+    "unit_code": {
+      "type": "string",
+      "description": "검사 대상 부대 코드 (문자열로 보존)"
+    },
+    "inspection_type": {
+      "type": "string",
+      "description": "검사 유형"
+    },
+    "findings": {
+      "type": "string",
+      "description": "검사 결과 소견"
+    },
+    "overall_result": {
+      "type": "string",
+      "description": "종합 판정"
+    }
+  },
+  "required": ["analysis"]
+}
