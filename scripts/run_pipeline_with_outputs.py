@@ -685,7 +685,7 @@ def main():
         "documents": [],
     }
     for r in results:
-        total_summary["documents"].append({
+        entry = {
             "doc_id": r.doc_id,
             "status": r.status.value,
             "processing_path": r.processing_path.value,
@@ -695,7 +695,18 @@ def main():
             "errors": r.errors,
             "warning_count": len(r.warnings),
             "warnings": r.warnings,
-        })
+        }
+        stats = getattr(r, "skill_stats", None)
+        if stats is not None:
+            entry["skill_stats"] = {
+                "skill_counts": stats.skill_counts,
+                "skill_time_ms": {k: round(v, 1) for k, v in stats.skill_time_ms.items()},
+                "batch_sizes": {str(k): v for k, v in stats.batch_sizes.items()},
+                "pass1_tables": stats.pass1_tables,
+                "pass2_tasks": stats.pass2_tasks,
+                "total_ms": round(stats.total_ms, 1),
+            }
+        total_summary["documents"].append(entry)
 
     _save_json(run_dir / "run_summary.json", total_summary)
 

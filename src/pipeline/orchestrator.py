@@ -32,6 +32,7 @@ from src.interfaces.enums import (
 )
 from src.interfaces.types import (
     DocumentInput,
+    FieldValue,
     LayoutResult,
     PipelineOutput,
     PreprocessedImage,
@@ -113,6 +114,11 @@ class PipelineResult:
     p3_result: Optional[VLMResult] = None              # P3-B 추출 결과
     p4_result: Optional[ValidatedResult] = None
     output: Optional[PipelineOutput] = None
+
+    # Skill Registry (other 경로)
+    skill_results: list = field(default_factory=list)    # [SkillResult]
+    skill_table_structures: list = field(default_factory=list)  # [TableStructure]
+    skill_stats: Optional[Any] = None                    # SkillDispatchStats
 
     # 실행 시간
     timings: dict[str, float] = field(default_factory=dict)
@@ -231,6 +237,19 @@ class PipelineOrchestrator:
             logger.info("오케스트레이터: P3-B 초기화 완료")
         return self._components["p3b"]
 
+    def _get_skill_registry(self):
+        """Skill Registry (other 경로)."""
+        if "skill_registry" not in self._components:
+            from src.vlm.skill_registry import SkillRegistry
+            from src.vlm.vlm_client import VLMClient
+            vlm = VLMClient(
+                base_url=self.cfg.vllm_base_url,
+                model_name="/models/gemma4/gemma-4-26b-a4b-it/",
+            )
+            self._components["skill_registry"] = SkillRegistry(vlm_client=vlm)
+            logger.info("오케스트레이터: SkillRegistry 초기화 완료")
+        return self._components["skill_registry"]
+
     def _get_p3_legacy(self):
         """기존 Gemma4Engine (fallback/호환용)."""
         if "p3" not in self._components:
@@ -314,6 +333,63 @@ class PipelineOrchestrator:
     # ═══════════════════════════════════════
     #  단계 실행 헬퍼
     # ═══════════════════════════════════════
+
+    # ═══════════════════════════════════════
+    #  Skill Registry 경로 (other 문서)
+    # ═══════════════════════════════════════
+
+    def _process_other_document(
+        self,
+        layout: LayoutResult,
+        preprocessed: PreprocessedImage,
+        doc_id: str,
+        form_confidence: float,
+        result: PipelineResult,
+    ) -> VLMResult:
+        """PIPELINE.md §5 other 경로 — S5 패스1 → 일반 태스크 + 셀 태스크 배치 디스패치."""
+        from src.interfaces.enums import FormType, ProcessingPath
+        from src.vlm.skill_registry import SkillDispatchStats
+
+        registry = self._get_skill_registry()
+        stats = SkillDispatchStats()
+
+        # 1) 표 2패스 (S5)
+        cell_results, structures = registry.dispatch_tables(
+            layout=layout, preprocessed=preprocessed, stats=stats,
+        )
+
+        # 2) 비-표 영역 태스크
+        non_table_tasks = registry.build_tasks(layout=layout, preprocessed=preprocessed)
+        general_results = registry.dispatch(non_table_tasks, stats=stats)
+
+        skill_results = general_results + cell_results
+        result.skill_results = skill_results
+        result.skill_table_structures = structures
+        result.skill_stats = stats
+
+        # 3) VLMResult 형태로 집계 (P4 이후 단계에 동일 인터페이스 제공)
+        fields = _skill_results_to_fields(skill_results)
+        overall = (
+            sum(f.confidence for f in fields) / len(fields)
+            if fields else 0.0
+        )
+        vlm_result = VLMResult(
+            doc_id=doc_id,
+            form_type=FormType.OTHER,
+            form_confidence=form_confidence,
+            schema_id="_general",
+            fields=fields,
+            tables=[],
+            domain_codes=[],
+            processing_time_ms=stats.total_ms,
+            processing_path=ProcessingPath.SKILL_REGISTRY,
+        )
+        logger.info(
+            "Skill Registry: %d 영역 처리 (표 %d, 일반 %d), avg_conf=%.3f, %.1fms",
+            len(skill_results), len(cell_results), len(general_results),
+            overall, stats.total_ms,
+        )
+        return vlm_result
 
     def _run_step(self, name: str, result: PipelineResult, fn) -> Any:
         """단일 단계 실행 + 시간 측정."""
@@ -416,51 +492,68 @@ class PipelineOrchestrator:
                 registry = SchemaRegistry()
 
                 if form_type == _FT.OTHER:
-                    # other 문서: 범용 스키마, 군수 룰 검증 없음
-                    schema_id = "_general"
-                elif form_type == _FT.UNKNOWN:
-                    # 군수 서식인데 유형 불명
-                    schema_id = "_fallback"
-                else:
-                    schema_id = result.p3a_form_type
-
-                schema = registry.load(schema_id)
-                if schema is None:
-                    # 최종 fallback
-                    schema = registry.load("_fallback")
-                    schema_id = "_fallback"
-
-                # P2.5-B: InstructionRouter
-                instructions = self._run_step(
-                    "P2.5B", result,
-                    lambda: self._get_p2_5b().route_all(p2_out, form_type),
-                )
-                result.p2_5b_instructions = instructions
-
-                if instructions:
-                    # P2.5-C: ResolutionRouter
-                    groups = self._run_step(
-                        "P2.5C", result,
-                        lambda: self._get_p2_5c().route(p2_out, p1_out, instructions),
+                    # other 문서: Skill Registry 경로 — SKILL_ROUTING 기반 영역별 디스패치
+                    result.processing_path = ProcessingPath.SKILL_REGISTRY
+                    p3_out = self._run_step(
+                        "SkillRegistry", result,
+                        lambda: self._process_other_document(
+                            layout=p2_out,
+                            preprocessed=p1_out,
+                            doc_id=doc_input.doc_id,
+                            form_confidence=form_confidence,
+                            result=result,
+                        ),
                     )
-                    result.p2_5c_groups = groups
-
-                    if groups:
-                        # P3-B: StructuredExtractor (trace 수집)
-                        p3_out = self._run_step(
-                            "P3B", result,
-                            lambda: self._get_p3b().extract(
-                                groups=groups,
-                                doc_id=doc_input.doc_id,
-                                form_type=form_type,
-                                form_confidence=form_confidence,
-                                schema_id=schema_id,
-                                schema=schema,
-                                warnings=result.warnings,
-                                trace=result.p3b_trace,
-                            ),
-                        )
+                    if p3_out is not None:
                         result.p3_result = p3_out
+                    # P2.5-B/C/P3-B 건너뜀 — P4~P6 계속
+                    instructions = None
+                    schema_id = "_general"
+                    schema = None
+                else:
+                    if form_type == _FT.UNKNOWN:
+                        # 군수 서식인데 유형 불명
+                        schema_id = "_fallback"
+                    else:
+                        schema_id = result.p3a_form_type
+
+                    schema = registry.load(schema_id)
+                    if schema is None:
+                        # 최종 fallback
+                        schema = registry.load("_fallback")
+                        schema_id = "_fallback"
+
+                    # P2.5-B: InstructionRouter
+                    instructions = self._run_step(
+                        "P2.5B", result,
+                        lambda: self._get_p2_5b().route_all(p2_out, form_type),
+                    )
+                    result.p2_5b_instructions = instructions
+
+                    if instructions:
+                        # P2.5-C: ResolutionRouter
+                        groups = self._run_step(
+                            "P2.5C", result,
+                            lambda: self._get_p2_5c().route(p2_out, p1_out, instructions),
+                        )
+                        result.p2_5c_groups = groups
+
+                        if groups:
+                            # P3-B: StructuredExtractor (trace 수집)
+                            p3_out = self._run_step(
+                                "P3B", result,
+                                lambda: self._get_p3b().extract(
+                                    groups=groups,
+                                    doc_id=doc_input.doc_id,
+                                    form_type=form_type,
+                                    form_confidence=form_confidence,
+                                    schema_id=schema_id,
+                                    schema=schema,
+                                    warnings=result.warnings,
+                                    trace=result.p3b_trace,
+                                ),
+                            )
+                            result.p3_result = p3_out
 
             # VLM 실패 시 fallback 재시도
             if p3_out is None and self.cfg.fallback_enabled:
@@ -604,3 +697,35 @@ class PipelineOrchestrator:
             len(result.errors), len(result.warnings),
         )
         return result
+
+
+# ─────────────────────────────────────────────
+#  Skill Registry → VLMResult 변환 유틸
+# ─────────────────────────────────────────────
+
+def _skill_results_to_fields(skill_results: list) -> list[FieldValue]:
+    """SkillResult 리스트 → FieldValue 리스트.
+
+    region_id를 field_key로 사용. content는 raw/corrected 동일.
+    data_type은 content_type 기반 추정.
+    """
+    fields: list[FieldValue] = []
+    for sr in skill_results:
+        data_type = "text"
+        if sr.content_type == "signature":
+            data_type = "flag"
+        elif sr.content_type == "seal":
+            data_type = "text"
+        fields.append(
+            FieldValue(
+                field_key=sr.region_id,
+                raw_value=sr.content,
+                corrected_value=sr.content,
+                data_type=data_type,
+                confidence=sr.confidence,
+                token_logprobs=[],
+                is_flagged=sr.confidence < 0.60,
+                region_id=sr.region_id,
+            )
+        )
+    return fields

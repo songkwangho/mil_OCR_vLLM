@@ -6,7 +6,7 @@
 
 ## 1. 실행 방식
 
-**옵션 A — 호스트 conda 환경 직접 실행** (권장, Layout + vLLM 컨테이너만 기동):
+**옵션 A — 호스트 conda 환경 직접 실행** (권장):
 
 ```bash
 VLLM_BASE_URL=http://localhost:8100/v1 \
@@ -42,15 +42,35 @@ docker run --rm --gpus device=0 --network host \
 
 ## 2. 테스트 케이스
 
+### 기존 군수 서식 (military 경로)
+
 | # | 케이스 | 검증 포인트 |
 |---|--------|-----------|
 | T1 | Fusion OFF 기본 경로 | P1→P2→P2.5-A→P3-A→P2.5-B→P2.5-C→P3-B→P4 end-to-end |
 | T2 | Fusion ON, DPI≥150 | V3+plus-L 결합, reading_order 정합성 |
 | T3 | Fusion ON, DPI<150 | V3+heuristic 경로, reading_order 정합성 |
-| T4 | Other 문서 입력 | `form_type=other` 분류, 범용 OCR 경로, 검토 큐 미적재 |
 | T5 | Fallback 전환 | VLM 불가 시 Fallback 경로 전환 |
 | T6 | military 문서 검토 큐 | P4 실패 → 큐 적재 → 담당자 수정 → P6 재적재 |
 | T7 | OCR-augmented 힌트 | 저신뢰 영역 OCR 힌트 삽입 + 재시도 동작 확인 |
+
+### 공문서 other 경로 (Skill Registry)
+
+| # | 케이스 | 검증 포인트 |
+|---|--------|-----------|
+| T4 | Other 문서 입력 | `form_type=other` 분류, Skill Registry 디스패치, 검토 큐 미적재 |
+| T8 | 인장(직인) 인식 | SealPreprocessor 허프 성공/실패 분기, VLM 인식 결과 확인 |
+| T9 | 결재란 2패스 처리 | S5 패스1 구조 추출 → 패스2 셀 내용 추출, 오케스트레이터 태스크 생성 흐름 |
+| T10 | 서명 탐지 | 서명 있는 셀 → `signature_present: true`, 빈 셀 → `false` |
+
+**T8 세부 검증**:
+- 허프 성공 케이스: `unwrapped=true`, VLM이 직선화된 이미지 수신 확인
+- 허프 실패 케이스: `unwrapped=false`, context_hint 포함 원본 크롭 수신 확인
+- 허프 실패율이 30%+ 이면 극좌표 변환을 선택적 최적화로 격하 검토
+
+**T9 세부 검증**:
+- 패스1 결과: `TableStructure.cells` 각 셀의 `content_type` 정확도
+- 패스2 결과: `SkillTask` 생성 수 = 비어있지 않은 셀 수
+- DISPATCH_ORDER 순서대로 배치 실행되는지 로그 확인
 
 ---
 
@@ -58,56 +78,66 @@ docker run --rm --gpus device=0 --network host \
 
 ```
 data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
-├── run_summary.json                 ← 전체 실행 요약
-├── ocr_results.db                   ← P6 DB (SQLite)
-├── review_queue.db                  ← 검토 큐 DB
+├── run_summary.json
+├── ocr_results.db
+├── review_queue.db
 └── {doc_id}/
-    ├── summary.json                 ← 문서별 요약 (form_type, status, timings)
+    ├── summary.json              ← form_type, status, processing_path, timings
     ├── P1/
-    │   ├── result.json              ← dpi, quality_score, sr_applied
-    │   ├── preprocessed.png         ← 전처리 이미지 (RGB, 기울기 보정)
-    │   └── binary.png               ← 이진화 이미지
+    │   ├── result.json           ← dpi, quality_score, sr_applied
+    │   ├── preprocessed.png
+    │   └── binary.png
     ├── P2/
-    │   ├── result.json              ← RawLayoutResult (정제 전)
-    │   └── layout_visualization.png ← P2 원시 검출 bbox 오버레이
+    │   ├── result.json           ← RawLayoutResult (정제 전)
+    │   └── layout_visualization.png
     ├── P2.5A/
-    │   ├── result.json              ← LayoutResult (removed_count, merged_count)
-    │   └── layout_visualization.png ← 정제 후 bbox (P2와 비교용)
+    │   ├── result.json           ← LayoutResult (removed_count, merged_count)
+    │   └── layout_visualization.png
     ├── P3A/
-    │   └── result.json              ← form_type, form_confidence, 추론 시간
-    ├── P2.5B/
-    │   └── result.json              ← {region_id → InstructionSpec}
-    │                                   (system_prompt, user_instruction, json_schema,
-    │                                    pixel_budget, ocr_hint 포함 여부)
-    ├── P2.5C/
-    │   ├── result.json              ← pixel_budget 그룹 + 영역별 crop 메타
-    │   └── crops/
-    │       ├── r_0001_table_b1120.png  ← 영역별 크롭 이미지 (48px 정렬 완료)
-    │       └── ...
-    ├── P3B/
-    │   ├── result.json              ← fields[], tables[], domain_codes[], retry_count
-    │   └── raw_vlm_responses/
-    │       ├── batch_{budget}_{n}.json  ← pixel_budget별 배치 원본 응답
-    │       └── retry_{region_id}.json  ← 재시도 호출 응답 (해당 시)
+    │   └── result.json           ← form_type, form_confidence
+    │
+    ├── [military 경로]
+    │   ├── P2.5B/
+    │   │   └── result.json       ← {region_id → InstructionSpec}
+    │   ├── P2.5C/
+    │   │   ├── result.json       ← pixel_budget 그룹 + 크롭 메타
+    │   │   └── crops/
+    │   │       └── r_0001_table_b1120.png
+    │   └── P3B/
+    │       ├── result.json       ← fields[], tables[], retry_count
+    │       └── raw_vlm_responses/
+    │           ├── batch_{budget}_{n}.json
+    │           └── retry_{region_id}.json
+    │
+    ├── [other 경로]
+    │   ├── S1/
+    │   │   └── result.json       ← 레이아웃 결과 + 결재란 휴리스틱 판단
+    │   ├── S5_pass1/
+    │   │   └── result.json       ← TableStructure (셀 좌표 + content_type)
+    │   ├── S2_S3_S4_S6/
+    │   │   ├── result.json       ← 각 Skill 결과 목록
+    │   │   └── seal/
+    │   │       ├── original_crop.png
+    │   │       └── unwrapped.png ← 극좌표 직선화 결과 (허프 성공 시)
+    │   └── S7/
+    │       └── result.json       ← official_document.json 형식 최종 결과
+    │
     ├── P4/
-    │   └── result.json              ← overall_confidence, validation_errors
+    │   └── result.json           ← overall_confidence, validation_errors
     ├── P5/
     │   ├── output.json
     │   ├── output.xml
-    │   └── output.csv (선택)
+    │   └── output.csv
     └── P6/
-        └── result.json              ← db_record_ids, review_queue_id, status
+        └── result.json           ← db_record_ids, review_queue_id, status
 ```
 
-**디버깅 흐름**:
+**디버깅 흐름 (other 경로)**:
 
-1. P2 → P2.5A 시각화 비교 → LayoutPostProcessor 정제 효과 확인
-2. P3A/result.json → form_type이 military/other로 올바르게 분류되었는지
-3. P2.5B/result.json → military 경로는 CoT 지시 + 1-shot 예시 + OCR 힌트 포함 여부
-4. P2.5C/crops/*.png → VLM이 실제로 받은 이미지 (48px 정렬, 해상도 적절성)
-5. P3B/result.json → retry_count 확인 → 재시도 발생 패턴 파악
-6. P3B/raw_vlm_responses/retry_*.json → 재시도 효과 측정
-7. P4/result.json → other 경로에서 룰 검증 스킵 확인
+1. S1/result.json → 결재란이 `table`로 탐지되었는지, Mode B 트리거 여부
+2. S5_pass1/result.json → 결재란 셀 구조와 content_type 정확도
+3. S2_S3_S4_S6/seal/unwrapped.png → 허프 직선화 품질 확인
+4. S7/result.json → official_document.json 스키마 준수 + low_confidence_fields
 
 ---
 
@@ -125,16 +155,9 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
       "form_type": "supply_request",
       "total_ms": 4820.1,
       "timings": {
-        "P1": 310.2,
-        "P2": 48.5,
-        "P2_5A": 12.3,
-        "P3A": 420.7,
-        "P2_5B": 5.1,
-        "P2_5C": 8.4,
-        "P3B": 3850.4,
-        "P4": 3.1,
-        "P5": 4.2,
-        "P6": 18.7
+        "P1": 310.2, "P2": 48.5, "P2_5A": 12.3,
+        "P3A": 420.7, "P2_5B": 5.1, "P2_5C": 8.4,
+        "P3B": 3850.4, "P4": 3.1, "P5": 4.2, "P6": 18.7
       },
       "p3b_batches": [
         {"pixel_budget": 140, "region_count": 1, "ms": 380.1},
@@ -148,12 +171,34 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
       }
     },
     {
-      "doc_id": "일반공문서_001",
+      "doc_id": "국회공문서_001",
       "status": "other_document",
-      "processing_path": "vlm",
+      "processing_path": "skill_registry",
       "form_type": "other",
-      "total_ms": 1240.3,
-      "review_queue_id": null
+      "total_ms": 7200.5,
+      "review_queue_id": null,
+      "timings": {
+        "P1": 280.1, "P2": 45.2, "P2_5A": 11.0,
+        "P3A": 410.3,
+        "S1_layout": 120.5,
+        "S5_pass1": 980.2,
+        "S6_batch_140": 520.1,
+        "S2_batch_560": 1050.3,
+        "S3_S4_S5p2_batch_1120": 2890.4,
+        "S7_aggregator": 1500.8,
+        "P4": 3.2, "P5": 4.1, "P6": 17.5
+      },
+      "skill_stats": {
+        "seal_preprocessor": {
+          "attempted": 1,
+          "hough_success": 1,
+          "hough_failed": 0
+        },
+        "signature_detector": {
+          "attempted": 4,
+          "detected": 2
+        }
+      }
     }
   ]
 }
@@ -163,18 +208,19 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 
 ## 5. 콘솔 출력 원칙
 
-통합 테스트 실행 시 콘솔에 다음을 빠짐없이 출력합니다.
-
-1. **환경 정보**: CUDA 버전, Fusion 모드, 서비스 URL, OCR 힌트 활성화 여부, 테스트 이미지 수
+1. **환경 정보**: CUDA 버전, Fusion 모드, vLLM 서버 상태, 테스트 이미지 수
 2. **P2 탐지 결과**: 모드(Fusion ON/OFF), 탐지 영역 수
 3. **P2.5-A 정제 결과**: 제거된 박스 수, 병합된 블록 수
 4. **P3-A 분류 결과**: form_type, form_confidence, military/other 분기 표시
-5. **P3-B 배치 처리**: 그룹별 pixel_budget, 배치 크기, 추론 시간, OCR 힌트 삽입 수
-6. **P3-B 재시도**: 재시도 발생 필드, 재시도 전/후 신뢰도
-7. **P4 검증 결과**: overall_confidence, 오류 수, 검토 큐 적재 여부
-8. **실패 시**: 실패 단계, 에러 메시지, 스택 트레이스
-9. **문서별 요약**: `[PASS/FAIL] {doc_id} form={form_type} total=Xms P3B=Xms retry={N}건`
-10. **전체 요약**: 총 처리 건수, military/other/review_queue 분포, 평균 재시도 비율
+5. **[military] P3-B 배치 처리**: 그룹별 pixel_budget, 배치 크기, 추론 시간
+6. **[military] P3-B 재시도**: 재시도 발생 필드, 재시도 전/후 신뢰도
+7. **[other] Skill 실행 결과**: S5 패스1 셀 구조, SealPreprocessor 허프 성공/실패, 각 배치 처리 시간
+8. **P4 검증 결과**: overall_confidence, 오류 수, 검토 큐 적재 여부
+9. **실패 시**: 실패 단계, 에러 메시지, 스택 트레이스
+10. **문서별 요약**:
+    - military: `[PASS/FAIL] {doc_id} form={form_type} total=Xms P3B=Xms retry={N}건`
+    - other: `[PASS/FAIL] {doc_id} form=other total=Xms hough={success/fail} sig={N}건`
+11. **전체 요약**: 처리 건수, military/other/review_queue 분포, 평균 처리 시간
 
 ---
 
@@ -183,21 +229,35 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 | 일자 | 환경 | 케이스 | 결과 | 비고 |
 |------|------|--------|------|------|
 | 2026-04-08 | H100 / vLLM v0.19.0 | T1 기본 경로 | 3건 PASS | Phase 1 통합 테스트 |
-| (예정) | vLLM 재기동 후 | T1 | — | vLLM 최적화 옵션 적용 후 성능 측정 |
+| (예정) | vLLM 재기동 후 | T1 | — | guided_json enforce 검증 |
 | (예정) | — | T2, T3 | — | Fusion ON DPI 분기 검증 |
-| (예정) | — | T4 | — | Other 문서 경로 |
+| (예정) | — | T4 | — | Other → Skill Registry 경로 |
 | (예정) | — | T5 | — | Fallback 전환 |
-| (예정) | — | T7 | — | OCR-augmented 힌트 효과 측정 |
+| (예정) | — | T7 | — | OCR-augmented 힌트 효과 |
+| (예정) | — | T8 | — | 인장 인식, 허프 성공/실패 분기 |
+| (예정) | — | T9 | — | 결재란 2패스 처리 |
+| (예정) | — | T10 | — | 서명 탐지 이진 분류 |
 
-### 6-1. 향후 계획 타당성 및 문제점
+### 6-1. Phase 1-E 잔존 이슈 (통합 테스트에서 발견)
+
+| 우선순위 | 이슈 | 조치 | 상태 |
+|---------|------|------|------|
+| 🔴 즉시 | vLLM 재기동 — guided_json enforce 미적용 | `docker compose restart vllm-server` | 미완 |
+| 🔴 즉시 | PaddleOCR 가중치 폐쇄망 배치 | `Dockerfile.pipeline` COPY 추가 | 미완 |
+| 🟡 샘플 확보 후 | 재시도 경로 실검증 | 군수 서식 샘플 확보 후 T7 실행 | 대기 |
+| 🟡 구현 후 | Skill Registry end-to-end 검증 | T4/T8/T9/T10 실행 | 대기 |
+| 🟢 선택 | vLLM 변동성 N=3 반복 측정 | 재기동 후 동일 조건 3회 | 미완 |
+
+### 6-2. 향후 계획 타당성 및 문제점
 
 **[R1] vLLM 최적화 옵션 재기동 필요**
-docker-compose.yml 파일은 수정되었지만 기존 컨테이너는 구 옵션으로 기동 중입니다. `docker compose restart vllm-server` 후 동일 문서 처리 시간을 비교 측정해야 합니다.
+docker-compose.yml 수정 완료, 컨테이너 재기동 미수행. `docker compose restart vllm-server` 후 region_traces.json의 raw_response가 JSON 형식으로 변화하는지 확인.
 
-**[R2] OCR-augmented가 모든 영역에 적용 시 처리 지연**
-PaddleOCR가 영역당 ~50ms이므로, 20개 영역 문서에서 최대 1초 추가됩니다. 선택적 적용 조건(logprobs < 0.80, NSN 패턴 필드)을 통합 테스트 T7에서 실측하여 임계값을 현실화합니다.
+**[R2] SealPreprocessor 허프 실패율 미측정**
+T8에서 허프 성공/실패 분포를 측정하고, 실패율이 30%+ 이면 극좌표 변환을 선택적 최적화로 격하하고 원본 크롭 직접 VLM 전달 방식을 기본으로 변경.
 
-**[R3] 재시도 로직이 피크 처리량에 미치는 영향**
-MAX_RETRIES=1이어도 재시도가 집중되면 처리 지연이 발생합니다. T7 테스트에서 재시도 발생 비율을 측정하고, 5% 초과 시 임계값 조정을 검토합니다.
+**[R3] S3 HandwritingReader 수기 인식 실측치 부재**
+국회공문서 샘플(또는 공개 의안 PDF 기반 합성 샘플) 10~20장으로 수기 인식률 실측 후 신뢰도 임계값 0.75를 현실화.
 
-**보완**: run_summary.json의 retry_stats 항목으로 재시도 패턴을 2주간 수집 후 임계값 현실화.
+**[R4] 처리 시간 10초 이내 마진**
+other 경로 예상 처리 시간: S1(0.5s) + S5패스1(1s) + S6배치(0.5s) + S2배치(1s) + S3/S4/S5패스2배치(3s) + S7(1.5s) = ~7.5s. Mode B 트리거 시 추가 VLM 호출로 10초 초과 가능. T4 실측 필요.

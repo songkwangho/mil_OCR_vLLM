@@ -55,6 +55,12 @@ __all__ = [
     # P2.5 중간 처리
     "InstructionSpec",
     "CroppedRegion",
+    # Skills (other 경로)
+    "SealProcessResult",
+    "SkillTask",
+    "SkillResult",
+    "TableCell",
+    "TableStructure",
     # P3 VLM 통합 추론
     "FieldValue",
     "RecognizedTable",
@@ -228,6 +234,60 @@ class CroppedRegion:
     cropped_image: np.ndarray
     pixel_budget: int
     instruction_spec: InstructionSpec
+
+
+# ═══════════════════════════════════════════════
+#  Skills (other 경로) — PIPELINE.md §2-3 / §4
+# ═══════════════════════════════════════════════
+
+@dataclass
+class SealProcessResult:
+    """SealPreprocessor 결과 — 극좌표 직선화 or 원본 크롭."""
+    image: np.ndarray
+    unwrapped: bool
+    context_hint: str = ""
+
+
+@dataclass
+class SkillTask:
+    """오케스트레이터가 Skill에 전달하는 작업 단위."""
+    region_id: str
+    region_type: RegionType
+    cropped_image: np.ndarray
+    pixel_budget: int
+    context: str = ""
+    form_type: Optional[FormType] = None
+
+
+@dataclass
+class SkillResult:
+    """Skill 실행 결과."""
+    region_id: str
+    skill_name: str               # "S2"~"S6"
+    content: str                  # 텍스트 또는 JSON 문자열
+    confidence: float
+    content_type: str             # "printed", "handwritten", "seal", "signature", "table"
+    raw_response: str = ""
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TableCell:
+    """S5 패스1 — 셀 구조."""
+    row: int
+    col: int
+    role: str
+    bbox: BoundingBox
+    content_type: str             # "printed", "handwritten", "signature", "seal", "empty"
+
+
+@dataclass
+class TableStructure:
+    """S5 패스1 결과 — 표 구조만."""
+    region_id: str
+    table_type: str               # "approval", "data", "other"
+    cells: list[TableCell]
+    structure_confidence: float
 
 
 # ═══════════════════════════════════════════════

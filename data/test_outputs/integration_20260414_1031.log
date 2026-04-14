@@ -1,0 +1,201 @@
+2026-04-14 01:31:23,021 [INFO] run_pipeline — 입력 이미지 3개 발견: /workspace/data/raw
+2026-04-14 01:31:23,022 [INFO] run_pipeline — 출력 디렉토리: /workspace/data/pipeline_outputs/20260414_013123
+2026-04-14 01:31:23,022 [INFO] run_pipeline — ============================================================
+2026-04-14 01:31:23,022 [INFO] run_pipeline — 문서 처리 시작: 국회공문서
+2026-04-14 01:31:23,022 [INFO] run_pipeline — ============================================================
+2026-04-14 01:31:23,022 [INFO] src.pipeline.orchestrator — 오케스트레이터: 파이프라인 시작 (doc_id=국회공문서)
+2026-04-14 01:31:23,271 [INFO] src.pipeline.orchestrator — 오케스트레이터: P1 초기화 완료
+2026-04-14 01:31:23,328 [INFO] src.preprocess.preprocessor — [P1][국회공문서] brightness=248.1 band=bright
+2026-04-14 01:31:23,349 [INFO] src.preprocess.preprocessor — [P1][국회공문서] DPI=79 band=low
+2026-04-14 01:31:23,349 [WARNING] src.preprocess.sr_enhancer — T1-SR: Real-ESRGAN 모델 미발견 → Lanczos fallback
+2026-04-14 01:31:23,775 [INFO] src.preprocess.preprocessor — [P1][국회공문서] done band=low quality=0.721 sr=False
+2026-04-14 01:31:23,775 [INFO] src.pipeline.orchestrator — 오케스트레이터: P1 완료 (753.3ms)
+2026-04-14 01:31:23,776 [INFO] src.pipeline.orchestrator — 오케스트레이터: P2 초기화 완료 (mode=model, model=PP-DocLayoutV3)
+[33mConnectivity check to the model hoster has been skipped because `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK` is enabled.[0m
+2026-04-14 01:32:10,916 [WARNING] src.postprocess.db_loader — P6: DB 초기화 실패 → JSON fallback 모드 (No module named 'sqlalchemy')
+2026-04-14 01:32:12,384 [WARNING] src.vlm.skills.table_extractor — [TableExtractor.pass1] JSON 파싱 실패 region=r_0004
+
+────────────────────────────────────────────────────────────────────────────────
+  문서: 국회공문서 (54.8 KB)
+────────────────────────────────────────────────────────────────────────────────
+
+  [P1] 화질 보정 OK (753ms)
+       DPI: 79 -> 158, quality=0.7210, SR=False
+       이미지: 1310x1856
+       WARNING: IMAGE_TOO_BRIGHT: mean=237.7
+       WARNING: LOW_RESOLUTION_BAND: quality score penalized x0.85
+
+  [P2] 레이아웃 탐지 OK (6716ms)
+       mode=model, raw_regions=20
+
+  [P2.5-A] LayoutPostProcessor OK (0ms)
+       20 → 20 regions (removed=0, merged=0)
+       tables=2, reading_order=[3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 14, 17, 19, 18, 16, 4, 2, 0, 1]
+       r_0001: table           conf=0.92  bbox=[768,780,1099,940] polygon=4pts
+       r_0003: figure          conf=0.88  bbox=[807,1114,1093,1402] polygon=4pts
+       r_0004: table           conf=0.76  bbox=[152,909,601,1091] polygon=4pts
+       r_0006: header          conf=0.71  bbox=[376,179,986,247] polygon=4pts
+       r_0007: figure          conf=0.70  bbox=[122,140,259,278] polygon=4pts
+       r_0012: text            conf=0.66  bbox=[124,320,438,362] polygon=4pts
+       r_0018: text            conf=0.46  bbox=[127,368,230,404] polygon=4pts
+       r_0011: text            conf=0.68  bbox=[125,413,518,453] polygon=4pts
+       r_0002: text            conf=0.91  bbox=[120,483,1203,691] polygon=4pts
+       r_0010: text            conf=0.68  bbox=[123,733,599,774] polygon=4pts
+       r_0009: text            conf=0.68  bbox=[188,783,614,823] polygon=4pts
+       r_0013: text            conf=0.66  bbox=[120,1353,531,1390] polygon=4pts
+       r_0019: text            conf=0.40  bbox=[120,1480,1246,1552] polygon=4pts
+       r_0014: text            conf=0.65  bbox=[123,1588,210,1621] polygon=4pts
+       r_0016: text            conf=0.52  bbox=[658,1618,1076,1666] polygon=4pts
+       r_0008: text            conf=0.68  bbox=[123,1633,513,1666] polygon=4pts
+       r_0020: text            conf=0.37  bbox=[875,1669,1189,1728] polygon=4pts
+       r_0005: text            conf=0.72  bbox=[125,1671,753,1702] polygon=4pts
+       r_0017: text            conf=0.52  bbox=[393,1701,582,1730] polygon=4pts
+       r_0015: text            conf=0.58  bbox=[124,1703,311,1731] polygon=4pts
+
+  [P3-A] FormClassifier OK (11808ms)
+       form_type=other, confidence=1.0000
+
+  [P3-B] StructuredExtractor OK (0ms)
+       fields=16, tables=0, codes=0, vlm_time=14095ms
+       field: r_0006                         = 대한민국 국회                                                      conf=1.0000
+       field: r_0012                         = 수신자 수신자 참조                                                   conf=0.9800
+       field: r_0018                         = (경유)                                                         conf=0.9800
+       field: r_0011                         = 제목 의안 심사기간 지정                                                conf=0.9800
+       field: r_0002                         = 2015. 12. 2. 현재 귀 위원회에 계류되어 있는 불임 법률안의 심사기간을
+23:30
+국회법 제85조제 conf=0.9500
+       field: r_0010                         = 붙임 1. 심사기간 지정 외안 목록 1부                                       conf=0.9500
+       field: r_0009                         = 2. 심사기간 지정 합의문 1부. 끝.                                        conf=0.9800
+       field: r_0013                         = 수신자 교육문화체육관광위원장                                              conf=0.9800
+       field: r_0019                         = 주무관 류경우 서기관 조만수 의안과장 한석현 의사국장 장재삼                            conf=0.9500
+       field: r_0014                         = 협조자                                                          conf=1.0000
+       field: r_0016                         = 접수 교문91-1740(2015.12.2)                                      conf=0.9500
+       field: r_0008                         = 시행 의안과(e)-(355)(2015. 12. 2.)                                conf=0.9500
+       field: r_0020                         = /공개                                                          conf=0.9800
+       field: r_0005                         = 우 150-701 서울 영등포구 의사당대로 1 국회(본관 701호)                        conf=0.9800
+       field: r_0017                         = 전화(02)788-3383                                               conf=0.9800
+       ... +1 more
+
+  [P4] 룰 검증 OK (3ms)
+       confidence=0.9744, review=False, errors=0, flagged=[]
+
+  [P5] 직렬화 OK (0ms)
+       JSON=3810 chars, XML=2807 chars
+
+  [P6] DB 적재 OK (1ms)
+       record_ids=[]
+
+  -- 문서 요약: total=47827ms  P1=753ms | P2=6716ms | P2.5A=0ms | P3A=11808ms | SkillRegistry=28545ms | P4=3ms | P5=0ms | P6=1ms
+
+────────────────────────────────────────────────────────────────────────────────
+  문서: 전역지원서_1 (31.0 KB)
+────────────────────────────────────────────────────────────────────────────────
+
+  [P1] 화질 보정 OK (53ms)
+       DPI: 72 -> 144, quality=0.8500, SR=False
+       이미지: 520x832
+       WARNING: LOW_RESOLUTION_BAND: quality score penalized x0.85
+
+  [P2] 레이아웃 탐지 OK (99ms)
+       mode=model, raw_regions=10
+
+  [P2.5-A] LayoutPostProcessor OK (0ms)
+       10 → 8 regions (removed=0, merged=2)
+       tables=1, reading_order=[0, 5, 6, 4, 7, 2, 3, 1]
+       r_0002: header          conf=0.74  bbox=[162,90,374,121] polygon=4pts
+       r_0004: table           conf=0.50  bbox=[46,554,418,606] polygon=4pts
+       r_0005: header          conf=0.49  bbox=[16,40,67,57] polygon=4pts
+       r_0007: header          conf=0.41  bbox=[14,87,117,104] polygon=4pts
+       r_0008: header          conf=0.39  bbox=[42,613,178,634] polygon=4pts
+       r_0010: text            conf=0.33  bbox=[42,133,234,152] polygon=4pts
+       r_0003: text            conf=0.80  bbox=[40,289,476,553]
+       r_0006: text            conf=0.45  bbox=[45,639,477,775] polygon=4pts
+
+  [P3-A] FormClassifier OK (143ms)
+       form_type=other, confidence=0.9996
+
+  [P3-B] StructuredExtractor OK (0ms)
+       fields=7, tables=0, codes=0, vlm_time=6299ms
+       field: r_0002                         = 전역지원서                                                        conf=1.0000
+       field: r_0005                         = Art. 110                                                     conf=0.9000
+       field: r_0007                         = (내용 확인 필요)                                                   conf=0.8500
+       field: r_0008                         = □ 소속부대 확인                                                    conf=0.9800
+       field: r_0010                         = □ 한국사협 (정부제도설계가 제정 규칙)                                       conf=0.8500
+       field: r_0003                         = ☞ 개인정보, 신용 및 자산 정보는 본인이 국세청 홈택스를 이용하여 반드시 확인 후 수정사항이 있을 경우 제 conf=0.8500
+       field: r_0006                         = 교육과정 개별화교육계획 - 해당(해당/미해당) 1년 - 미해당 [?]
+학습지원대상자 개별 지원 - 해당(해당 conf=0.8500
+
+  [P4] 룰 검증 OK (0ms)
+       confidence=0.8971, review=False, errors=0, flagged=['r_0007', 'r_0010', 'r_0003', 'r_0006']
+
+  [P5] 직렬화 OK (1ms)
+       JSON=3186 chars, XML=2001 chars
+
+  [P6] DB 적재 OK (1ms)
+       record_ids=[]
+
+  -- 문서 요약: total=7476ms  P1=53ms | P2=99ms | P2.5A=0ms | P3A=143ms | SkillRegistry=7179ms | P4=0ms | P5=1ms | P6=1ms
+
+────────────────────────────────────────────────────────────────────────────────
+  문서: 전역지원서_2 (24.3 KB)
+────────────────────────────────────────────────────────────────────────────────
+
+  [P1] 화질 보정 OK (58ms)
+       DPI: 72 -> 144, quality=0.7640, SR=False
+       이미지: 520x832
+       WARNING: IMAGE_TOO_BRIGHT: mean=223.3
+       WARNING: LOW_RESOLUTION_BAND: quality score penalized x0.85
+
+  [P2] 레이아웃 탐지 OK (122ms)
+       mode=model, raw_regions=7
+
+  [P2.5-A] LayoutPostProcessor OK (0ms)
+       7 → 7 regions (removed=0, merged=0)
+       tables=1, reading_order=[1, 3, 4, 5, 6, 2, 0]
+       r_0001: table           conf=0.96  bbox=[50,205,483,514] polygon=4pts
+       r_0002: header          conf=0.74  bbox=[185,126,353,158] polygon=4pts
+       r_0004: header          conf=0.51  bbox=[11,60,53,86] polygon=4pts
+       r_0006: text            conf=0.37  bbox=[42,182,260,205] polygon=4pts
+       r_0003: text            conf=0.69  bbox=[60,545,483,670] polygon=4pts
+       r_0007: text            conf=0.36  bbox=[333,655,463,684] polygon=6pts
+       r_0005: text            conf=0.42  bbox=[52,701,411,789] polygon=10pts
+
+  [P3-A] FormClassifier OK (143ms)
+       form_type=other, confidence=0.9999
+
+  [P3-B] StructuredExtractor OK (0ms)
+       fields=6, tables=0, codes=0, vlm_time=2965ms
+       field: r_0002                         = 견적지원서                                                        conf=0.9800
+       field: r_0004                         = 빨거                                                           conf=0.8500
+       field: r_0006                         = □ 선택사항 : 선택사항에 대한 추가 정보 입력                                   conf=0.9200
+       field: r_0003                         = 상기 본인은 금융실명제에 의거 현금거래로부터 전액을 지원하며, 인사상 불이익에
+신청조건 확인을 위해 본인이  conf=0.8500
+       field: r_0007                         = 2014. 5. 4. 17:5                                             conf=0.9000
+       field: r_0005                         = 제품명 제품: 숏' 성별: 남/여                                           conf=0.8500
+
+  [P4] 룰 검증 OK (0ms)
+       confidence=0.8917, review=False, errors=0, flagged=['r_0004', 'r_0003', 'r_0005']
+
+  [P5] 직렬화 OK (0ms)
+       JSON=1661 chars, XML=1211 chars
+
+  [P6] DB 적재 OK (1ms)
+       record_ids=[]
+
+  -- 문서 요약: total=10800ms  P1=58ms | P2=122ms | P2.5A=0ms | P3A=143ms | SkillRegistry=10476ms | P4=0ms | P5=0ms | P6=1ms
+
+================================================================================
+  전체 테스트 요약
+================================================================================
+  [PASS] 국회공문서                          total=47827ms  P1=753ms | P2=6716ms | P2.5A=0ms | P3A=11808ms | SkillRegistry=28545ms | P4=3ms | P5=0ms | P6=1ms
+         WARNING: [P1] IMAGE_TOO_BRIGHT: mean=237.7
+         WARNING: [P1] LOW_RESOLUTION_BAND: quality score penalized x0.85
+  [PASS] 전역지원서_1                        total=7476ms  P1=53ms | P2=99ms | P2.5A=0ms | P3A=143ms | SkillRegistry=7179ms | P4=0ms | P5=1ms | P6=1ms
+         WARNING: [P1] LOW_RESOLUTION_BAND: quality score penalized x0.85
+  [PASS] 전역지원서_2                        total=10800ms  P1=58ms | P2=122ms | P2.5A=0ms | P3A=143ms | SkillRegistry=10476ms | P4=0ms | P5=0ms | P6=1ms
+         WARNING: [P1] IMAGE_TOO_BRIGHT: mean=223.3
+         WARNING: [P1] LOW_RESOLUTION_BAND: quality score penalized x0.85
+
+  결과: 3건 처리, errors=0, warnings=5
+  출력: /workspace/data/pipeline_outputs/20260414_013123
+================================================================================

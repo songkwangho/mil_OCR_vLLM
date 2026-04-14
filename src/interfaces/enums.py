@@ -92,6 +92,8 @@ class RegionType(str, Enum):
     SEAL = "seal"
     FORMULA = "formula"
     CHART = "chart"
+    HANDWRITTEN_FIELD = "handwritten_field"
+    SIGNATURE = "signature"
 
 
 class AnalysisMode(str, Enum):
@@ -182,7 +184,8 @@ class PipelineStatus(str, Enum):
 
 class ProcessingPath(str, Enum):
     """문서 처리 경로."""
-    VLM = "vlm"                # 주 경로 (Gemma4 VLM)
+    VLM = "vlm"                # 주 경로 (Gemma4 VLM, military)
+    SKILL_REGISTRY = "skill_registry"  # other 문서 Skill 디스패치
     FALLBACK = "fallback"      # 수준 B (v1 PP-OCRv5 T3~T5)
     NONE = "none"              # 처리 불가 (완전 장애)
 

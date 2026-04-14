@@ -16,11 +16,11 @@
 | `handover_doc` | 인수인계서 | military | 조건부 | |
 | `inspection_report` | 검사보고서 | military | 조건부 | |
 | `unknown` | 군수 서식 유형 불명 | military | 조건부 | `_fallback.json` 사용 |
-| `other` | 군수 서식 아님 | other | **없음** | 범용 OCR, 군수 룰 미적용 |
+| `other` | 군수 서식 아님 | other → Skill Registry | **없음** | 범용 OCR, 군수 룰 미적용 |
 
 **`unknown` vs `other` 구분**:
 - `unknown` = 군수 서식인데 어떤 서식인지 모름 → 군수 처리 경로 유지
-- `other` = 군수 서식이 아님 → 범용 OCR 경로, 검토 큐 미적재
+- `other` = 군수 서식이 아님 → Skill Registry, 검토 큐 미적재
 
 ### 1-2. Other 문서 처리 정책
 
@@ -29,13 +29,13 @@
 ```
 P3-A FormClassifier → form_type = "other"
     ↓
-P2.5-B InstructionRouter
-    → system_prompt: "문서 OCR 시스템입니다."
-    → user_instruction: "이 영역의 텍스트를 인식하세요."
-    → json_schema: _general.json
-    ↓
-P3-B StructuredExtractor
-    → 범용 key-value 추출
+Orchestrator → Skill Registry 디스패치
+    S1: LayoutAnalyzer (결재란 휴리스틱 포함)
+    S5-패스1: TableExtractor (표 구조 추출)
+    S6(140): SignatureDetector
+    S2(560): PrintedTextReader
+    S3+S4+S5패스2(1120): HandwritingReader + SealReader + 셀 내용
+    S7: StructuredAggregator
     ↓
 P4 Validator
     → 군수 룰 검증 건너뜀 (산술/날짜/NSN 교차검증 없음)
@@ -106,7 +106,7 @@ K-NSN (한국 물자코드):      KN-NNNNN-NNNN
 
 **유사 문자 오인식 주의** (수기 OCR):
 - `ㄱ / ㅋ`, `ㄴ / ㄹ`, `1 / ㅣ`, `0 / O`, `5 / S`, `6 / G`
-- InstructionRouter의 user_instruction에 명시적으로 포함: "불확실한 글자는 [?]로 표시"
+- InstructionRouter user_instruction에 명시: "불확실한 글자는 [?]로 표시"
 
 ---
 
@@ -122,19 +122,20 @@ src/domain/schemas/
 │   ├── inventory_sheet.json
 │   ├── handover_doc.json
 │   ├── inspection_report.json
-│   ├── _fallback.json         ← unknown (군수 서식 유형 불명)
-│   └── _general.json          ← other (군수 서식 아님)
-└── v2/                        ← 서식 개정 시
+│   ├── _fallback.json           ← unknown (군수 서식 유형 불명)
+│   ├── _general.json            ← other 범용 (기존 단순 key-value)
+│   └── official_document.json   ← other 공문서 전용 (신규)
+└── v2/                          ← 서식 개정 시
     └── supply_request.json
 
-src/domain/schema_registry.py  ← form_type + version → Schema 조회
+src/domain/schema_registry.py    ← form_type + version → Schema 조회
 ```
 
-`VLMResult.schema_id` 형식: `"supply_request:v1"`, `"other:v1"` (버전 포함)
+`VLMResult.schema_id` 형식: `"supply_request:v1"`, `"official_document:v1"` (버전 포함)
 
 ### 4-2. CoT analysis 필드 구조 (군수 서식 전용)
 
-모든 군수 서식 스키마의 최상단에 `analysis` 필드를 배치합니다. VLM이 필드 추출 전 이미지 품질과 모호한 문자를 간략히 기술하여 정확도를 높입니다.
+모든 군수 서식 스키마 최상단에 `analysis` 필드를 배치합니다.
 
 ```json
 {
@@ -142,29 +143,103 @@ src/domain/schema_registry.py  ← form_type + version → Schema 조회
   "properties": {
     "analysis": {
       "type": "string",
-      "description": "이미지 영역의 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술"
+      "description": "이미지 영역 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술"
     },
     "unit_code": {"type": "string"},
-    "request_date": {"type": "string"},
-    ...
+    "request_date": {"type": "string"}
   },
-  "required": ["analysis", "unit_code", "request_date", ...]
+  "required": ["analysis", "unit_code", "request_date"]
 }
 ```
 
-**효과**: 0-shot 대비 hallucination율 ~100% → ~1.8% 감소 (IEEE 2025, Hyperscience 2025 기준). 수기 한국어 OCR에서 모호한 획 구분에 특히 유효.
+**효과**: 0-shot 대비 hallucination율 ~100% → ~1.8% 감소 (IEEE 2025).
 
-### 4-3. 스키마 버전 관리 정책
+### 4-3. official_document.json (공문서 — other 경로 S7 전용)
 
+```json
+{
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "문서 구조, 품질, 특이사항 간략 기술"
+    },
+    "document_type": {"type": "string"},
+    "header": {
+      "type": "object",
+      "properties": {
+        "organization": {"type": "string"},
+        "document_number": {"type": "string"},
+        "date": {"type": "string"},
+        "classification": {"type": "string"}
+      }
+    },
+    "recipient": {"type": "string"},
+    "subject": {"type": "string"},
+    "body": {"type": "string"},
+    "attachments": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "approval_table": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "role": {"type": "string"},
+          "name": {
+            "type": "object",
+            "properties": {
+              "value": {"type": "string"},
+              "confidence": {"type": "number"}
+            }
+          },
+          "date": {
+            "type": "object",
+            "properties": {
+              "value": {"type": "string"},
+              "confidence": {"type": "number"}
+            }
+          },
+          "signature_present": {"type": "boolean"},
+          "stamp_present": {"type": "boolean"}
+        }
+      }
+    },
+    "official_seal": {
+      "type": "object",
+      "properties": {
+        "detected": {"type": "boolean"},
+        "text": {
+          "type": "object",
+          "properties": {
+            "value": {"type": "string"},
+            "confidence": {"type": "number"}
+          }
+        }
+      }
+    },
+    "footer": {
+      "type": "object",
+      "properties": {
+        "handler": {"type": "string"},
+        "contact": {"type": "string"},
+        "file_number": {"type": "string"}
+      }
+    },
+    "low_confidence_fields": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "overall_confidence": {"type": "number"}
+  },
+  "required": ["analysis", "document_type"]
+}
 ```
-서식 개정 발생 시:
-  1. v2/ 하위에 신규 스키마 작성
-  2. schema_registry.py에 form_type:v2 매핑 추가
-  3. DB 레코드에 schema_id 버전 포함 → 마이그레이션 가능
-  4. VLM Fine-tuning 재수행 여부 판단 (필드 추가/삭제 시)
-```
 
-### 4-4. _general.json (other 문서용)
+### 4-4. _general.json (기존 — 단순 key-value)
+
+기존 other 경로의 단순 처리용. Skill Registry 도입 후에도 하위 호환용으로 유지.
 
 ```json
 {
@@ -184,11 +259,19 @@ src/domain/schema_registry.py  ← form_type + version → Schema 조회
 }
 ```
 
-군수 도메인 특화 필드 없이 영역별 텍스트만 추출.
+### 4-5. 스키마 버전 관리 정책
+
+```
+서식 개정 발생 시:
+  1. v2/ 하위에 신규 스키마 작성
+  2. schema_registry.py에 form_type:v2 매핑 추가
+  3. DB 레코드에 schema_id 버전 포함 → 마이그레이션 가능
+  4. VLM Fine-tuning 재수행 여부 판단
+```
 
 ---
 
-## 5. 1-shot 예시 관리
+## 5. 1-shot 예시 관리 (military 경로)
 
 ### 5-1. 예시 파일 구조
 
@@ -217,7 +300,7 @@ example_response: |
   }
 ```
 
-**prefix caching 최적화**: system_prompt를 모든 요청에 동일하게 유지(정적 prefix). 첫 요청 이후 KV 블록 재사용 → TTFT 3~10배 단축.
+**prefix caching 최적화**: system_prompt 정적 유지 → 첫 요청 이후 KV 블록 재사용 → TTFT 3~10배 단축.
 
 ---
 
@@ -236,3 +319,4 @@ example_response: |
 ### 6-2. other 경로 룰
 
 군수 룰 검증 전체 건너뜀. 신뢰도 산출만 수행.
+`low_confidence_fields` 목록 기반 수동 확인 권고.
