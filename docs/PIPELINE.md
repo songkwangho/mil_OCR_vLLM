@@ -661,43 +661,33 @@ class StructuredAggregator:
 
 ## 5. 오케스트레이터 디스패치 흐름 (other 경로)
 
+**실제 구현**: `src/pipeline/orchestrator.py` `_process_other_document()` + `src/vlm/skill_registry.py` `SkillRegistry`.
+
 ```python
-class Orchestrator:
-    def _process_document_v3(self, doc, layout) -> PipelineOutput:
-        """other 경로 — Skill Registry 디스패치."""
+# orchestrator.py (발췌)
+def _process_other_document(self, layout, preprocessed, doc_id, ...):
+    registry = self._get_skill_registry()  # SkillRegistry(vlm_client)
+    stats = SkillDispatchStats()
 
-        # Step 1: S5 패스1과 나머지 영역 분리
-        table_regions = [r for r in layout.regions if r.region_type == "table"]
-        other_regions = [r for r in layout.regions if r.region_type != "table"]
+    # S5 2-pass (표 구조 → 셀 태스크)
+    cell_results, structures = registry.dispatch_tables(layout, preprocessed, stats)
 
-        # Step 2: S5 패스1 (표 구조 추출) — 별도 선행 실행
-        table_structures = {}
-        for tr in table_regions:
-            crop = self._crop(doc.image, tr.bbox)
-            table_structures[tr.region_id] = self.s5.pass1_structure(crop)
+    # 비-표 영역 수집 + DISPATCH_ORDER 배치 실행
+    non_table_tasks = registry.build_tasks(layout, preprocessed)
+    general_results = registry.dispatch(non_table_tasks, stats)
 
-        # Step 3: 모든 태스크 수집
-        tasks = []
-        for region in other_regions:
-            skill = SKILL_ROUTING[region.region_type]
-            crop = self._crop_with_padding(doc.image, region.bbox, region.region_type)
-            tasks.append(SkillTask(..., cropped_image=crop))
-
-        # S5 패스2 태스크 추가 (셀별 크롭)
-        for region_id, structure in table_structures.items():
-            cell_tasks = self.s5.pass2_route(structure, doc.image)
-            tasks.extend(cell_tasks)
-
-        # Step 4: DISPATCH_ORDER 기준 순차 배치 실행
-        results = []
-        for budget in DISPATCH_ORDER:  # [140, 560, 1120]
-            batch = [t for t in tasks if t.pixel_budget == budget]
-            if batch:
-                results.extend(self._run_batch(batch, budget))
-
-        # Step 5: S7 통합
-        return self.s7.run(results, table_structures, form_type="other")
+    # SkillResult → FieldValue 평탄화 (S7 미구현 상태의 임시 집계)
+    return VLMResult(
+        form_type=FormType.OTHER,
+        processing_path=ProcessingPath.SKILL_REGISTRY,
+        fields=_skill_results_to_fields(general_results + cell_results),
+        ...,
+    )
 ```
+
+- `SkillRegistry.dispatch()`는 태스크를 `DISPATCH_ORDER = [140, 560, 1120]` 버킷으로 나눠 순차 실행하며 `SkillDispatchStats`에 skill별 호출수·시간·배치 크기를 집계 (run_summary.json `skill_stats` 필드).
+- `_skill_results_to_fields`는 region_id를 field_key로 사용하는 임시 집계 — **S7 StructuredAggregator 구현 전까지의 플레이스홀더**이며, 구현 후 `official_document.json` 스키마에 맞춘 guided_json 출력으로 대체 예정.
+- S2/S3 미구현 상태에서는 `skill_registry._stub_text_skill`이 text/handwritten content_type을 모두 guided_json `{text, confidence}`로 처리.
 
 ---
 
@@ -735,7 +725,7 @@ class Orchestrator:
    extra_body={"guided_regex": r"\d{4}-\d{2}-\d{3}-\d{4}"}
 
 3순위: guidance 백엔드 전환 (절대적 강제 필요 시)
-   --guided-decoding-backend guidance
+   --structured-outputs-config '{"backend":"guidance"}'
 ```
 
 ---

@@ -54,21 +54,21 @@
 ### 3-1. 권장 서버 시작 명령
 
 ```bash
-# docker-compose.yml vllm-server 서비스에 반영
-vllm serve models/gemma4/gemma-4-26b-a4b-it/ \
+# docker-compose.yml vllm-server 서비스 실제 값 (2026-04-14 기준)
+vllm serve /models/gemma4/gemma-4-26b-a4b-it/ \
     --dtype bfloat16 \
     --max-model-len 8192 \
     --gpu-memory-utilization 0.92 \
     --kv-cache-dtype fp8 \
     --max-num-seqs 64 \
     --max-num-batched-tokens 16384 \
-    --mm-cache-preprocessor \
-    --guided-decoding-backend xgrammar \
+    --structured-outputs-config '{"backend":"xgrammar"}' \
     --speculative-config '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_max":4,"prompt_lookup_min":1}' \
-    --disable-log-requests
+    --trust-remote-code
 ```
 
-> **운영 환경**: vLLM v0.19.0 / H100 80GB / BF16 / 모델 로드 ~48.5GiB / 기동 ~120초
+> **운영 환경**: vLLM v0.19.0 / H100 80GB / BF16 / 모델 로드 ~48.5GiB / 기동 ~90초
+> **v0.19.0 변경점**: `--mm-cache-preprocessor`, `--guided-decoding-backend`, `--disable-log-requests` 세 플래그 제거. 구조화 출력은 `--structured-outputs-config`로 통합됐고 prefix caching은 기본 활성(`enable_prefix_caching=True`).
 
 ### 3-2. 최적화 설정 근거
 
@@ -77,8 +77,7 @@ vllm serve models/gemma4/gemma-4-26b-a4b-it/ \
 | `--kv-cache-dtype fp8` | KV Cache 메모리 50% 절감 → 동시처리 2배 | ⚠️ 모델 가중치는 BF16 유지 (§3-3 참조) |
 | `--max-num-seqs 64` | 멀티모달 배치 안정성 | 128→64로 조정 |
 | `--max-num-batched-tokens 16384` | Chunked Prefill 최적화 | 온라인 서빙 기준 |
-| `--mm-cache-preprocessor` | 멀티모달 prefix caching 활성화 | TTFT 3~10배 단축 |
-| `--guided-decoding-backend xgrammar` | 반복 스키마 캐싱 | 동일 서식 반복 사용에 유리 |
+| `--structured-outputs-config xgrammar` | 반복 스키마 캐싱 + guided_json 강제 | xgrammar 네이티브 |
 | n-gram speculative decoding | 디코드 속도 1.2~1.5배 향상 | guided_json과 완전 호환 |
 
 ### 3-3. KV Cache FP8 vs 모델 가중치 FP8 — 개념 구분
@@ -119,7 +118,7 @@ n-gram이 1순위인 이유: OCR 출력이 짧고(`"nsn": "1005-01-432-1234"` �
 
 효과: 10K 토큰 공유 prefix 기준 TTFT ~4.3초 → ~0.6초 (7배 단축)
 
-**주의**: 동일 텍스트 + 다른 이미지 조합 시 캐시 키 충돌 버그(vllm#20261). `--mm-cache-preprocessor`로 이미지 해시 기반 캐시 사용 권장.
+**주의**: 동일 텍스트 + 다른 이미지 조합 시 캐시 키 충돌 버그(vllm#20261). v0.19.0에서는 멀티모달 prefix caching이 자동으로 이미지 해시를 키로 사용하므로 별도 플래그 불필요.
 
 ### 3-6. Guided Decoding 백엔드 선택
 
@@ -135,7 +134,7 @@ n-gram이 1순위인 이유: OCR 출력이 짧고(`"nsn": "1005-01-432-1234"` �
 user_instruction += "\nNSN 코드는 NNNN-NN-NNN-NNNN 형식 13자리입니다. 예: 1005-01-432-1234"
 
 # 방법 2: guidance 백엔드 전환 (NSN 강제가 절대적으로 필요한 경우)
-# --guided-decoding-backend guidance
+# --structured-outputs-config '{"backend":"guidance"}'
 # → JSON Schema 내 pattern 제약 완전 지원
 ```
 

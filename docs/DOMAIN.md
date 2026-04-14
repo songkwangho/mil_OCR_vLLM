@@ -135,22 +135,20 @@ src/domain/schema_registry.py    ← form_type + version → Schema 조회
 
 ### 4-2. CoT analysis 필드 구조 (군수 서식 전용)
 
-모든 군수 서식 스키마 최상단에 `analysis` 필드를 배치합니다.
+모든 군수 서식 스키마 최상단에 `analysis` 필드를 배치하고 `required`에 포함합니다. 다른 필드는 hallucination 억제를 위해 required에 넣지 않는 것이 현재 기본 정책.
 
 ```json
 {
-  "type": "object",
   "properties": {
-    "analysis": {
-      "type": "string",
-      "description": "이미지 영역 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술"
-    },
+    "analysis": {"type": "string", "description": "영역 텍스트 품질·모호 문자 30~50 토큰"},
     "unit_code": {"type": "string"},
     "request_date": {"type": "string"}
   },
-  "required": ["analysis", "unit_code", "request_date"]
+  "required": ["analysis"]
 }
 ```
+
+날짜·부대코드·NSN 등은 **반드시 `string`** 으로 선언해 앞자리 0 유실을 방지합니다. 수량은 `integer`.
 
 **효과**: 0-shot 대비 hallucination율 ~100% → ~1.8% 감소 (IEEE 2025).
 

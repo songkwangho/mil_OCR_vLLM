@@ -122,66 +122,17 @@
 
 ---
 
-## 현재까지 설계·구현 사항의 문제점
+## 로드맵
 
-### [P1] OCR-augmented 전략 완전 누락 (군수 경로)
-군수 전문 용어(부대코드, 장비 식별번호)와 NSN 코드는 VLM이 문맥 추론으로 복원하기 어렵습니다.
-`src/vlm/ocr_hint_provider.py`가 신규 구현 필요 상태입니다.
+### Phase 1 잔여 — 남은 핵심 작업
 
-### [P2] 저신뢰 필드 재시도 로직 미구현
-logprobs 임계값 미달 필드가 P4에서 검토 큐로 바로 넘어갑니다.
-StructuredExtractor에 재시도 조건 추가가 필요합니다.
-
-### [P3] 크롭 이미지 48px 배수 정렬 미반영
-ResolutionRouter에 정렬 로직이 없습니다.
-
-### [P4] Skill Registry 미구현 (other 경로)
-other 경로가 범용 OCR instruction 단일 처리로 되어 있습니다.
-S2~S7 Skill과 SealPreprocessor, TableExtractor 2패스가 신규 구현 필요입니다.
-
-### [P5] vLLM 서버 최적화 설정 미적용
-docker-compose.yml은 수정되었으나 컨테이너 재기동 미수행으로
-guided_json이 enforce되지 않은 상태에서 테스트가 진행되었습니다.
-
-### [P6] PaddleOCR 폐쇄망 가중치 미배치
-`~/.paddlex/official_models/` 경로에 가중치 미배치.
-`Dockerfile.pipeline`에 COPY 지시 추가 필요합니다.
-
----
-
-## 보완 계획
-
-### 즉시 적용 가능 (코드 변경 없음)
-- [ ] `docker compose restart vllm-server` — guided_json enforce 검증
-- [ ] vLLM 변동성 N=3 반복 측정 (전역지원서_2 +99% 변동 원인 파악)
-
-### Phase 1 잔여 — 구현 필요
-
-**군수(military) 경로 보완**
-- [ ] `src/vlm/ocr_hint_provider.py` 신규 구현 (PaddleOCR 한국어 래퍼)
-- [ ] InstructionRouter에서 저신뢰 영역 OCR 힌트 삽입
-- [ ] StructuredExtractor 저신뢰 필드 재시도 로직 (RETRY_THRESHOLD=0.60, MAX_RETRIES=1)
-- [ ] ResolutionRouter 크롭 후 48px 배수 리사이즈
-- [ ] `configs/instruction_examples/*.yaml` 서식별 1-shot 예시 작성
-- [ ] `src/domain/schemas/v1/*.json` 최상단에 `analysis` 필드 추가
-- [ ] `Dockerfile.pipeline`에 PaddleOCR 가중치 COPY 추가
-
-**other 경로 — Skill Registry 신규 구현**
-- [ ] `src/preprocess/seal_preprocessor.py` — SealPreprocessor (극좌표 변환)
-- [ ] `src/vlm/skills/printed_text_reader.py` — S2
-- [ ] `src/vlm/skills/handwriting_reader.py` — S3
-- [ ] `src/vlm/skills/seal_reader.py` — S4
-- [ ] `src/vlm/skills/table_extractor.py` — S5 (2패스)
-- [ ] `src/vlm/skills/signature_detector.py` — S6
-- [ ] `src/vlm/skills/aggregator.py` — S7
-- [ ] `src/vlm/skill_registry.py` — Skill 등록 및 조회
-- [ ] `src/domain/schemas/v1/official_document.json` — 공문서 범용 Schema
-- [ ] P4 Validator `other` 경로 군수 룰 검증 건너뜀 확인
-- [ ] Orchestrator `form_type=other` 시 Skill Registry 디스패치
-
-**검출률 측정 + 통합 테스트**
-- [ ] `python scripts/evaluate_layout_detection.py --n 50`
-- [ ] 통합 테스트 T1~T7 + T8(인장) + T9(결재란 2패스) + T10(서명 탐지)
+- [ ] **S2 PrintedTextReader / S3 HandwritingReader 정식 구현** — 현재는 skill_registry의 `_stub_text_skill`이 guided_json으로 대체 처리. 한국어 수기 인식률 실측(10~20장) 후 임계값 보정 필요.
+- [ ] **S7 StructuredAggregator 구현** — 현재 Skill 결과를 region_id 단위 FieldValue로 평탄화. official_document 스키마에 맞춘 최종 집계가 필요.
+- [ ] **OCR-augmented 힌트** — `ocr_hint_provider.py`는 구현됐으나 PaddleOCR 가중치의 오프라인 배치(`~/.paddlex/official_models/`)와 `Dockerfile.pipeline` COPY 반영 필요.
+- [ ] **1-shot 예시 자산화** — `configs/instruction_examples/*.yaml` 서식별 예시 작성.
+- [ ] **검출률 측정** — `scripts/evaluate_layout_detection.py --n 50` (PP-DocLayoutV3 기준치 확보).
+- [ ] **T8/T9/T10 통합 테스트 확장** — 인장/결재란 2패스/서명 탐지 시나리오 결과 축적.
+- [ ] **vLLM 변동성 측정** — 동일 문서 N=3 반복으로 기준치 수립 (전역지원서_2 이전 +99% 케이스).
 
 ### Phase 2 (06~07월)
 
@@ -231,34 +182,35 @@ guided_json이 enforce되지 않은 상태에서 테스트가 진행되었습니
 
 | P# | 컴포넌트 | 소스 파일 | 상태 |
 |----|----------|----------|------|
-| — | 공용 인터페이스 | `src/interfaces/` | ✅ 완료 (14 Enum + 17 dataclass) |
-| — | 오케스트레이터 | `src/pipeline/orchestrator.py` | 🟡 구현 완료, other→Skill Registry 분기 추가 필요 |
-| P1 | 화질 보정 + SR | `src/preprocess/preprocessor.py` | ✅ 완료 |
-| P2 | 레이아웃 탐지 (Fusion) | `src/preprocess/layout_analyzer.py` | ✅ 완료 |
-| P2.5-A | LayoutPostProcessor | `src/preprocess/layout_postprocessor.py` | ✅ 완료 |
-| — | SealPreprocessor | `src/preprocess/seal_preprocessor.py` | 🔴 신규 구현 필요 |
-| P3-A | FormClassifier | `src/vlm/form_classifier.py` | 🟡 other 분기 확인 필요 |
-| P2.5-B | InstructionRouter | `src/vlm/instruction_router.py` | 🟡 1-shot + OCR 힌트 추가 필요 |
-| P2.5-C | ResolutionRouter | `src/vlm/resolution_router.py` | 🟡 48px 정렬 + 배치 순서 추가 필요 |
-| P3-B | StructuredExtractor | `src/vlm/structured_extractor.py` | 🟡 재시도 로직 추가 필요 |
-| — | OCR 힌트 제공자 | `src/vlm/ocr_hint_provider.py` | 🔴 신규 구현 필요 |
-| — | Skill Registry | `src/vlm/skill_registry.py` | 🔴 신규 구현 필요 |
-| — | S2 PrintedTextReader | `src/vlm/skills/printed_text_reader.py` | 🔴 신규 구현 필요 |
-| — | S3 HandwritingReader | `src/vlm/skills/handwriting_reader.py` | 🔴 신규 구현 필요 |
-| — | S4 SealReader | `src/vlm/skills/seal_reader.py` | 🔴 신규 구현 필요 |
-| — | S5 TableExtractor | `src/vlm/skills/table_extractor.py` | 🔴 신규 구현 필요 |
-| — | S6 SignatureDetector | `src/vlm/skills/signature_detector.py` | 🔴 신규 구현 필요 |
-| — | S7 StructuredAggregator | `src/vlm/skills/aggregator.py` | 🔴 신규 구현 필요 |
-| — | VLM 공용 클라이언트 | `src/vlm/vlm_client.py` | ✅ 완료 |
-| P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | 🟡 other 경로 건너뜀 확인 필요 |
-| P5 | 직렬화 | `src/postprocess/serializer.py` | ✅ 완료 |
-| P6 | DB 적재 | `src/postprocess/db_loader.py` | ✅ 완료 |
-| — | 수동 검토 큐 | `src/postprocess/review_queue.py` | ✅ 완료 |
-| — | Fallback 서비스 | `src/fallback/ocr_fallback_service.py` | ✅ 완료 |
-| — | VLM 헬스 모니터 | `src/pipeline/health_monitor.py` | ✅ 완료 |
-| — | Layout 추론 서비스 | `src/preprocess/layout_server.py` | ✅ 완료 |
-| — | 스키마 레지스트리 | `src/domain/schema_registry.py` | ✅ 완료 |
-| — | Docker 구성 | `docker-compose.yml` + `docker/Dockerfile.*` | ✅ 완료 (5 Dockerfile) |
+| — | 공용 인터페이스 | `src/interfaces/` | ✅ Enum+dataclass (SkillTask/Result, TableStructure, SealProcessResult 포함) |
+| — | 오케스트레이터 | `src/pipeline/orchestrator.py` | ✅ military/other 분기 완료 (`_process_other_document`) |
+| P1 | 화질 보정 + SR | `src/preprocess/preprocessor.py` | ✅ |
+| P2 | 레이아웃 탐지 (Fusion) | `src/preprocess/layout_analyzer.py` | ✅ |
+| P2.5-A | LayoutPostProcessor | `src/preprocess/layout_postprocessor.py` | ✅ |
+| — | SealPreprocessor | `src/preprocess/seal_preprocessor.py` | ✅ 극좌표 언래핑 + 허프 실패 폴백 |
+| P3-A | FormClassifier | `src/vlm/form_classifier.py` | ✅ military/other 분기 |
+| P2.5-B | InstructionRouter | `src/vlm/instruction_router.py` | ✅ 1-shot + OCR 힌트 |
+| P2.5-C | ResolutionRouter | `src/vlm/resolution_router.py` | ✅ 48px 정렬 + DISPATCH_ORDER |
+| P3-B | StructuredExtractor | `src/vlm/structured_extractor.py` | ✅ 저신뢰 재시도 로직 포함 |
+| — | OCR 힌트 제공자 | `src/vlm/ocr_hint_provider.py` | 🟡 구현 완료, 폐쇄망 가중치 배치 필요 |
+| — | Skill Registry | `src/vlm/skill_registry.py` | ✅ DISPATCH_ORDER [140,560,1120] + SkillDispatchStats |
+| — | S2 PrintedTextReader | `src/vlm/skills/printed_text_reader.py` | 🔴 미구현 (Stub 대체 중) |
+| — | S3 HandwritingReader | `src/vlm/skills/handwriting_reader.py` | 🔴 미구현 (Stub 대체 중) |
+| — | S4 SealReader | `src/vlm/skills/seal_reader.py` | ✅ |
+| — | S5 TableExtractor | `src/vlm/skills/table_extractor.py` | ✅ pass1/pass2 |
+| — | S6 SignatureDetector | `src/vlm/skills/signature_detector.py` | ✅ |
+| — | S7 StructuredAggregator | `src/vlm/skills/aggregator.py` | 🔴 미구현 (region_id 단위 평탄화로 임시 대체) |
+| — | VLM 공용 클라이언트 | `src/vlm/vlm_client.py` | ✅ |
+| P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ✅ 경로별 임계값 |
+| P5 | 직렬화 | `src/postprocess/serializer.py` | ✅ |
+| P6 | DB 적재 | `src/postprocess/db_loader.py` | ✅ |
+| — | 수동 검토 큐 | `src/postprocess/review_queue.py` | ✅ |
+| — | Fallback 서비스 | `src/fallback/ocr_fallback_service.py` | ✅ |
+| — | VLM 헬스 모니터 | `src/pipeline/health_monitor.py` | ✅ |
+| — | Layout 추론 서비스 | `src/preprocess/layout_server.py` | ✅ |
+| — | 스키마 레지스트리 | `src/domain/schema_registry.py` | ✅ v1/ 스캔 + `get()` 별칭 (`other→official_document`) |
+| — | JSON Schemas v1 | `src/domain/schemas/v1/*.json` | ✅ 8종 (5 military + `_fallback` + `_general` + `official_document`) |
+| — | Docker 구성 | `docker-compose.yml` + `docker/Dockerfile.*` | ✅ vLLM 0.19.0 호환 (`--structured-outputs-config`) |
 
 > **Legacy 유지**: `instruction_builder.py` (InstructionRouter 래퍼), `gemma4_engine.py` (하위 호환용)
 
@@ -282,15 +234,15 @@ mil_OCR_v2/
 │   ├── preprocess/
 │   │   └── seal_preprocessor.py   ← 신규 (극좌표 변환)
 │   ├── vlm/
-│   │   ├── skill_registry.py      ← 신규
-│   │   ├── skills/                ← 신규 디렉토리
-│   │   │   ├── printed_text_reader.py  (S2)
-│   │   │   ├── handwriting_reader.py   (S3)
-│   │   │   ├── seal_reader.py          (S4)
-│   │   │   ├── table_extractor.py      (S5, 2패스)
-│   │   │   ├── signature_detector.py   (S6)
-│   │   │   └── aggregator.py           (S7)
-│   │   ├── ocr_hint_provider.py   ← 신규
+│   │   ├── skill_registry.py
+│   │   ├── skills/
+│   │   │   ├── seal_reader.py          (S4 ✅)
+│   │   │   ├── table_extractor.py      (S5 ✅ 2패스)
+│   │   │   ├── signature_detector.py   (S6 ✅)
+│   │   │   ├── printed_text_reader.py  (S2 🔴 미구현)
+│   │   │   ├── handwriting_reader.py   (S3 🔴 미구현)
+│   │   │   └── aggregator.py           (S7 🔴 미구현)
+│   │   ├── ocr_hint_provider.py
 │   │   ├── form_classifier.py
 │   │   ├── instruction_router.py
 │   │   ├── resolution_router.py
@@ -299,8 +251,16 @@ mil_OCR_v2/
 │   ├── postprocess/
 │   ├── fallback/
 │   └── domain/
+│       ├── schema_registry.py
 │       └── schemas/v1/
-│           └── official_document.json  ← 신규
+│           ├── supply_request.json
+│           ├── maintenance_record.json
+│           ├── inventory_sheet.json
+│           ├── handover_doc.json
+│           ├── inspection_report.json
+│           ├── _fallback.json
+│           ├── _general.json
+│           └── official_document.json
 ├── models/
 │   ├── t1_sr/
 │   ├── t2_layout/
@@ -322,27 +282,14 @@ mil_OCR_v2/
 
 ---
 
-## 향후 계획 타당성 및 문제점
+## 검증 필요한 리스크
 
-### [R1] Phase 1 잔여 작업량 과부하
-군수 경로 보완 + Skill Registry 신규 구현 + 통합 테스트가 동시에 집중되어 있습니다.
-
-**보완**: 군수 경로 보완(즉시 적용 가능 항목 우선) → Skill Registry 신규 구현 → 통합 테스트 순서로 분리합니다.
-
-### [R2] Skill Registry의 수기 인식 실측치 미확보
-other 경로 S3(HandwritingReader)가 파인튜닝 없이 한국어 수기를 얼마나 인식하는지 실증 데이터가 없습니다.
-
-**보완**: 국회공문서 샘플(또는 공개 국회 의안 PDF 기반 합성 샘플) 10~20장으로 VLM 수기 인식률을 먼저 측정하고 신뢰도 임계값을 보정합니다.
-
-### [R3] SealPreprocessor 허프 원 탐지 실패 케이스 미검증
-HSV+허프 파이프라인이 한국어 직인에서 실제로 동작하는지 검증이 필요합니다.
-
-**보완**: T8 테스트에서 허프 성공/실패 케이스를 모두 측정하고, 실패율이 30%+ 이면 허프를 선택적 최적화로 격하합니다.
-
-### [R4] vLLM 변동성 미측정
-전역지원서_2에서 +99% 변동이 발견되었으나 원인 미파악 상태입니다.
-
-**보완**: vLLM 재기동 후 동일 문서 N=3 반복 측정으로 변동성 기준치를 확보합니다.
+| # | 이슈 | 보완 계획 |
+|---|------|---------|
+| R1 | S3 HandwritingReader 한국어 수기 인식률 실측치 부재 | 국회 의안 PDF 등 합성 샘플 10~20장으로 0-shot 인식률 측정 후 임계값 보정 |
+| R2 | SealPreprocessor 허프 원 탐지 실패율 미측정 | T8 테스트에서 성공/실패 케이스 집계, 실패율 30%+ 이면 휴리스틱 격하 |
+| R3 | vLLM 출력 변동성 기준치 미수립 | 동일 문서 N=3 반복으로 기준 확보 (이전 전역지원서_2 +99% 변동 건) |
+| R4 | pass2 셀 태스크 0건 관찰 | S5 pass1 출력 table_type/cells 품질 확인 (2026-04-14 통합 테스트 기준) |
 
 ---
 

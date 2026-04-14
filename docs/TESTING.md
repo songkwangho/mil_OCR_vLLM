@@ -228,36 +228,38 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 
 | 일자 | 환경 | 케이스 | 결과 | 비고 |
 |------|------|--------|------|------|
-| 2026-04-08 | H100 / vLLM v0.19.0 | T1 기본 경로 | 3건 PASS | Phase 1 통합 테스트 |
-| (예정) | vLLM 재기동 후 | T1 | — | guided_json enforce 검증 |
-| (예정) | — | T2, T3 | — | Fusion ON DPI 분기 검증 |
-| (예정) | — | T4 | — | Other → Skill Registry 경로 |
+| 2026-04-08 | H100 / vLLM v0.19.0 | T1 기본 경로 | 3건 PASS | Phase 1 초기 통합 |
+| 2026-04-10 21:09 | H100 / vLLM v0.19.0 | T1 48px+재시도+OCR힌트 | 3건 PASS, 28.1s | guided_json 미enforce, JSON parse warning 152건 |
+| 2026-04-14 00:41 | 동일 | T1 (xgrammar 플래그 인식 실패) | 3건 PASS, other 경로 | vLLM 구옵션 기동 실패 발견 |
+| **2026-04-14 01:31** | H100 / vLLM v0.19.0 (`--structured-outputs-config` 적용) | **T1 + T4 (other/skill_registry)** | **3건 PASS, errors=0** | JSON parse warning 0, `skill_stats` 기록, 총 26.7~47.8s |
+| (예정) | — | T2, T3 | — | Fusion ON DPI 분기 |
 | (예정) | — | T5 | — | Fallback 전환 |
 | (예정) | — | T7 | — | OCR-augmented 힌트 효과 |
 | (예정) | — | T8 | — | 인장 인식, 허프 성공/실패 분기 |
-| (예정) | — | T9 | — | 결재란 2패스 처리 |
+| (예정) | — | T9 | — | 결재란 pass2 셀 실행 (현재 pass2_tasks=0 관찰) |
 | (예정) | — | T10 | — | 서명 탐지 이진 분류 |
 
-### 6-1. Phase 1-E 잔존 이슈 (통합 테스트에서 발견)
+### 6-1. 2026-04-14 01:31 상세
 
-| 우선순위 | 이슈 | 조치 | 상태 |
-|---------|------|------|------|
-| 🔴 즉시 | vLLM 재기동 — guided_json enforce 미적용 | `docker compose restart vllm-server` | 미완 |
-| 🔴 즉시 | PaddleOCR 가중치 폐쇄망 배치 | `Dockerfile.pipeline` COPY 추가 | 미완 |
-| 🟡 샘플 확보 후 | 재시도 경로 실검증 | 군수 서식 샘플 확보 후 T7 실행 | 대기 |
-| 🟡 구현 후 | Skill Registry end-to-end 검증 | T4/T8/T9/T10 실행 | 대기 |
-| 🟢 선택 | vLLM 변동성 N=3 반복 측정 | 재기동 후 동일 조건 3회 | 미완 |
+3문서 모두 `status=other_document`, `processing_path=skill_registry`, `errors=0`:
 
-### 6-2. 향후 계획 타당성 및 문제점
+| 문서 | total | P1 | P2 | P3A | SkillRegistry | S2 호출수 | pass1_tables | pass2_tasks |
+|------|-------|------|------|------|----------------|-----------|--------------|-------------|
+| 국회공문서 | 47.8s | 753ms | 6.7s | 11.8s | 28.5s | 16 | 2 | 0 |
+| 전역지원서_1 | 7.5s | 53ms | 99ms | 143ms | 7.2s | 7 | 1 | 0 |
+| 전역지원서_2 | 10.8s | 58ms | 122ms | 143ms | 10.5s | 6 | 1 | 0 |
 
-**[R1] vLLM 최적화 옵션 재기동 필요**
-docker-compose.yml 수정 완료, 컨테이너 재기동 미수행. `docker compose restart vllm-server` 후 region_traces.json의 raw_response가 JSON 형식으로 변화하는지 확인.
+결과 경로: [data/pipeline_outputs/20260414_013123/](../data/pipeline_outputs/20260414_013123/)
 
-**[R2] SealPreprocessor 허프 실패율 미측정**
-T8에서 허프 성공/실패 분포를 측정하고, 실패율이 30%+ 이면 극좌표 변환을 선택적 최적화로 격하하고 원본 크롭 직접 VLM 전달 방식을 기본으로 변경.
+- `pass2_tasks=0`: S5 pass1이 `table_type=other, cells=[]`만 반환. 스키마 호환 또는 표 판정 기준 재검토 필요.
+- 첫 문서의 P2/P3A 소요가 큰 것은 PP-DocLayoutV3 + vLLM 웜업. 2번째부터 ~7~10s로 정상화.
 
-**[R3] S3 HandwritingReader 수기 인식 실측치 부재**
-국회공문서 샘플(또는 공개 의안 PDF 기반 합성 샘플) 10~20장으로 수기 인식률 실측 후 신뢰도 임계값 0.75를 현실화.
+### 6-2. 검증 필요한 리스크
 
-**[R4] 처리 시간 10초 이내 마진**
-other 경로 예상 처리 시간: S1(0.5s) + S5패스1(1s) + S6배치(0.5s) + S2배치(1s) + S3/S4/S5패스2배치(3s) + S7(1.5s) = ~7.5s. Mode B 트리거 시 추가 VLM 호출로 10초 초과 가능. T4 실측 필요.
+| # | 이슈 | 보완 계획 |
+|---|------|---------|
+| R1 | SealPreprocessor 허프 실패율 미측정 | T8에서 성공/실패 분포 수집, 실패율 30%+ 시 휴리스틱 격하 |
+| R2 | S3 HandwritingReader 한국어 수기 실측치 부재 | 합성 샘플 10~20장으로 0-shot 인식률 측정 후 임계값 보정 |
+| R3 | pass2 태스크 0건 문제 | S5 pass1 출력 분석, 실제 표(결재란 등) 샘플로 재현성 검증 |
+| R4 | vLLM 출력 변동성 기준치 미수립 | 동일 문서 N=3 반복 측정 |
+| R5 | PaddleOCR 가중치 폐쇄망 배치 | `Dockerfile.pipeline`에 `~/.paddlex/official_models/` COPY 추가 |
