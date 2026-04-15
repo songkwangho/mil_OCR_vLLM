@@ -108,6 +108,8 @@ class PipelineResult:
     p2_result: Optional[LayoutResult] = None          # P2.5-A 정제 후
     p3a_form_type: Optional[str] = None               # P3-A 서식 분류
     p3a_form_confidence: float = 0.0
+    p3a_form_identifier: Optional[str] = None         # P3-A 서식 식별자 (예: "별지 제3-2호 서식")
+    template_augmentor_stats: Optional[Any] = None    # P2.5-A.5 TemplateAugmentorStats
     p2_5b_instructions: Optional[dict] = None         # P2.5-B InstructionRouter (region_id → InstructionSpec)
     p2_5c_groups: Optional[dict] = None               # P2.5-C ResolutionRouter (pixel_budget → [CroppedRegion])
     p3b_trace: list = field(default_factory=list)     # P3-B 영역별 vLLM 호출 trace
@@ -236,6 +238,21 @@ class PipelineOrchestrator:
             )
             logger.info("오케스트레이터: P3-B 초기화 완료")
         return self._components["p3b"]
+
+    def _get_template_augmentor(self):
+        """P2.5-A.5 TemplateAugmentor — military 서식 템플릿 bbox 병합."""
+        if "template_augmentor" not in self._components:
+            from src.vlm.template_augmentor import TemplateAugmentor
+            self._components["template_augmentor"] = TemplateAugmentor()
+            logger.info("오케스트레이터: TemplateAugmentor 초기화 완료")
+        return self._components["template_augmentor"]
+
+    def _new_augmentor_stats(self, result: PipelineResult):
+        """PipelineResult에 TemplateAugmentorStats를 부착하고 반환."""
+        from src.vlm.template_augmentor import TemplateAugmentorStats
+        stats = TemplateAugmentorStats()
+        result.template_augmentor_stats = stats
+        return stats
 
     def _get_skill_registry(self):
         """Skill Registry (other 경로)."""
@@ -420,8 +437,90 @@ class PipelineOrchestrator:
     #  메인 실행
     # ═══════════════════════════════════════
 
+    def process(self, doc_input: DocumentInput):
+        """단일 진입점 — 파일 포맷에 따라 분기.
+
+        Returns:
+            FileExt.PDF  → PdfDocumentResult (+ pages: list[PipelineResult])
+            그 외        → PipelineResult
+        """
+        from src.interfaces.enums import FileExt
+        if doc_input.file_ext == FileExt.PDF:
+            return self.run_pdf(doc_input)
+        return self.run(doc_input)
+
+    def run_pdf(self, doc_input: DocumentInput):
+        """PDF 전체를 페이지별로 처리하여 PdfDocumentResult 반환.
+
+        각 페이지는 독립적으로 run()을 거치며, 한 페이지 실패가 다른 페이지에 전파되지 않음.
+        `PipelineOutput`(직렬화용)과 `PipelineResult`(디버깅용)를 둘 다 반환.
+        """
+        import time as _t
+        from src.interfaces.enums import FileExt, SourceType
+        from src.interfaces.types import PdfDocumentResult
+        from src.input.pdf_adapter import (
+            PdfAdapter, PdfAdapterError, RENDER_DPI_DEFAULT,
+        )
+
+        start = _t.monotonic()
+        adapter = PdfAdapter(render_dpi=doc_input.dpi_hint or RENDER_DPI_DEFAULT)
+
+        try:
+            pages = adapter.render(doc_input.doc_id, doc_input.raw_bytes)
+        except PdfAdapterError as e:
+            logger.error("[PDF] %s 렌더링 실패: %s", doc_input.doc_id, e)
+            return PdfDocumentResult(
+                doc_id=doc_input.doc_id,
+                total_pages=0,
+                pages=[],
+                overall_status=PipelineStatus.FAILED,
+                processing_ms=(_t.monotonic() - start) * 1000,
+                warnings=[f"PdfAdapterError: {e}"],
+            )
+
+        page_outputs = []
+        page_results = []  # PipelineResult 리스트 — 런타임 저장용 (PdfDocumentResult에 부착)
+        for page in pages:
+            page_doc_id = f"{doc_input.doc_id}_p{page.page_number:02d}"
+            page_input = DocumentInput(
+                doc_id=page_doc_id,
+                raw_bytes=_ndarray_to_png_bytes(page.image_array),
+                file_ext=FileExt.PNG,
+                source_type=doc_input.source_type,
+                dpi_hint=page.render_dpi,
+                metadata={
+                    **doc_input.metadata,
+                    "parent_doc_id": doc_input.doc_id,
+                    "page_number": page.page_number,
+                    "total_pages": page.total_pages,
+                    "pdf_source": True,
+                },
+            )
+            page_result = self.run(page_input)
+            page_results.append(page_result)
+            if page_result.output is not None:
+                page_outputs.append(page_result.output)
+
+        doc_result = PdfDocumentResult(
+            doc_id=doc_input.doc_id,
+            total_pages=len(pages),
+            pages=page_outputs,
+            overall_status=_aggregate_pdf_status(page_outputs),
+            processing_ms=(_t.monotonic() - start) * 1000,
+            warnings=[w for p in pages for w in p.warnings],
+        )
+        # 런타임 디버깅용: PipelineResult 리스트를 doc_result에 부착
+        doc_result._page_results = page_results  # type: ignore[attr-defined]
+
+        logger.info(
+            "[PDF] %s: %d 페이지 처리 완료 (status=%s, %.0fms)",
+            doc_input.doc_id, len(pages), doc_result.overall_status.value,
+            doc_result.processing_ms,
+        )
+        return doc_result
+
     def run(self, doc_input: DocumentInput) -> PipelineResult:
-        """파이프라인 실행.
+        """단일 이미지 파이프라인 실행.
 
         Args:
             doc_input: 원본 문서
@@ -482,9 +581,15 @@ class PipelineOrchestrator:
                 lambda: self._get_p3a().classify(p1_out.image_array, result.warnings),
             )
             if classify_result is not None:
-                form_type, form_confidence = classify_result
+                # FormClassifier.classify() → (FormType, confidence, form_identifier)
+                if len(classify_result) == 3:
+                    form_type, form_confidence, form_identifier = classify_result
+                else:
+                    form_type, form_confidence = classify_result  # backward compat
+                    form_identifier = None
                 result.p3a_form_type = form_type.value if hasattr(form_type, "value") else str(form_type)
                 result.p3a_form_confidence = form_confidence
+                result.p3a_form_identifier = form_identifier
 
                 # 스키마 로드 — form_type별 분기
                 from src.domain.schema_registry import SchemaRegistry
@@ -522,6 +627,20 @@ class PipelineOrchestrator:
                         # 최종 fallback
                         schema = registry.load("_fallback")
                         schema_id = "_fallback"
+
+                    # P2.5-A.5: TemplateAugmentor — 서식 템플릿으로 PP-DocLayout 누락 보완
+                    aug_layout = self._run_step(
+                        "P2.5A5", result,
+                        lambda: self._get_template_augmentor().augment(
+                            layout=p2_out,
+                            form_type=form_type,
+                            form_identifier=form_identifier,
+                            stats=self._new_augmentor_stats(result),
+                        ),
+                    )
+                    if aug_layout is not None:
+                        p2_out = aug_layout
+                        result.p2_result = aug_layout
 
                     # P2.5-B: InstructionRouter
                     instructions = self._run_step(
@@ -729,3 +848,35 @@ def _skill_results_to_fields(skill_results: list) -> list[FieldValue]:
             )
         )
     return fields
+
+
+# ─────────────────────────────────────────────
+#  PDF 어댑터 보조 유틸
+# ─────────────────────────────────────────────
+
+def _ndarray_to_png_bytes(image: "np.ndarray") -> bytes:
+    """RGB numpy 배열 → PNG 바이트 (메모리 내 변환)."""
+    import cv2
+    import numpy as np  # noqa: F401
+    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    ok, buf = cv2.imencode(".png", bgr)
+    if not ok:
+        raise RuntimeError("PNG 인코딩 실패")
+    return buf.tobytes()
+
+
+def _aggregate_pdf_status(page_outputs: list) -> PipelineStatus:
+    """PDF 페이지별 상태 집계 → 전체 상태.
+
+    - 모든 페이지 success → success
+    - 모든 페이지 failed → failed
+    - 그 외 (섞여 있거나 review/partial/other 포함) → partial
+    """
+    if not page_outputs:
+        return PipelineStatus.FAILED
+    statuses = {p.status for p in page_outputs}
+    if statuses == {PipelineStatus.SUCCESS}:
+        return PipelineStatus.SUCCESS
+    if statuses == {PipelineStatus.FAILED}:
+        return PipelineStatus.FAILED
+    return PipelineStatus.PARTIAL

@@ -10,6 +10,7 @@
 - **폐쇄망 전용** — 외부 API 호출·모델 다운로드 절대 금지. 모든 가중치는 `models/`에 사전 배치
 - **Crop-then-Infer** — PP-DocLayout bbox 크롭 이미지를 영역별로 Gemma4에 전달 (전체 페이지 입력 지양)
 - **FormClassifier 선행** — 서식 분류 후 InstructionRouter가 도메인 맥락 기반 instruction 생성
+- **TemplateAugmentor 보완** — form_type 확정 후 서식별 미리 정의된 bbox로 PP-DocLayout 누락 영역 병합 (military 전용)
 - **Other 문서 분기** — 군수 서식이 아닌 문서는 `other`로 분류해 Skill Registry 기반 처리
 - **Guided Decoding** — VLM 출력을 서식별 JSON Schema로 구조 보장 (xgrammar 백엔드)
 - **logprobs 신뢰도** — VLM 토큰 확률 기반 필드별 정밀 신뢰도 산출
@@ -60,7 +61,14 @@
         ┌─ military: 군수 서식 경로    │
         └─ other:    Skill Registry    │
         ↓                             │
-    [military 경로 — 기존 v2 유지]     │
+    [military 경로]                    │
+    P2.5-A.5: TemplateAugmentor       │  ← 신규 (form_type 확정 직후)
+        form_type별 서식 템플릿 로드    │
+        configs/form_templates/*.yaml  │
+        PP-DocLayout 결과와 병합        │
+        IoU>0.5: 탐지 결과 우선        │
+        미탐지 필드: 템플릿 bbox 보완  │
+        ↓                             │
     P2.5-B: InstructionRouter          │
         region_type + form_type        │
         → 도메인 맥락 포함 instruction  │
@@ -95,12 +103,32 @@
         └─ 실패 → 검토 큐 → 담당자 UI → P6 재적재    ↓
 ```
 
+### TemplateAugmentor 설계 사상
+
+PP-DocLayout은 중국어/영어 중심으로 학습되어 한국어 군수 서식의 일부 고정 필드를 놓치는 경우가 있습니다. 서식이 고정되어 있다는 전제 하에, form_type이 확정된 직후 해당 서식의 미리 정의된 bbox를 LayoutResult에 병합하여 누락을 보완합니다.
+
+```
+PP-DocLayout 탐지 결과만으로는:
+  - 인쇄된 고정 필드 (NSN, 수량, 단가 등): 일부 누락 가능
+  - 수기로 추가된 동적 요소 (인장, 서명):  PP-DocLayout이 잘 탐지
+
+TemplateAugmentor 병합 후:
+  - 인쇄된 고정 필드: 템플릿 bbox 보장 → 누락 0
+  - 수기로 추가된 동적 요소: PP-DocLayout 탐지 결과 유지
+  - 충돌 시 (IoU > 0.5):  PP-DocLayout 결과 우선 (실제 bbox가 더 정확)
+
+PP-DocLayout Fine-tuning과 상호 보완:
+  - Fine-tuning으로 검출률을 높이는 것과 독립적으로 동작
+  - Fine-tuning 전에도 템플릿으로 최소한의 추출 완전성 보장
+  - Fine-tuning 후에는 중복 탐지 케이스가 늘어나지만 IoU 필터로 자동 처리
+```
+
 ### 두 경로의 설계 사상
 
 | 항목 | military 경로 | other 경로 (Skill Registry) |
 |------|-------------|---------------------------|
 | 핵심 사상 | 서식을 먼저 알고, 아는 서식에 맞춰 추출 | 문서 구조를 먼저 이해하고, 구조에 따라 추출 |
-| form_type 활용 | InstructionRouter 전체를 결정 | S7 StructuredAggregator에서만 Schema 선택에 사용 |
+| form_type 활용 | InstructionRouter 전체 결정 + TemplateAugmentor bbox 병합 | S7 StructuredAggregator에서만 Schema 선택에 사용 |
 | 표 처리 | StructuredExtractor 단일 호출 | TableExtractor 2패스 (구조→셀 내용) |
 | 인장 처리 | StructuredExtractor 안에서 처리 | SealPreprocessor(극좌표 변환) + SealReader |
 | 서명 처리 | 미지원 | SignatureDetector (이진 분류) |
@@ -111,6 +139,7 @@
 - **Layout Fusion**: V3(구조) + plus-L(텍스트) 결합, DPI 기반 분기
 - **Crop-then-Infer**: LayoutPostProcessor 정제 → 영역별 크롭(48px 배수) → Gemma4
 - **FormClassifier 선행**: 저해상도 분류 → form_type → 경로 분기
+- **TemplateAugmentor**: form_type 확정 후 서식 템플릿 bbox 병합 → PP-DocLayout 누락 보완 (military 전용)
 - **military InstructionRouter**: region_type + form_type → 도메인 맥락 + 1-shot 예시
 - **OCR-augmented**: 저신뢰 영역에 PaddleOCR 선행 → 텍스트 힌트로 VLM 정확도 보강
 - **ResolutionRouter 배치 순서**: 140→560→1120 토큰 그룹 순차 배치 (vLLM 패딩 최소화)
@@ -126,6 +155,7 @@
 
 ### Phase 1 잔여 — 남은 핵심 작업
 
+- [ ] **TemplateAugmentor 구현** — `src/vlm/template_augmentor.py` 신규. 서식별 템플릿 정의 `configs/form_templates/*.yaml`. military 경로 오케스트레이터에 P3-A 직후 삽입.
 - [ ] **S2 PrintedTextReader / S3 HandwritingReader 정식 구현** — 현재는 skill_registry의 `_stub_text_skill`이 guided_json으로 대체 처리. 한국어 수기 인식률 실측(10~20장) 후 임계값 보정 필요.
 - [ ] **S7 StructuredAggregator 구현** — 현재 Skill 결과를 region_id 단위 FieldValue로 평탄화. official_document 스키마에 맞춘 최종 집계가 필요.
 - [ ] **OCR-augmented 힌트** — `ocr_hint_provider.py`는 구현됐으나 PaddleOCR 가중치의 오프라인 배치(`~/.paddlex/official_models/`)와 `Dockerfile.pipeline` COPY 반영 필요.
@@ -165,6 +195,7 @@
 | T2 레이아웃 분석 | **P2** 레이아웃 탐지 (Fusion 지원) | 원시 탐지만 반환 |
 | — | **P2.5-A** LayoutPostProcessor | 신규 — 정제 + remap |
 | T3 서식 분류 | **P3-A** FormClassifier | military/other 분기 포함 |
+| — | **P2.5-A.5** TemplateAugmentor | 신규 — PP-DocLayout 누락 보완 (military 전용) |
 | — | **P2.5-B** InstructionRouter | 신규 — 1-shot + CoT + OCR 힌트 (military) |
 | — | **P2.5-C** ResolutionRouter | 신규 — pixel_budget + 48px 정렬 + 배치 순서 |
 | T4~T7 | **P3-B** StructuredExtractor | 배치 병렬 + 저신뢰 재시도 (military) |
@@ -189,6 +220,7 @@
 | P2.5-A | LayoutPostProcessor | `src/preprocess/layout_postprocessor.py` | ✅ |
 | — | SealPreprocessor | `src/preprocess/seal_preprocessor.py` | ✅ 극좌표 언래핑 + 허프 실패 폴백 |
 | P3-A | FormClassifier | `src/vlm/form_classifier.py` | ✅ military/other 분기 |
+| P2.5-A.5 | TemplateAugmentor | `src/vlm/template_augmentor.py` | 🔴 신규 구현 필요 |
 | P2.5-B | InstructionRouter | `src/vlm/instruction_router.py` | ✅ 1-shot + OCR 힌트 |
 | P2.5-C | ResolutionRouter | `src/vlm/resolution_router.py` | ✅ 48px 정렬 + DISPATCH_ORDER |
 | P3-B | StructuredExtractor | `src/vlm/structured_extractor.py` | ✅ 저신뢰 재시도 로직 포함 |
@@ -232,8 +264,9 @@ mil_OCR_v2/
 │   ├── interfaces/
 │   ├── pipeline/
 │   ├── preprocess/
-│   │   └── seal_preprocessor.py   ← 신규 (극좌표 변환)
+│   │   └── seal_preprocessor.py
 │   ├── vlm/
+│   │   ├── template_augmentor.py  ← 신규 (PP-DocLayout 누락 보완)
 │   │   ├── skill_registry.py
 │   │   ├── skills/
 │   │   │   ├── seal_reader.py          (S4 ✅)
@@ -276,7 +309,13 @@ mil_OCR_v2/
 ├── scripts/
 ├── training/
 ├── configs/
-│   └── instruction_examples/
+│   ├── instruction_examples/
+│   └── form_templates/            ← 신규 (TemplateAugmentor용 서식별 bbox 정의)
+│       ├── supply_request.yaml
+│       ├── maintenance_record.yaml
+│       ├── inventory_sheet.yaml
+│       ├── handover_doc.yaml
+│       └── inspection_report.yaml
 └── tests/
 ```
 
@@ -290,6 +329,8 @@ mil_OCR_v2/
 | R2 | SealPreprocessor 허프 원 탐지 실패율 미측정 | T8 테스트에서 성공/실패 케이스 집계, 실패율 30%+ 이면 휴리스틱 격하 |
 | R3 | vLLM 출력 변동성 기준치 미수립 | 동일 문서 N=3 반복으로 기준 확보 (이전 전역지원서_2 +99% 변동 건) |
 | R4 | pass2 셀 태스크 0건 관찰 | S5 pass1 출력 table_type/cells 품질 확인 (2026-04-14 통합 테스트 기준) |
+| R5 | TemplateAugmentor 서식 버전 불일치 | 템플릿 yaml에 서식 버전·발효일 명시, 서식 개정 시 즉시 업데이트 프로세스 수립 |
+| R6 | TemplateAugmentor 스캔 기울기로 인한 bbox 오프셋 | P1 Deskew 이후 좌표계 기준 확인, DPI·기울기 보정 후 좌표 적용 |
 
 ---
 

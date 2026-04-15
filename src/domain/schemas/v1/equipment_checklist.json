@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "equipment_checklist",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2026-01-01",
+  "x-mil-ocr-deprecated": false,
+  "title": "전비품 확인서 작성 점검표",
+  "description": "별지 제3-2호 서식 — O/X 점검결과 6항목 + 작성자 수기 필드",
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "이미지 품질, 필체 명확도, O/X 판독 난이도를 30~50 토큰으로 간략히 기술"
+    },
+    "document_date": {
+      "type": "string",
+      "description": "작성 일자 수기 문자열. 예: '2026년 4월 15일'"
+    },
+    "checklist_items": {
+      "type": "array",
+      "description": "점검항목 1~6번의 점검결과 목록. 항목 순서 유지.",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_number": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6,
+            "description": "점검항목 번호 (1~6)"
+          },
+          "result": {
+            "type": "string",
+            "enum": ["O", "X", "?"],
+            "description": "점검결과. O=이상없음, X=해당없음/부적합, ?=판독불가"
+          },
+          "result_confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "이 항목 결과의 인식 신뢰도"
+          }
+        },
+        "required": ["item_number", "result", "result_confidence"]
+      }
+    },
+    "writer": {
+      "type": "object",
+      "description": "작성자 정보",
+      "properties": {
+        "team": {"type": "string", "description": "소속 팀명. 예: '군수관리팀'"},
+        "rank": {"type": "string", "description": "직급/계급. 예: '대위'"},
+        "name": {"type": "string", "description": "성명. 예: '김정식'"},
+        "signature_present": {"type": "boolean", "description": "서명란 수기 서명 존재 여부"}
+      },
+      "required": ["team", "rank", "name", "signature_present"]
+    },
+    "form_identifier": {
+      "type": "string",
+      "description": "서식 식별자. 예: '별지 제3-2호 서식'"
+    }
+  },
+  "required": ["analysis", "document_date", "checklist_items", "writer"]
+}

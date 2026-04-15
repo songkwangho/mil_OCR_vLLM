@@ -54,21 +54,21 @@
 ### 3-1. 권장 서버 시작 명령
 
 ```bash
-# docker-compose.yml vllm-server 서비스 실제 값 (2026-04-14 기준)
-vllm serve /models/gemma4/gemma-4-26b-a4b-it/ \
+# docker-compose.yml vllm-server 서비스에 반영
+vllm serve models/gemma4/gemma-4-26b-a4b-it/ \
     --dtype bfloat16 \
     --max-model-len 8192 \
     --gpu-memory-utilization 0.92 \
     --kv-cache-dtype fp8 \
     --max-num-seqs 64 \
     --max-num-batched-tokens 16384 \
-    --structured-outputs-config '{"backend":"xgrammar"}' \
+    --mm-cache-preprocessor \
+    --guided-decoding-backend xgrammar \
     --speculative-config '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_max":4,"prompt_lookup_min":1}' \
-    --trust-remote-code
+    --disable-log-requests
 ```
 
-> **운영 환경**: vLLM v0.19.0 / H100 80GB / BF16 / 모델 로드 ~48.5GiB / 기동 ~90초
-> **v0.19.0 변경점**: `--mm-cache-preprocessor`, `--guided-decoding-backend`, `--disable-log-requests` 세 플래그 제거. 구조화 출력은 `--structured-outputs-config`로 통합됐고 prefix caching은 기본 활성(`enable_prefix_caching=True`).
+> **운영 환경**: vLLM v0.19.0 / H100 80GB / BF16 / 모델 로드 ~48.5GiB / 기동 ~120초
 
 ### 3-2. 최적화 설정 근거
 
@@ -77,7 +77,8 @@ vllm serve /models/gemma4/gemma-4-26b-a4b-it/ \
 | `--kv-cache-dtype fp8` | KV Cache 메모리 50% 절감 → 동시처리 2배 | ⚠️ 모델 가중치는 BF16 유지 (§3-3 참조) |
 | `--max-num-seqs 64` | 멀티모달 배치 안정성 | 128→64로 조정 |
 | `--max-num-batched-tokens 16384` | Chunked Prefill 최적화 | 온라인 서빙 기준 |
-| `--structured-outputs-config xgrammar` | 반복 스키마 캐싱 + guided_json 강제 | xgrammar 네이티브 |
+| `--mm-cache-preprocessor` | 멀티모달 prefix caching 활성화 | TTFT 3~10배 단축 |
+| `--guided-decoding-backend xgrammar` | 반복 스키마 캐싱 | 동일 서식 반복 사용에 유리 |
 | n-gram speculative decoding | 디코드 속도 1.2~1.5배 향상 | guided_json과 완전 호환 |
 
 ### 3-3. KV Cache FP8 vs 모델 가중치 FP8 — 개념 구분
@@ -118,7 +119,7 @@ n-gram이 1순위인 이유: OCR 출력이 짧고(`"nsn": "1005-01-432-1234"` �
 
 효과: 10K 토큰 공유 prefix 기준 TTFT ~4.3초 → ~0.6초 (7배 단축)
 
-**주의**: 동일 텍스트 + 다른 이미지 조합 시 캐시 키 충돌 버그(vllm#20261). v0.19.0에서는 멀티모달 prefix caching이 자동으로 이미지 해시를 키로 사용하므로 별도 플래그 불필요.
+**주의**: 동일 텍스트 + 다른 이미지 조합 시 캐시 키 충돌 버그(vllm#20261). `--mm-cache-preprocessor`로 이미지 해시 기반 캐시 사용 권장.
 
 ### 3-6. Guided Decoding 백엔드 선택
 
@@ -134,7 +135,7 @@ n-gram이 1순위인 이유: OCR 출력이 짧고(`"nsn": "1005-01-432-1234"` �
 user_instruction += "\nNSN 코드는 NNNN-NN-NNN-NNNN 형식 13자리입니다. 예: 1005-01-432-1234"
 
 # 방법 2: guidance 백엔드 전환 (NSN 강제가 절대적으로 필요한 경우)
-# --structured-outputs-config '{"backend":"guidance"}'
+# --guided-decoding-backend guidance
 # → JSON Schema 내 pattern 제약 완전 지원
 ```
 
@@ -425,7 +426,7 @@ restart: unless-stopped
 |--------|------|------|-----------|
 | `vllm-server` | 8100 | Gemma4 vLLM | vLLM v0.19.0 + transformers 5.5.0 |
 | `layout` | 8082 | P2 레이아웃 (Fusion 지원) | PaddlePaddle CUDA 12.6 |
-| `pipeline` | 8080 | P1, P2.5-A~C, P3-A~B, P4~P6 | PyTorch CUDA 12.6 |
+| `pipeline` | 8080 | PdfAdapter, P1, P2.5-A~C, P3-A~B, P4~P6 | PyTorch CUDA 12.6 |
 | `fallback` | 8081 | v1 PP-OCRv5 경량 파이프라인 | PaddlePaddle + PyTorch CUDA 12.6 |
 | `train` | — | Fine-tuning | PaddlePaddle + PyTorch + PEFT |
 
@@ -465,7 +466,39 @@ restart: unless-stopped
 
 | 스크립트 | 범위 |
 |----------|------|
-| `scripts/run_pipeline.py` | P1→P6 전체 |
+| `scripts/run_pipeline.py` | P1→P6 전체 (PDF 입력 포함) |
 | `scripts/test_vlm.py` | P3-A/P3-B VLM 단독 테스트 |
 | `scripts/run_pipeline_with_outputs.py` | 전체 + 단계별 출력 저장 |
 | `scripts/evaluate_layout_detection.py` | PP-DocLayout 검출률 측정 |
+
+---
+
+## 9. 추가 의존성 (PDF 어댑터)
+
+```txt
+# requirements.txt — pipeline 서비스 추가 항목
+pymupdf>=1.24.0   # PyPI 패키지명 pymupdf, import 시 fitz 사용
+                  # PDF → PageImage 변환 (PdfAdapter)
+                  # C 바이너리 포함 — 별도 시스템 패키지 불필요
+```
+
+**폐쇄망 배치**:
+
+```bash
+# 온라인 환경에서 wheel 사전 다운로드 (CUDA 무관, 순수 Python/C 패키지)
+pip download "pymupdf>=1.24.0" -d ./wheels/
+
+# Dockerfile.pipeline 에 추가
+COPY wheels/ /tmp/wheels/
+RUN pip install --no-index --find-links=/tmp/wheels pymupdf
+```
+
+**pymupdf 선택 이유**:
+
+| 항목 | pymupdf | pdf2image | pypdfium2 |
+|------|---------|-----------|-----------|
+| 시스템 의존성 | 없음 (C 바이너리 포함) | poppler 필요 (`apt-get`) | 없음 |
+| 렌더링 품질 | ✅ 최고 | 🟡 양호 | ✅ 좋음 |
+| DPI 지정 | ✅ | ✅ | ✅ |
+| 폐쇄망 wheel 배치 | ✅ 단순 | ❌ apt 별도 필요 | ✅ 단순 |
+| 텍스트 레이어 접근 | ✅ (스캔 판정용) | ❌ | ❌ |

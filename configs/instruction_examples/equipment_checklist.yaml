@@ -1,0 +1,25 @@
+# 1-shot 예시 — 전비품 확인서 작성 점검표 (별지 제3-2호 서식)
+# equipment_checklist_design.md §6 원문 그대로.
+form_type: equipment_checklist
+region_type: table
+example_description: "전비품 확인서 작성 점검표 — O/X 점검결과 열 포함 전체 표"
+example_response: |
+  {
+    "analysis": "표 구조 명확, 점검결과 열의 O/X 수기 판독 가능. 3번 항목 O가 다소 흐릿하나 판독 가능.",
+    "document_date": "2026년 4월 15일",
+    "checklist_items": [
+      {"item_number": 1, "result": "O", "result_confidence": 0.97},
+      {"item_number": 2, "result": "O", "result_confidence": 0.95},
+      {"item_number": 3, "result": "O", "result_confidence": 0.88},
+      {"item_number": 4, "result": "X", "result_confidence": 0.96},
+      {"item_number": 5, "result": "X", "result_confidence": 0.98},
+      {"item_number": 6, "result": "O", "result_confidence": 0.94}
+    ],
+    "writer": {
+      "team": "군수관리팀",
+      "rank": "대위",
+      "name": "김정식",
+      "signature_present": true
+    },
+    "form_identifier": "별지 제3-2호 서식"
+  }

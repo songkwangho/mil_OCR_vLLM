@@ -507,24 +507,115 @@ def _detect_file_ext(path: Path) -> FileExt:
     return mapping.get(suffix, FileExt.PNG)
 
 
+def _handle_pdf_result(pdf_result, doc_id: str, run_dir: Path):
+    """PdfDocumentResult → 페이지별 저장 + 집계용 PipelineResult 반환."""
+    from src.pipeline.orchestrator import PipelineResult
+    from src.interfaces.enums import PipelineStatus, ProcessingPath
+
+    doc_dir = run_dir / doc_id
+    doc_dir.mkdir(parents=True, exist_ok=True)
+
+    # 페이지별 PipelineResult 저장 (런타임 부착 필드)
+    page_results = getattr(pdf_result, "_page_results", None) or []
+    for page_result in page_results:
+        page_id = page_result.doc_id  # "{원본}_p{N:02d}"
+        page_num_str = page_id.rsplit("_p", 1)[-1] if "_p" in page_id else f"{len(page_results):02d}"
+        page_dir = doc_dir / f"p{page_num_str}"
+        save_p1(page_dir, page_result)
+        save_p2_raw(page_dir, page_result)
+        save_p2_5a(page_dir, page_result)
+        save_p3a(page_dir, page_result)
+        save_p2_5b(page_dir, page_result)
+        save_p2_5c(page_dir, page_result)
+        save_p3(page_dir, page_result)
+        save_p4(page_dir, page_result)
+        save_p5(page_dir, page_result)
+        save_p6(page_dir, page_result)
+        save_summary(page_dir, page_result)
+
+    # pdf_summary.json
+    pdf_summary = {
+        "doc_id": pdf_result.doc_id,
+        "total_pages": pdf_result.total_pages,
+        "overall_status": pdf_result.overall_status.value,
+        "processing_ms": round(pdf_result.processing_ms, 1),
+        "pages": [
+            {
+                "page": i + 1,
+                "doc_id": p.doc_id,
+                "status": p.status.value,
+                "form_type": p.form_type.value if p.form_type else None,
+                "processing_ms": round(p.processing_ms, 1),
+            }
+            for i, p in enumerate(pdf_result.pages)
+        ],
+        "warnings": pdf_result.warnings,
+    }
+    _save_json(doc_dir / "pdf_summary.json", pdf_summary)
+
+    # 집계용 PipelineResult — run_summary 생성에 필요
+    agg = PipelineResult(doc_id=doc_id)
+    # 첫 번째 성공 페이지의 processing_path 사용, 없으면 NONE
+    first_path = next(
+        (pr.processing_path for pr in page_results if pr.processing_path != ProcessingPath.NONE),
+        ProcessingPath.NONE,
+    )
+    agg.processing_path = first_path
+    agg.status = pdf_result.overall_status
+    # 페이지별 타이밍 합산
+    for pr in page_results:
+        for k, v in pr.timings.items():
+            agg.timings[k] = agg.timings.get(k, 0.0) + v
+        agg.warnings.extend([f"[{pr.doc_id}] {w}" for w in pr.warnings])
+        agg.errors.extend([f"[{pr.doc_id}] {e}" for e in pr.errors])
+    # PDF 처리 총 시간을 별도 키로 기록
+    agg.timings["PDF_TOTAL"] = round(pdf_result.processing_ms, 1)
+    # skill_stats는 첫 페이지 것을 승계 (간단화)
+    for pr in page_results:
+        if getattr(pr, "skill_stats", None):
+            agg.skill_stats = pr.skill_stats
+            break
+
+    print(
+        f"\n  [PDF] {doc_id} — {pdf_result.total_pages} 페이지 처리, "
+        f"overall={pdf_result.overall_status.value}, "
+        f"total={pdf_result.processing_ms:.0f}ms"
+    )
+    for i, p in enumerate(pdf_result.pages):
+        print(f"       page {i+1}: status={p.status.value} form_type={p.form_type.value if p.form_type else '-'}")
+
+    return agg
+
+
 def run_single(pipeline: PipelineOrchestrator, image_path: Path, run_dir: Path):
-    """단일 문서 파이프라인 실행 + 결과 저장."""
+    """단일 문서 파이프라인 실행 + 결과 저장.
+
+    PDF 입력 시 PdfDocumentResult가 반환되며, 페이지별 하위 디렉토리에 결과를 저장하고
+    pdf_summary.json을 기록. 집계용 PipelineResult를 반환 (원본 PDF doc_id 유지).
+    """
     doc_id = image_path.stem
     logger.info("=" * 60)
     logger.info("문서 처리 시작: %s", doc_id)
     logger.info("=" * 60)
 
     raw_bytes = image_path.read_bytes()
+    file_ext = _detect_file_ext(image_path)
     doc_input = DocumentInput(
         doc_id=doc_id,
         raw_bytes=raw_bytes,
-        file_ext=_detect_file_ext(image_path),
+        file_ext=file_ext,
         source_type=SourceType.SCAN,
         dpi_hint=None,
         metadata={"source_file": image_path.name},
     )
 
-    result = pipeline.run(doc_input)
+    dispatch = pipeline.process(doc_input)
+
+    # PDF 분기: PdfDocumentResult → 페이지별 저장 후 집계용 PipelineResult 반환
+    if file_ext == FileExt.PDF:
+        return _handle_pdf_result(dispatch, doc_id, run_dir)
+
+    result = dispatch
 
     # 결과 저장
     doc_dir = run_dir / doc_id
@@ -639,9 +730,9 @@ def main():
     input_dir = _ROOT / args.input_dir
     output_base = _ROOT / args.output_dir
 
-    # 이미지 파일 수집
-    image_exts = {".jpg", ".jpeg", ".png", ".tiff", ".tif"}
-    images = sorted(p for p in input_dir.iterdir() if p.suffix.lower() in image_exts)
+    # 입력 파일 수집 (PDF 포함)
+    input_exts = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".pdf"}
+    images = sorted(p for p in input_dir.iterdir() if p.suffix.lower() in input_exts)
 
     if not images:
         logger.error("입력 이미지 없음: %s", input_dir)

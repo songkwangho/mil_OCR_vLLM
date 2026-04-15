@@ -29,7 +29,14 @@ DocumentInput
         전체 페이지 저해상도(140토큰) → form_type 확정
 
     ┌─────────────────────────────────────────────────────┐
-    │ military 경로 (기존 v2 사상 유지)                    │
+    │ military 경로                                        │
+    │                                                     │
+    │  P2.5-A.5: TemplateAugmentor  ← 신규               │
+    │    form_type별 서식 템플릿 로드                       │
+    │    configs/form_templates/*.yaml                     │
+    │    PP-DocLayout 결과와 병합                           │
+    │    IoU > 0.5: 탐지 결과 우선                         │
+    │    미탐지 필드: 템플릿 bbox 보완                      │
     │                                                     │
     │  P2.5-B: InstructionRouter                          │
     │    region_type + form_type → instruction + 1-shot  │
@@ -45,7 +52,7 @@ DocumentInput
     └─────────────────────────────────────────────────────┘
 
     ┌─────────────────────────────────────────────────────┐
-    │ other 경로 (Skill Registry — v3 사상)               │
+    │ other 경로 (Skill Registry)                         │
     │                                                     │
     │  S1: LayoutAnalyzer (결재란 휴리스틱 포함)           │
     │    + 조건부 Mode B (table 미탐지 시 VLM 전체 페이지)│
@@ -87,10 +94,10 @@ DocumentInput
 @dataclass
 class DocumentInput:
     doc_id: str
-    raw_bytes: bytes
-    file_ext: FileExt
+    raw_bytes: bytes           # PDF의 경우 PDF 원본 바이트 그대로
+    file_ext: FileExt          # FileExt.pdf 포함
     source_type: SourceType
-    dpi_hint: Optional[int] = None
+    dpi_hint: Optional[int] = None   # PDF 렌더링 DPI 힌트로 재활용
     metadata: dict = field(default_factory=dict)
 
 @dataclass
@@ -104,7 +111,38 @@ class PreprocessedImage:
     quality_score: float
     sr_applied: bool = False
     warnings: list[str] = field(default_factory=list)
+
+@dataclass
+class PageImage:
+    """PdfAdapter가 반환하는 단일 페이지 이미지."""
+    doc_id: str
+    page_number: int           # 1-based
+    total_pages: int
+    image_array: np.ndarray    # H×W×3 uint8 (RGB)
+    render_dpi: int
+    original_width_pt: float   # PDF 원본 너비 (포인트, 1pt = 1/72 inch)
+    original_height_pt: float
+    warnings: list[str] = field(default_factory=list)
+
+@dataclass
+class PdfDocumentResult:
+    """멀티페이지 PDF 처리 결과 — 페이지별 PipelineOutput 집합.
+
+    overall_status 집계:
+        success → 모든 페이지 success
+        partial → 일부 페이지 failed/review
+        failed  → 전체 실패 또는 PdfAdapter 렌더링 실패
+    """
+    doc_id: str                      # 원본 PDF doc_id
+    total_pages: int
+    pages: list[PipelineOutput]      # doc_id = "{원본}_p{N:02d}"
+    overall_status: PipelineStatus
+    processing_ms: float
+    warnings: list[str] = field(default_factory=list)
 ```
+
+**PDF doc_id 명명 규칙**: `"{원본doc_id}_p{page:02d}"` — 예) `전비품확인서_001_p01`
+DB에서 같은 PDF의 모든 페이지 조회: `WHERE parent_doc_id = '전비품확인서_001'`
 
 ### 2-2. 레이아웃 분석
 
@@ -120,6 +158,7 @@ class LayoutRegion:
     bbox: BoundingBox
     confidence: float
     polygon: Optional[list[tuple[float, float]]] = None
+    source: str = "model"  # "model" | "template" — TemplateAugmentor 출처 구분
 
 @dataclass
 class RawLayoutResult:
@@ -141,37 +180,39 @@ class LayoutResult:
     analysis_mode: AnalysisMode = AnalysisMode.HEURISTIC
     removed_count: int = 0
     merged_count: int = 0
+    augmented_count: int = 0   # TemplateAugmentor가 추가한 영역 수
     warnings: list[str] = field(default_factory=list)
 ```
+
+> **`source` 필드**: TemplateAugmentor가 추가한 영역은 `source="template"`으로 표시합니다.
+> P3-B 추출 결과에서 template 출처 영역의 신뢰도가 낮으면 해당 서식 템플릿을 재검토해야 한다는 신호입니다.
 
 ### 2-3. Skill 공통 인터페이스 (other 경로)
 
 ```python
 @dataclass
 class SkillTask:
-    """오케스트레이터가 Skill에 전달하는 작업 단위."""
     region_id: str
     region_type: RegionType
     cropped_image: np.ndarray
     pixel_budget: int
-    context: str = ""          # S5 패스1이 제공하는 셀 역할 등 추가 맥락
+    context: str = ""
     form_type: Optional[FormType] = None
 
 @dataclass
 class SkillResult:
     region_id: str
-    skill_name: str            # "S2", "S3", "S4", "S5", "S6"
-    content: str               # 추출된 텍스트 또는 JSON
+    skill_name: str
+    content: str
     confidence: float
-    content_type: str          # "printed", "handwritten", "seal", "signature", "table"
+    content_type: str
     raw_response: str = ""
     warnings: list[str] = field(default_factory=list)
 
 @dataclass
 class TableStructure:
-    """S5 패스1 결과 — 표 구조만."""
     region_id: str
-    table_type: str            # "approval", "data", "other"
+    table_type: str
     cells: list[TableCell]
     structure_confidence: float
 
@@ -179,16 +220,15 @@ class TableStructure:
 class TableCell:
     row: int
     col: int
-    role: str                  # "담당", "팀장", "날짜" 등
+    role: str
     bbox: BoundingBox
-    content_type: str          # "printed", "handwritten", "signature", "seal", "empty"
+    content_type: str
 
 @dataclass
 class SealProcessResult:
-    """SealPreprocessor 결과."""
-    image: np.ndarray          # 극좌표 직선화 이미지 or 원본 크롭
-    unwrapped: bool            # 허프 원 탐지 성공 여부
-    context_hint: str          # VLM 프롬프트에 삽입할 컨텍스트
+    image: np.ndarray
+    unwrapped: bool
+    context_hint: str
 ```
 
 ### 2-4. InstructionRouter 출력 (military 경로)
@@ -214,11 +254,10 @@ class InstructionSpec:
 class CroppedRegion:
     region_id: str
     region_type: RegionType
-    cropped_image: np.ndarray  # 48px 배수 정렬 완료
+    cropped_image: np.ndarray
     pixel_budget: int
     instruction_spec: InstructionSpec
 
-# pixel_budget 기준값
 PIXEL_BUDGET = {
     "table":             1120,
     "handwritten_field": 1120,
@@ -229,13 +268,11 @@ PIXEL_BUDGET = {
     "figure":             140,
     "header":             140,
     "footer":             140,
-    "signature":          140,  # 이진 분류용
+    "signature":          140,
 }
 
-# 배치 순서 (vLLM 패딩 오버헤드 최소화)
 DISPATCH_ORDER = [140, 560, 1120]
 
-# 크롭 패딩 비율
 CROP_PADDING_RATIO = {
     "table":             0.05,
     "handwritten_field": 0.15,
@@ -274,7 +311,6 @@ class VLMResult:
     processing_time_ms: float = 0.0
     retry_count: int = 0
     warnings: list[str] = field(default_factory=list)
-    # raw_json: DB 적재 제외 — 파일 시스템에만 보존
 ```
 
 ### 2-7. 후처리 결과
@@ -282,7 +318,7 @@ class VLMResult:
 ```python
 @dataclass
 class CorrectedField:
-    field_path: str        # "items[0].quantity" — JSONPath 형식
+    field_path: str
     original_value: str
     corrected_value: str
     corrected_by: str
@@ -291,7 +327,7 @@ class CorrectedField:
 @dataclass
 class ReviewQueueItem:
     queue_id: str
-    doc_id: str
+    doc_id: str                            # PDF 페이지의 경우 "{원본}_p{N:02d}"
     enqueued_at: datetime
     priority: ReviewPriority
     reason: ReviewReason
@@ -305,11 +341,15 @@ class ReviewQueueItem:
     reviewed_at: Optional[datetime] = None
     corrected_fields: dict[str, CorrectedField] = field(default_factory=dict)
     reviewer_notes: str = ""
+    # PDF 멀티페이지 추적용 (단일 이미지 입력 시 None)
+    parent_doc_id: Optional[str] = None   # 원본 PDF doc_id
+    page_number: Optional[int] = None     # 페이지 번호
+    total_pages: Optional[int] = None     # 전체 페이지 수
 
 @dataclass
 class PipelineOutput:
     doc_id: str
-    status: PipelineStatus  # success, partial, review, failed, other_document
+    status: PipelineStatus   # PARTIAL: PDF 멀티페이지 일부 실패/검토
     processing_path: ProcessingPath
     form_type: Optional[FormType] = None
     json_output: Optional[str] = None
@@ -318,6 +358,28 @@ class PipelineOutput:
     db_record_ids: list[str] = field(default_factory=list)
     review_queue_id: Optional[str] = None
     processing_ms: float = 0.0
+```
+
+`PipelineStatus` enum:
+
+```python
+class PipelineStatus(str, Enum):
+    SUCCESS        = "success"
+    PARTIAL        = "partial"        # PDF 멀티페이지 중 일부 실패/검토
+    REVIEW         = "review"
+    FAILED         = "failed"
+    OTHER_DOCUMENT = "other_document"
+```
+
+`FileExt` enum — pdf 포함:
+
+```python
+class FileExt(str, Enum):
+    jpg  = "jpg"
+    jpeg = "jpeg"
+    png  = "png"
+    tiff = "tiff"
+    pdf  = "pdf"
 ```
 
 ---
@@ -339,11 +401,7 @@ class LayoutPostProcessor:
     def _remap_reading_order(
         self, original_order, removed_ids, merged_map
     ) -> list[int]:
-        """제거/병합 결과 반영하여 reading_order 재정렬.
-        1. removed_ids 인덱스 제거
-        2. merged_map 흡수된 id 치환 (중복 제거)
-        3. 정제 후 regions 기준 리넘버링
-        """
+        """제거/병합 결과 반영하여 reading_order 재정렬."""
 ```
 
 ### 3-2. P3-A FormClassifier
@@ -357,6 +415,7 @@ class LayoutPostProcessor:
 | `inventory_sheet` | 물자현황표 | military |
 | `handover_doc` | 인수인계서 | military |
 | `inspection_report` | 검사보고서 | military |
+| `equipment_checklist` | 전비품 확인서 작성 점검표 | military |
 | `unknown` | 군수 서식인데 유형 불명 | military (_fallback.json) |
 | `other` | 군수 서식이 아님 | other → Skill Registry |
 
@@ -364,12 +423,223 @@ class LayoutPostProcessor:
 class FormClassifier:
     PIXEL_BUDGET = 140
 
-    def classify(self, image_rgb, warnings=None) -> tuple[FormType, float]:
-        # guided_json enum: supply_request|...|unknown|other
-        # temperature=0.0
+    def classify(
+        self, image_rgb, warnings=None
+    ) -> tuple[FormType, float, Optional[str]]:
+        """Returns: (form_type, confidence, form_identifier)
+
+        form_identifier: 서식 상단의 식별자 문자열 (예: "별지 제3-2호 서식").
+        TemplateAugmentor가 버전 선택에 사용.
+        식별자가 없는 서식은 None 반환.
+
+        guided_json enum: supply_request|...|equipment_checklist|unknown|other
+        form_identifier: optional string
+        temperature=0.0
+        """
 ```
 
-### 3-3. P2.5-B InstructionRouter (military 전용)
+### 3-3. P2.5-A.5 TemplateAugmentor (신규, military 전용)
+
+**파일**: `src/vlm/template_augmentor.py`
+
+**역할**: P3-A가 form_type을 확정한 직후, 해당 서식의 미리 정의된 필드 bbox를 LayoutResult에 병합합니다. PP-DocLayout이 놓친 고정 인쇄 필드를 보완하여 추출 완전성을 보장합니다.
+
+**삽입 위치**: 오케스트레이터에서 P3-A → P2.5-A.5 → P2.5-B 순서로 호출.
+
+```python
+class TemplateAugmentor:
+    """서식 템플릿 기반 bbox 병합 — PP-DocLayout 누락 보완.
+
+    military 경로 전용. other 경로에는 적용하지 않는다.
+    서식이 고정되어 있다는 전제 하에 동작하며,
+    수기로 추가되는 동적 요소(인장, 서명)는 PP-DocLayout 탐지 결과를 유지한다.
+    """
+
+    MERGE_IOU_THRESHOLD = 0.5   # 이 이상이면 PP-DocLayout 결과 우선
+    TEMPLATE_CONFIDENCE  = 0.70  # 템플릿 보완 영역에 부여하는 기본 신뢰도
+
+    def __init__(self, templates_dir: str = "configs/form_templates"):
+        self._dir = Path(templates_dir)
+        self._cache: dict[str, list[dict]] = {}
+
+    def augment(
+        self,
+        layout: LayoutResult,
+        form_type: FormType,
+        form_identifier: Optional[str] = None,   # FormClassifier가 추출한 식별자
+        warnings: Optional[list[str]] = None,
+    ) -> LayoutResult:
+        """form_type + form_identifier로 버전을 선택하여 LayoutResult에 병합.
+
+        Args:
+            layout:          P2.5-A 정제 완료 결과
+            form_type:       P3-A 분류 결과
+            form_identifier: 서식 식별자 문자열 (예: "별지 제3-2호 서식")
+                             versions 배열에서 매칭 → 해당 버전 fields 로드
+                             None 또는 미매칭 → 배열 첫 번째 버전(최신) 사용
+            warnings:        경고 수집 리스트
+
+        Returns:
+            augmented_count가 갱신된 새 LayoutResult
+        """
+        template_fields = self._load_template(form_type, form_identifier)
+        if not template_fields:
+            return layout  # 템플릿 없음 → 원본 그대로 반환
+
+        existing_bboxes = [r.bbox for r in layout.regions]
+        new_regions = list(layout.regions)
+        augmented = 0
+
+        for field_def in template_fields:
+            tbbox = BoundingBox(**field_def["bbox"])
+
+            # 기존 탐지 결과와 IoU 계산 — 겹치면 PP-DocLayout 결과 우선
+            if any(_iou(tbbox, eb) > self.MERGE_IOU_THRESHOLD for eb in existing_bboxes):
+                continue
+
+            # 미탐지 → 템플릿 bbox 추가
+            new_region = LayoutRegion(
+                region_id=f"tmpl_{field_def['field_key']}",
+                region_type=RegionType(field_def["region_type"]),
+                bbox=tbbox,
+                confidence=self.TEMPLATE_CONFIDENCE,
+                source="template",
+            )
+            new_regions.append(new_region)
+            augmented += 1
+
+        if augmented == 0:
+            return layout
+
+        # reading_order 재정렬: 좌상→우하 기준으로 새 영역 삽입
+        new_order = _sort_reading_order(new_regions)
+        return LayoutResult(
+            doc_id=layout.doc_id,
+            page_width=layout.page_width,
+            page_height=layout.page_height,
+            regions=new_regions,
+            reading_order=new_order,
+            analysis_mode=layout.analysis_mode,
+            removed_count=layout.removed_count,
+            merged_count=layout.merged_count,
+            augmented_count=augmented,
+            warnings=layout.warnings,
+        )
+
+    def _load_template(
+        self,
+        form_type: FormType,
+        form_identifier: Optional[str] = None,
+    ) -> list[dict]:
+        """configs/form_templates/{form_type.value}.yaml 로드 후 버전 선택 (캐싱).
+
+        versions 배열 구조:
+          versions:
+            - version: "1.0"
+              form_identifier: "별지 제3-2호 서식"
+              fields: [...]
+            - version: "2.0"
+              form_identifier: "별지 제3-2호의2 서식"
+              fields: [...]
+
+        form_identifier 매칭 우선, 미매칭/None 시 첫 번째 버전 사용.
+        """
+        cache_key = f"{form_type.value}::{form_identifier or ''}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        path = self._dir / f"{form_type.value}.yaml"
+        if not path.exists():
+            return []
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        versions = data.get("versions")
+        if versions:
+            # versions 배열 구조 — form_identifier로 버전 선택
+            selected = versions[0]  # 기본: 첫 번째(최신)
+            if form_identifier:
+                for v in versions:
+                    if v.get("form_identifier") == form_identifier:
+                        selected = v
+                        break
+            fields = selected.get("fields", [])
+        else:
+            # 하위 호환: 기존 flat 구조 (supply_request 등)
+            fields = data.get("fields", [])
+
+        self._cache[cache_key] = fields
+        return fields
+```
+
+**템플릿 YAML 형식** (`configs/form_templates/supply_request.yaml`):
+
+```yaml
+# supply_request.yaml
+# 보급청구서 v1.3 기준 (2026-01-01 발효)
+# 좌표계: P1 Deskew + DPI 300 정규화 이후 기준
+# 스캔 크기: A4 세로 (2480×3508px at 300dpi)
+
+form_type: supply_request
+version: "1.3"
+effective_date: "2026-01-01"
+page_size: [2480, 3508]
+
+fields:
+  - field_key: unit_code
+    region_type: text
+    bbox: {x1: 120, y1: 340, x2: 380, y2: 390}
+    description: "청구 부대 코드"
+
+  - field_key: request_date
+    region_type: text
+    bbox: {x1: 400, y1: 340, x2: 700, y2: 390}
+    description: "청구 일자"
+
+  - field_key: nsn
+    region_type: handwritten_field
+    bbox: {x1: 120, y1: 410, x2: 520, y2: 460}
+    description: "NSN 코드 기입란"
+
+  - field_key: item_name
+    region_type: text
+    bbox: {x1: 120, y1: 340, x2: 860, y2: 390}
+    description: "품목명"
+
+  - field_key: quantity
+    region_type: handwritten_field
+    bbox: {x1: 540, y1: 410, x2: 680, y2: 460}
+    description: "수량 기입란"
+
+  - field_key: unit_price
+    region_type: handwritten_field
+    bbox: {x1: 690, y1: 410, x2: 860, y2: 460}
+    description: "단가 기입란"
+
+  - field_key: total
+    region_type: handwritten_field
+    bbox: {x1: 870, y1: 410, x2: 1060, y2: 460}
+    description: "합계 기입란"
+```
+
+**주의 사항**:
+
+```
+1. 좌표 기준: P1 Deskew + DPI 300 정규화 이후 이미지 기준.
+   스캔 기울기(±3~5°)가 보정된 후의 좌표여야 함.
+
+2. 서식 버전 관리: version + effective_date 필수 명시.
+   서식 개정 시 v2/ 하위 디렉토리에 신규 작성하고
+   schema_registry.py 방식으로 form_type:version 매핑 추가.
+
+3. 동적 요소 제외: 인장(seal), 서명(signature) 영역은 템플릿에 넣지 않음.
+   위치가 유동적이므로 PP-DocLayout 탐지 결과를 그대로 사용.
+
+4. unknown form_type: 템플릿 없음 → augment() 호출 시 원본 반환.
+```
+
+### 3-4. P2.5-B InstructionRouter (military 전용)
 
 **파일**: `src/vlm/instruction_router.py`
 
@@ -393,30 +663,28 @@ class InstructionRouter:
 - analysis 필드 JSON Schema 최상단 → CoT 효과
 - 영어 지시문 + 한국어 필드명 하이브리드
 
-### 3-4. P2.5-C ResolutionRouter (military 전용)
+### 3-5. P2.5-C ResolutionRouter (military 전용)
 
 **파일**: `src/vlm/resolution_router.py`
 
 ```python
 class ResolutionRouter:
-    DISPATCH_ORDER = [140, 560, 1120]  # 배치 순서 — vLLM 패딩 최소화
+    DISPATCH_ORDER = [140, 560, 1120]
 
     def route(self, layout, preprocessed, instructions) -> dict[int, list[CroppedRegion]]:
         """반환: {pixel_budget → [CroppedRegion]}
         동일 budget끼리 그룹화, DISPATCH_ORDER 순서로 vLLM에 전송.
+        template 출처 영역도 동일하게 처리됨.
         """
 
     def _align_to_48px(self, image) -> np.ndarray:
-        """SigLIP 3×3 패치 풀링 효율 최적화.
-        16×16 패치 → 3×3 블록 = 48px 배수가 최적.
-        """
         h, w = image.shape[:2]
         new_h = max(48, round(h / 48) * 48)
         new_w = max(48, round(w / 48) * 48)
         return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 ```
 
-### 3-5. P3-B StructuredExtractor (military 전용)
+### 3-6. P3-B StructuredExtractor (military 전용)
 
 **파일**: `src/vlm/structured_extractor.py`
 
@@ -428,21 +696,10 @@ class StructuredExtractor:
 
     def extract(self, groups, doc_id, form_type, ...) -> VLMResult:
         """DISPATCH_ORDER 순서로 pixel_budget 배치 전송.
+        template 출처 영역도 동일 흐름으로 처리.
         저신뢰 필드 감지 시 pixel_budget 상향 + OCR 힌트 재시도.
         seal/signature 영역은 S4/S6 Skill로 위임.
         """
-```
-
-**logprobs 신뢰도 산출**:
-```python
-def calc_field_confidence(token_logprobs: list[float]) -> float:
-    """기하 평균: exp(mean(logprobs))
-    한국어 subword 특성상 영어 대비 5~10% 낮게 임계값 설정.
-    """
-    if not token_logprobs:
-        return 0.0
-    mean_logprob = max(sum(token_logprobs) / len(token_logprobs), -20.0)
-    return round(min(1.0, max(0.0, math.exp(mean_logprob))), 4)
 ```
 
 ---
@@ -455,33 +712,11 @@ def calc_field_confidence(token_logprobs: list[float]) -> float:
 
 ```python
 class SealPreprocessor:
-    """순수 기하학적 변환. 파인튜닝 대상 아님.
-    military/other 양 경로에서 seal 영역에 사용.
-    """
-
     def process(self, seal_crop: np.ndarray) -> SealProcessResult:
         # 1. HSV 색공간에서 적색 마스크 추출
-        red_mask = self._extract_red(seal_crop)
-        # lower_red = [0, 100, 100], upper_red = [10, 255, 255]
-
         # 2. 허프 원 변환으로 인장 경계 탐지
-        circle = self._detect_circle(red_mask)
-
-        if circle is None:
-            # 허프 실패 → 원본 크롭 그대로 반환 (폴백)
-            return SealProcessResult(
-                image=seal_crop,
-                unwrapped=False,
-                context_hint="원형 인장 이미지입니다. 원형으로 배치된 텍스트를 인식하세요."
-            )
-
+        # 허프 실패 → 원본 크롭 반환 (예외 발생 금지)
         # 3. 극좌표 → 직교좌표 변환 (곡선 텍스트 직선화)
-        unwrapped = self._polar_to_rect(seal_crop, circle)
-        return SealProcessResult(
-            image=unwrapped,
-            unwrapped=True,
-            context_hint="인장 텍스트를 직선화한 이미지입니다."
-        )
 ```
 
 ### 4-2. Skill Registry
@@ -490,13 +725,13 @@ class SealPreprocessor:
 
 ```python
 SKILL_ROUTING = {
-    "text":              "S2",   # PrintedTextReader
+    "text":              "S2",
     "header":            "S2",
     "footer":            "S2",
-    "handwritten_field": "S3",   # HandwritingReader
-    "seal":              "S4",   # SealReader
-    "table":             "S5",   # TableExtractor (2패스)
-    "signature":         "S6",   # SignatureDetector
+    "handwritten_field": "S3",
+    "seal":              "S4",
+    "table":             "S5",
+    "signature":         "S6",
 }
 ```
 
@@ -507,15 +742,8 @@ SKILL_ROUTING = {
 ```python
 class PrintedTextReader:
     PIXEL_BUDGET = 560
-    SYSTEM_PROMPT = """
-    You are a Korean document OCR assistant.
-    Extract all printed Korean text from this document region exactly as written.
-    Output only the text content. Mark illegible characters as [?].
-    """
-
-    def run(self, task: SkillTask) -> SkillResult:
-        # guided_json 없이 순수 텍스트 추출
-        # 이유: 인쇄 텍스트는 스키마 강제보다 정확한 텍스트 추출이 우선
+    # guided_json 없이 순수 텍스트 추출
+    # 이유: 인쇄 텍스트는 스키마 강제보다 정확한 텍스트 추출이 우선
 ```
 
 ### 4-4. S3 HandwritingReader
@@ -525,23 +753,8 @@ class PrintedTextReader:
 ```python
 class HandwritingReader:
     PIXEL_BUDGET = 1120
-    SYSTEM_PROMPT = """
-    You are a Korean handwriting recognition specialist.
-
-    Korean characters: 초성(initial consonant) + 중성(vowel) + 종성(final consonant).
-    Analyze each component carefully.
-
-    Common confusion pairs: ㄱ/ㅋ, ㄴ/ㄹ, ㅏ/ㅓ, 1/ㅣ, 0/O
-    If ambiguous, output top candidate with [?] suffix.
-    Context: {context}
-
-    Output: {{"text": "...", "confidence": 0.0}}
-    """
-
-    def run(self, task: SkillTask) -> SkillResult:
-        # context: S5 패스1이 제공한 셀 역할 (예: "담당자 서명란의 이름")
-        # 첫 번째 VLM 호출 → 독립적으로 인식
-        # 신뢰도 < 0.70 → 동일 영역 재호출 (다른 프롬프트 변형)
+    # context: S5 패스1이 제공한 셀 역할
+    # 신뢰도 < 0.70 → 동일 영역 재호출 (다른 프롬프트 변형)
 ```
 
 ### 4-5. S4 SealReader
@@ -550,20 +763,9 @@ class HandwritingReader:
 
 ```python
 class SealReader:
-    SYSTEM_PROMPT = """
-    This image contains a Korean official seal (직인/관인).
-    {context_hint}
-    Recognize the Korean text in this image.
-    Common seal texts: 부대명, 부대장, 위원장, 의장, 장관 등
-    Output: {{"text": "...", "confidence": 0.0}}
-    """
-
     def run(self, task: SkillTask) -> SkillResult:
-        # SealPreprocessor 먼저 실행
         seal_result = self.seal_preprocessor.process(task.cropped_image)
         pixel_budget = 1120 if seal_result.unwrapped else 560
-        # 직선화 성공: 일반 텍스트 문제로 변환됨
-        # 직선화 실패: context_hint로 VLM이 곡선 텍스트임을 인지
 ```
 
 ### 4-6. S5 TableExtractor (2패스)
@@ -572,50 +774,12 @@ class SealReader:
 
 ```python
 class TableExtractor:
-    """결재란/데이터표 처리. 2패스로 순환 의존 제거."""
-
-    PASS1_SCHEMA = {
-        "analysis": "string",
-        "table_type": {"enum": ["approval", "data", "other"]},
-        "cells": [{
-            "row": "int", "col": "int",
-            "role": "string",
-            "bbox": [x1, y1, x2, y2],
-            "content_type": {"enum": ["printed", "handwritten", "signature", "seal", "empty"]}
-        }]
-    }
-
     def pass1_structure(self, table_crop: np.ndarray) -> TableStructure:
-        """패스1: 표 구조만 추출. pixel_budget=1120.
-        셀 좌표 + content_type 반환.
-        오케스트레이터가 이 결과로 패스2 태스크 생성.
-        """
+        """패스1: 표 구조만 추출. pixel_budget=1120."""
 
     def pass2_route(self, structure: TableStructure,
                     original_image: np.ndarray) -> list[SkillTask]:
-        """패스2: 셀별 크롭 + content_type에 맞는 Skill 태스크 반환.
-        오케스트레이터가 이 태스크를 DISPATCH_ORDER 배치에 합산.
-        """
-        tasks = []
-        skill_map = {
-            "printed":     "S2",
-            "handwritten": "S3",
-            "signature":   "S6",
-            "seal":        "S4",
-        }
-        for cell in structure.cells:
-            if cell.content_type == "empty":
-                continue
-            crop = self._crop_cell(original_image, cell.bbox)
-            skill = skill_map.get(cell.content_type, "S2")
-            tasks.append(SkillTask(
-                region_id=f"{structure.region_id}_r{cell.row}c{cell.col}",
-                region_type=RegionType(cell.content_type),
-                cropped_image=crop,
-                pixel_budget=PIXEL_BUDGET.get(cell.content_type, 560),
-                context=cell.role,
-            ))
-        return tasks
+        """패스2: 셀별 크롭 + content_type에 맞는 Skill 태스크 반환."""
 ```
 
 ### 4-7. S6 SignatureDetector
@@ -624,19 +788,9 @@ class TableExtractor:
 
 ```python
 class SignatureDetector:
-    """서명 OCR이 아닌 존재 여부 이진 탐지.
-    military/other 양 경로에서 signature 영역에 사용.
-    """
-    PIXEL_BUDGET = 140  # 이진 분류는 저해상도로 충분
-
-    SYSTEM_PROMPT = """
-    Does this image region contain a handwritten signature (수기 서명)?
-    A signature is a cursive personal mark — distinct from printed text or stamps.
-    Output only: {{"signature_present": true/false, "confidence": 0.0}}
-    """
-
-    def run(self, task: SkillTask) -> SkillResult:
-        # temperature=0.0, guided_json (이진 스키마)
+    PIXEL_BUDGET = 140
+    # 서명 OCR이 아닌 존재 여부 이진 탐지
+    # temperature=0.0, guided_json (이진 스키마)
 ```
 
 ### 4-8. S7 StructuredAggregator
@@ -645,49 +799,60 @@ class SignatureDetector:
 
 ```python
 class StructuredAggregator:
-    """S2~S6 결과를 official_document.json Schema에 맞춰 최종 JSON 조립.
-    form_type은 이 단계에서만 Schema 선택에 사용.
-    """
+    """S2~S6 결과를 official_document.json Schema에 맞춰 최종 JSON 조립."""
 
-    def run(self, skill_results: list[SkillResult],
-            table_structure: TableStructure,
-            form_type: FormType) -> VLMResult:
+    def run(self, skill_results, table_structure, form_type) -> VLMResult:
         # guided_json: official_document.json
         # low_confidence_fields: confidence < 임계값인 필드 목록
-        # overall_confidence: 전체 필드 신뢰도 가중 평균
 ```
 
 ---
 
-## 5. 오케스트레이터 디스패치 흐름 (other 경로)
+## 5. 오케스트레이터 디스패치 흐름
 
-**실제 구현**: `src/pipeline/orchestrator.py` `_process_other_document()` + `src/vlm/skill_registry.py` `SkillRegistry`.
+### 5-1. military 경로 (TemplateAugmentor 포함)
 
 ```python
 # orchestrator.py (발췌)
+def _process_military_document(self, layout, preprocessed, doc_id,
+                                form_type, form_confidence, ...):
+    # P2.5-A.5: TemplateAugmentor — PP-DocLayout 누락 보완
+    augmentor = self._get_template_augmentor()
+    layout = augmentor.augment(
+        layout, form_type,
+        form_identifier=form_identifier,   # FormClassifier 추출값 전달
+        warnings=result.warnings,
+    )
+    # augmented_count > 0 이면 로그에 보완된 영역 수 기록
+
+    # P2.5-B: InstructionRouter
+    instructions = self._get_p2_5b().route_all(layout, form_type)
+
+    # P2.5-C: ResolutionRouter
+    groups = self._get_p2_5c().route(layout, preprocessed, instructions)
+
+    # P3-B: StructuredExtractor
+    return self._get_p3b().extract(groups, doc_id, form_type, ...)
+```
+
+### 5-2. other 경로 (Skill Registry)
+
+```python
 def _process_other_document(self, layout, preprocessed, doc_id, ...):
-    registry = self._get_skill_registry()  # SkillRegistry(vlm_client)
+    registry = self._get_skill_registry()
     stats = SkillDispatchStats()
 
-    # S5 2-pass (표 구조 → 셀 태스크)
     cell_results, structures = registry.dispatch_tables(layout, preprocessed, stats)
-
-    # 비-표 영역 수집 + DISPATCH_ORDER 배치 실행
     non_table_tasks = registry.build_tasks(layout, preprocessed)
-    general_results = registry.dispatch(non_table_tasks, stats)
+    general_results = registry.dispatch(non_table_tasks, stats=stats)
 
-    # SkillResult → FieldValue 평탄화 (S7 미구현 상태의 임시 집계)
     return VLMResult(
         form_type=FormType.OTHER,
         processing_path=ProcessingPath.SKILL_REGISTRY,
         fields=_skill_results_to_fields(general_results + cell_results),
-        ...,
+        ...
     )
 ```
-
-- `SkillRegistry.dispatch()`는 태스크를 `DISPATCH_ORDER = [140, 560, 1120]` 버킷으로 나눠 순차 실행하며 `SkillDispatchStats`에 skill별 호출수·시간·배치 크기를 집계 (run_summary.json `skill_stats` 필드).
-- `_skill_results_to_fields`는 region_id를 field_key로 사용하는 임시 집계 — **S7 StructuredAggregator 구현 전까지의 플레이스홀더**이며, 구현 후 `official_document.json` 스키마에 맞춘 guided_json 출력으로 대체 예정.
-- S2/S3 미구현 상태에서는 `skill_registry._stub_text_skill`이 text/handwritten content_type을 모두 guided_json `{text, confidence}`로 처리.
 
 ---
 
@@ -707,7 +872,7 @@ def _process_other_document(self, layout, preprocessed, doc_id, ...):
 | 서명 (signature) | — | — | 이진 탐지, confidence만 |
 
 > **재시도 임계값**: 0.60 이하 → pixel_budget 상향 + 1회 재시도
-> **other 문서**: 군수 임계값 적용 안 함. 전체 신뢰도만 산출.
+> **template 출처 영역**: 동일 임계값 적용. 낮은 신뢰도가 반복되면 템플릿 좌표 재검토 신호.
 
 ### 6-2. P4 룰 검증 보정 (military 경로만)
 
@@ -718,13 +883,13 @@ def _process_other_document(self, layout, preprocessed, doc_id, ...):
 ### 6-3. NSN 패턴 강제 전략
 
 ```
-1순위: InstructionRouter 프롬프트 힌트 (기본 — xgrammar 유지)
+1순위: InstructionRouter 프롬프트 힌트 (기본)
    "NSN 코드는 NNNN-NN-NNN-NNNN 형식 13자리입니다."
 
-2순위: guided_regex (필드 단위 패턴 강제 필요 시)
+2순위: guided_regex
    extra_body={"guided_regex": r"\d{4}-\d{2}-\d{3}-\d{4}"}
 
-3순위: guidance 백엔드 전환 (절대적 강제 필요 시)
+3순위: guidance 백엔드 전환
    --structured-outputs-config '{"backend":"guidance"}'
 ```
 
@@ -771,16 +936,18 @@ class FallbackPolicy:
 
 ```
 [Pipeline 컨테이너 :8080]
+  ├── PdfAdapter                    (in-process) ← PDF 입력 시 P1 앞단 실행
   ├── P1 Preprocessor               (in-process)
   ├── P2 LayoutAnalyzer             HTTP POST → [Layout :8082]
   ├── P2.5-A LayoutPostProcessor    (in-process)
-  ├── SealPreprocessor              (in-process, 극좌표 변환)
+  ├── SealPreprocessor              (in-process)
   ├── P3-A FormClassifier           HTTP POST → [vLLM :8100]
   │
   ├── [military 경로]
-  │   ├── P2.5-B InstructionRouter  (in-process)
-  │   ├── P2.5-C ResolutionRouter   (in-process)
-  │   └── P3-B StructuredExtractor  HTTP POST → [vLLM :8100]
+  │   ├── P2.5-A.5 TemplateAugmentor  (in-process)
+  │   ├── P2.5-B InstructionRouter    (in-process)
+  │   ├── P2.5-C ResolutionRouter     (in-process)
+  │   └── P3-B StructuredExtractor   HTTP POST → [vLLM :8100]
   │
   ├── [other 경로]
   │   ├── Skill Registry            (in-process)
@@ -791,6 +958,7 @@ class FallbackPolicy:
   ├── P4 Validator                  (in-process)
   ├── P5 Serializer                 (in-process)
   └── P6 DBLoader                   (in-process, SQLite)
+       ↳ PDF 페이지: parent_doc_id, page_number, total_pages 컬럼 기록
 ```
 
 ---
@@ -800,13 +968,15 @@ class FallbackPolicy:
 - 모든 함수·클래스에 docstring 필수
 - 컴포넌트 간 데이터 전달은 `src/interfaces/types.py`의 dataclass 사용
 - 오케스트레이터만 컴포넌트를 순서대로 호출
-- **military 경로**: form_type 기반 InstructionRouter + guided JSON Schema 유지
+- **military 경로**: P3-A → TemplateAugmentor → InstructionRouter → ResolutionRouter → StructuredExtractor 순서 고정
 - **other 경로**: SKILL_ROUTING으로 라우팅, S7에서만 form_type 사용
-- 모든 VLM 호출에 `temperature=0.0` (결정론적 OCR)
+- 모든 VLM 호출에 `temperature=0.0`
 - `VLMResult.raw_json`은 DB 적재 제외
 - ResolutionRouter 배치 순서: `DISPATCH_ORDER = [140, 560, 1120]`
+- TemplateAugmentor: unknown form_type 수신 시 원본 반환 (예외 발생 금지)
+- TemplateAugmentor: `source="template"` 영역은 InstructionRouter에서 동일하게 처리
 - SealPreprocessor: 허프 실패 시 원본 크롭 반환 (예외 발생 금지)
-- TableExtractor: 항상 2패스. 패스1 완료 후 오케스트레이터가 패스2 태스크 생성
+- TableExtractor: 항상 2패스
 - Python 3.10+
 
 **모듈 책임 경계**:
@@ -814,12 +984,13 @@ class FallbackPolicy:
 | 모듈 | 책임 | 하지 않는 것 |
 |------|------|-------------|
 | `vlm_client.py` | vLLM HTTP 통신, base64 인코딩, logprobs 파싱 | 이미지 크롭, 도메인 코드 감지 |
+| `template_augmentor.py` | 서식 템플릿 로드, IoU 비교, bbox 병합 | VLM 통신, 크롭 |
 | `resolution_router.py` | bbox 크롭 + 패딩 + 48px 정렬 + 배치 그룹화 | VLM 통신 |
 | `structured_extractor.py` | military 배치 VLM 호출, 필드 추출, 재시도 | 이미지 크롭 |
 | `form_classifier.py` | 서식 분류 (military/other 분기) | 필드 추출, 크롭 |
 | `ocr_hint_provider.py` | PaddleOCR 선행 실행, 힌트 문자열 생성 | VLM 호출, 크롭 |
 | `seal_preprocessor.py` | HSV 분리 + 허프 탐지 + 극좌표 변환 | VLM 호출, 크롭 |
-| `skills/table_extractor.py` | 2패스 표 처리, 셀 태스크 반환 | VLM 직접 호출 (vlm_client 경유) |
+| `skills/table_extractor.py` | 2패스 표 처리, 셀 태스크 반환 | VLM 직접 호출 |
 | `skills/signature_detector.py` | 서명 이진 탐지만 | OCR, 텍스트 추출 |
 
 ---

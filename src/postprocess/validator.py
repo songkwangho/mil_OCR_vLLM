@@ -218,6 +218,84 @@ def _parse_date(s: str) -> Optional[datetime]:
     return None
 
 
+def _validate_equipment_checklist(raw_json: str) -> list[ValidationError]:
+    """CHK-001~004 — 전비품 확인서 점검표 전용 룰.
+
+    raw_json은 P3-B가 저장한 VLM 원본 JSON 문자열. checklist_items/writer 중첩 구조를 검증.
+    """
+    errors: list[ValidationError] = []
+    if not raw_json:
+        return errors
+    try:
+        import json as _json
+        data = _json.loads(raw_json)
+    except Exception:
+        return errors
+    if not isinstance(data, dict):
+        return errors
+
+    items = data.get("checklist_items")
+
+    # CHK-001: checklist_items 배열 길이 = 6
+    if not isinstance(items, list) or len(items) != 6:
+        actual_len = len(items) if isinstance(items, list) else 0
+        errors.append(ValidationError(
+            error_id="chk_001",
+            error_type=ValidationErrorType.MISSING_FIELD,
+            severity=Severity.HIGH,
+            field_ref="checklist_items",
+            expected="length=6",
+            actual=f"length={actual_len}",
+            message="CHK-001: checklist_items 배열 길이가 6이 아님",
+        ))
+    else:
+        # CHK-002: item_number 1~6 순차
+        numbers = [it.get("item_number") if isinstance(it, dict) else None for it in items]
+        if numbers != [1, 2, 3, 4, 5, 6]:
+            errors.append(ValidationError(
+                error_id="chk_002",
+                error_type=ValidationErrorType.FORMAT,
+                severity=Severity.HIGH,
+                field_ref="checklist_items[*].item_number",
+                expected="[1,2,3,4,5,6]",
+                actual=str(numbers),
+                message="CHK-002: item_number가 1~6 순서대로 존재하지 않음",
+            ))
+
+        # CHK-003: result ∈ {O, X, ?}
+        invalid_results = [
+            (i, it.get("result") if isinstance(it, dict) else None)
+            for i, it in enumerate(items, 1)
+            if not (isinstance(it, dict) and it.get("result") in ("O", "X", "?"))
+        ]
+        for item_idx, bad in invalid_results:
+            errors.append(ValidationError(
+                error_id=f"chk_003_{item_idx}",
+                error_type=ValidationErrorType.FORMAT,
+                severity=Severity.HIGH,
+                field_ref=f"checklist_items[{item_idx-1}].result",
+                expected="O|X|?",
+                actual=str(bad),
+                message=f"CHK-003: 항목 {item_idx} 결과가 O/X/? 중 하나가 아님",
+            ))
+
+    # CHK-004: writer.name 비어있지 않음
+    writer = data.get("writer")
+    writer_name = writer.get("name") if isinstance(writer, dict) else None
+    if not (isinstance(writer_name, str) and writer_name.strip()):
+        errors.append(ValidationError(
+            error_id="chk_004",
+            error_type=ValidationErrorType.MISSING_FIELD,
+            severity=Severity.MEDIUM,
+            field_ref="writer.name",
+            expected="non-empty string",
+            actual=str(writer_name),
+            message="CHK-004: writer.name이 비어있음",
+        ))
+
+    return errors
+
+
 def _validate_missing_fields(
     fields: list[FieldValue],
     form_type: str,
@@ -299,6 +377,10 @@ class P4Validator:
             all_errors.extend(_validate_code_format(fields))
             all_errors.extend(_validate_date_logic(fields))
             all_errors.extend(_validate_missing_fields(fields, form_type))
+            if form_type == "equipment_checklist":
+                all_errors.extend(
+                    _validate_equipment_checklist(vlm_result.raw_json)
+                )
 
         # error_id 재번호 부여
         for i, err in enumerate(all_errors):

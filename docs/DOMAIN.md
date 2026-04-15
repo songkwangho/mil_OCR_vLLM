@@ -15,6 +15,7 @@
 | `inventory_sheet` | 물자현황표 | military | 조건부 | |
 | `handover_doc` | 인수인계서 | military | 조건부 | |
 | `inspection_report` | 검사보고서 | military | 조건부 | |
+| `equipment_checklist` | 전비품 확인서 작성 점검표 | military | 조건부 | O/X 점검결과 6항목 추출 |
 | `unknown` | 군수 서식 유형 불명 | military | 조건부 | `_fallback.json` 사용 |
 | `other` | 군수 서식 아님 | other → Skill Registry | **없음** | 범용 OCR, 군수 룰 미적용 |
 
@@ -93,6 +94,28 @@ P5 직렬화 → P6 DB 적재
 | `date` | date | 인수인계 일자 |
 | `items` | text | 인수인계 항목 목록 |
 
+### 2-5. 전비품 확인서 작성 점검표 (equipment_checklist)
+
+**서식 식별자**: 별지 제3-2호 서식
+
+| 필드명 | 데이터 타입 | 설명 | 검증 룰 |
+|--------|-----------|------|---------|
+| `document_date` | text | 작성 일자 수기 문자열 | "YYYY년 MM월 DD일" 형태 권장 |
+| `checklist_items` | array | 점검항목 1~6번 결과 배열 | 길이 = 6 (CHK-001) |
+| `checklist_items[].item_number` | integer | 항목 번호 (1~6) | 1~6 순서 존재 (CHK-002) |
+| `checklist_items[].result` | enum | 점검결과 | "O" / "X" / "?" (CHK-003) |
+| `checklist_items[].result_confidence` | number | 항목별 인식 신뢰도 | 0.0~1.0 |
+| `writer.team` | text | 소속 팀명 | — |
+| `writer.rank` | text | 직급/계급 | — |
+| `writer.name` | text | 성명 | 비어있지 않음 (CHK-004) |
+| `writer.signature_present` | boolean | 서명 존재 여부 | 이진 탐지 |
+| `form_identifier` | text | 서식 식별자 | 예: "별지 제3-2호 서식" |
+
+**점검결과 값 의미**:
+- `"O"` — 이상없음 / 해당함 (원형 수기 표시)
+- `"X"` — 해당없음 / 부적합 (X자 수기 표시)
+- `"?"` — 판독불가 (검토 큐 적재 대상)
+
 ---
 
 ## 3. 코드 체계
@@ -122,9 +145,10 @@ src/domain/schemas/
 │   ├── inventory_sheet.json
 │   ├── handover_doc.json
 │   ├── inspection_report.json
+│   ├── equipment_checklist.json ← 전비품 확인서 작성 점검표 (신규)
 │   ├── _fallback.json           ← unknown (군수 서식 유형 불명)
 │   ├── _general.json            ← other 범용 (기존 단순 key-value)
-│   └── official_document.json   ← other 공문서 전용 (신규)
+│   └── official_document.json   ← other 공문서 전용
 └── v2/                          ← 서식 개정 시
     └── supply_request.json
 
@@ -135,20 +159,22 @@ src/domain/schema_registry.py    ← form_type + version → Schema 조회
 
 ### 4-2. CoT analysis 필드 구조 (군수 서식 전용)
 
-모든 군수 서식 스키마 최상단에 `analysis` 필드를 배치하고 `required`에 포함합니다. 다른 필드는 hallucination 억제를 위해 required에 넣지 않는 것이 현재 기본 정책.
+모든 군수 서식 스키마 최상단에 `analysis` 필드를 배치합니다.
 
 ```json
 {
+  "type": "object",
   "properties": {
-    "analysis": {"type": "string", "description": "영역 텍스트 품질·모호 문자 30~50 토큰"},
+    "analysis": {
+      "type": "string",
+      "description": "이미지 영역 텍스트 품질, 레이아웃, 모호한 문자를 30~50 토큰으로 간략히 기술"
+    },
     "unit_code": {"type": "string"},
     "request_date": {"type": "string"}
   },
-  "required": ["analysis"]
+  "required": ["analysis", "unit_code", "request_date"]
 }
 ```
-
-날짜·부대코드·NSN 등은 **반드시 `string`** 으로 선언해 앞자리 0 유실을 방지합니다. 수량은 `integer`.
 
 **효과**: 0-shot 대비 hallucination율 ~100% → ~1.8% 감소 (IEEE 2025).
 
@@ -280,6 +306,7 @@ configs/instruction_examples/
 ├── inventory_sheet.yaml
 ├── handover_doc.yaml
 ├── inspection_report.yaml
+├── equipment_checklist.yaml   ← 신규
 └── _fallback.yaml
 ```
 
@@ -313,6 +340,10 @@ example_response: |
 | CODE-001 | supply_request | NSN 형식 NNNN-NN-NNN-NNNN | 신뢰도 -0.15 |
 | CODE-002 | 전체 | K-NSN 형식 KN-NNNNN-NNNN | 신뢰도 -0.15 |
 | MISS-001 | 전체 | 필수 필드 누락 | severity=HIGH |
+| CHK-001 | equipment_checklist | `checklist_items` 배열 길이 = 6 | severity=HIGH, 신뢰도 -0.20 |
+| CHK-002 | equipment_checklist | `item_number` 값이 1~6 순서대로 존재 | severity=HIGH, 신뢰도 -0.10 |
+| CHK-003 | equipment_checklist | `result` 값이 "O" / "X" / "?" 중 하나 | severity=HIGH, 신뢰도 -0.15 |
+| CHK-004 | equipment_checklist | `writer.name` 비어있지 않음 | severity=MEDIUM |
 
 ### 6-2. other 경로 룰
 

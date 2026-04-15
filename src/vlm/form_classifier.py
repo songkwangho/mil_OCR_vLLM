@@ -23,6 +23,21 @@ from src.interfaces.enums import FormType
 logger = logging.getLogger(__name__)
 
 
+FORM_TYPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "form_type": {
+            "type": "string",
+            "enum": [ft.value for ft in FormType],
+        },
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "form_identifier": {"type": "string"},
+    },
+    "required": ["form_type", "confidence"],
+    "additionalProperties": False,
+}
+
+
 @dataclass
 class FormClassifierConfig:
     """P3-A FormClassifier 설정."""
@@ -41,16 +56,21 @@ class FormClassifierConfig:
 
     # 분류 instruction (other 분기 포함)
     classify_instruction: str = (
-        "이 문서의 서식 유형을 분류하세요. "
-        "군수(military) 서식이면 해당 유형을, 군수 서식이 아닌 일반 문서는 'other'로 분류하세요.\n"
-        "다음 중 하나로 답하세요:\n"
+        "이 문서의 서식 유형을 분류하고 서식 식별자(있는 경우)를 함께 출력하세요.\n"
+        "form_type 후보:\n"
         "- supply_request: 보급청구서\n"
         "- maintenance_record: 정비기록서\n"
         "- inventory_sheet: 물자현황표\n"
         "- handover_doc: 인수인계서\n"
         "- inspection_report: 검사보고서\n"
+        "- equipment_checklist: 전비품 확인서 작성 점검표 (제목에 '전비품 확인서 작성 점검표' "
+        "  또는 '별지 제3-2호'가 있고 O/X 점검결과 열이 있는 서식)\n"
         "- unknown: 군수 서식이지만 유형 불명\n"
-        "- other: 군수 서식이 아닌 일반 문서 (공문서, 지시문, 개인 서류 등)"
+        "- other: 군수 서식이 아닌 일반 문서 (공문서, 지시문, 개인 서류 등)\n\n"
+        "form_identifier: 문서 상단의 서식 식별자 문자열 (예: '별지 제3-2호 서식'). "
+        "식별자가 없으면 빈 문자열.\n\n"
+        "JSON 형식으로 출력: "
+        '{"form_type": "...", "confidence": 0.0~1.0, "form_identifier": "..."}'
     )
 
 
@@ -83,15 +103,12 @@ class FormClassifier:
         self,
         image_rgb: np.ndarray,
         warnings: Optional[list[str]] = None,
-    ) -> tuple[FormType, float]:
+    ) -> tuple[FormType, float, Optional[str]]:
         """전체 페이지 이미지로 서식 유형 분류.
 
-        Args:
-            image_rgb: H×W×3 uint8 RGB 이미지
-            warnings: 경고 수집 리스트 (None이면 무시)
-
         Returns:
-            (form_type, confidence)
+            (form_type, confidence, form_identifier).
+            form_identifier는 문서 상단 서식 식별자(예: "별지 제3-2호 서식") 또는 None.
         """
         if warnings is None:
             warnings = []
@@ -105,28 +122,34 @@ class FormClassifier:
         try:
             response = self._call_classify(b64)
 
-            text = response.get("text", "").strip().lower()
+            text = response.get("text", "") or ""
             logprobs = response.get("logprobs", [])
 
-            # form_type 파싱
-            valid_types = {ft.value for ft in FormType}
-            form_type_str = "unknown"
-            for vt in valid_types:
-                if vt in text:
-                    form_type_str = vt
-                    break
+            form_type_str, conf_from_json, form_identifier = _parse_form_json(text)
 
-            # 분류 신뢰도
-            confidence = 0.5
-            if logprobs:
+            # JSON 파싱 실패 시 기존 문자열 매칭으로 폴백
+            if form_type_str is None:
+                lowered = text.strip().lower()
+                valid_types = {ft.value for ft in FormType}
+                form_type_str = "unknown"
+                for vt in valid_types:
+                    if vt in lowered:
+                        form_type_str = vt
+                        break
+
+            # 신뢰도: JSON 값 > logprobs 기반 기하평균
+            if conf_from_json is not None:
+                confidence = round(max(0.0, min(1.0, conf_from_json)), 4)
+            elif logprobs:
                 import math
                 all_lps = [
                     lp.get("logprob", 0.0) if isinstance(lp, dict) else float(lp)
                     for lp in logprobs
                 ]
-                if all_lps:
-                    mean_lp = sum(all_lps) / len(all_lps)
-                    confidence = round(min(1.0, max(0.0, math.exp(max(mean_lp, -20.0)))), 4)
+                mean_lp = sum(all_lps) / len(all_lps) if all_lps else -1.0
+                confidence = round(min(1.0, max(0.0, math.exp(max(mean_lp, -20.0)))), 4)
+            else:
+                confidence = 0.5
 
             try:
                 form_type = FormType(form_type_str)
@@ -135,15 +158,15 @@ class FormClassifier:
                 warnings.append(f"Unknown form_type: {form_type_str} → UNKNOWN")
 
             logger.info(
-                "[P3-A] 서식 분류: %s (conf=%.4f)",
-                form_type.value, confidence,
+                "[P3-A] 서식 분류: %s (conf=%.4f, identifier=%r)",
+                form_type.value, confidence, form_identifier,
             )
-            return form_type, confidence
+            return form_type, confidence, form_identifier
 
         except Exception as e:
             warnings.append(f"FormClassifier failed: {e}")
             logger.error("[P3-A] 서식 분류 실패: %s", e)
-            return FormType.UNKNOWN, 0.0
+            return FormType.UNKNOWN, 0.0, None
 
     def _call_classify(self, image_b64: str) -> dict:
         """vLLM 서식 분류 호출."""
@@ -168,6 +191,7 @@ class FormClassifier:
         extra_body = {
             "logprobs": True,
             "top_logprobs": 5,
+            "guided_json": FORM_TYPE_SCHEMA,
         }
 
         # pixel_budget 제한
@@ -199,3 +223,26 @@ class FormClassifier:
                     })
 
         return {"text": text, "logprobs": logprobs_data}
+
+
+def _parse_form_json(raw: str) -> tuple[Optional[str], Optional[float], Optional[str]]:
+    """VLM 응답 → (form_type, confidence, form_identifier). 실패 시 (None, None, None)."""
+    if not raw:
+        return None, None, None
+    try:
+        from src.vlm.skills.seal_reader import _loads_relaxed
+        data = _loads_relaxed(raw)
+    except Exception:
+        data = None
+    if not isinstance(data, dict):
+        return None, None, None
+    ft = data.get("form_type")
+    conf = data.get("confidence")
+    fid = data.get("form_identifier") or None
+    try:
+        conf = float(conf) if conf is not None else None
+    except (TypeError, ValueError):
+        conf = None
+    if isinstance(fid, str) and not fid.strip():
+        fid = None
+    return (str(ft) if ft else None), conf, fid

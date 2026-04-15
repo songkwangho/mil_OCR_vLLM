@@ -1,0 +1,80 @@
+# configs/form_templates/equipment_checklist.yaml
+#
+# 전비품 확인서 작성 점검표 (별지 제3-2호 서식)
+#
+# 좌표 기준:
+#   - P1 Deskew + DPI 300 정규화 이후 이미지
+#   - A4 세로 스캔 기준: 2480×3508 px
+#   - 실측 샘플: 전비품_확인서_작성_점검표.pdf (2026-04-15)
+#
+# 설계 원칙:
+#   - 점검내용 텍스트 칸(1~6번 질문)은 지정하지 않음
+#     → 추출 대상 아님 + PP-DocLayout이 인쇄 텍스트 영역으로 정상 탐지
+#   - 수기 기입란(O/X 결과, 날짜, 작성자)만 지정
+#     → 빈 셀 특성상 PP-DocLayout 누락 가능성 높음
+#   - 동적 요소(서명)는 writer_block에 포함하여 단일 박스로 처리
+#     → 작성자마다 서명 위치가 좌/우로 다를 수 있어 넓은 박스로 커버
+
+form_type: equipment_checklist
+version: "1.0"
+effective_date: "2026-01-01"
+page_size: [2480, 3508]
+description: "전비품 확인서 작성 점검표 (별지 제3-2호 서식)"
+
+# 참고 좌표 (TemplateAugmentor 병합 대상 아님 — 서식 구조 문서화 목적)
+reference_regions:
+  header_title:
+    bbox: {x1: 812, y1: 440, x2: 1676, y2: 532}
+    description: "제목 인쇄 텍스트 (전비품 확인서 작성 점검표)"
+  table_full:
+    bbox: {x1: 408, y1: 748, x2: 2280, y2: 2716}
+    description: "점검표 전체 테이블 경계"
+
+# TemplateAugmentor 병합 대상 필드
+fields:
+  # ── 날짜 ─────────────────────────────────────────
+  - field_key: document_date
+    region_type: handwritten_field
+    bbox: {x1: 1812, y1: 636, x2: 2272, y2: 732}
+    description: "작성 일자 수기란 (예: 2026년 4월 15일)"
+
+  # ── 점검결과 O/X 칸 ──────────────────────────────
+  # 헤더행(y=748~892) 제외, 항목 1번부터 시작
+  - field_key: result_item_1
+    region_type: handwritten_field
+    bbox: {x1: 2036, y1: 892, x2: 2260, y2: 1188}
+    description: "점검항목 1번 결과 (O/X)"
+
+  - field_key: result_item_2
+    region_type: handwritten_field
+    bbox: {x1: 2036, y1: 1188, x2: 2260, y2: 1484}
+    description: "점검항목 2번 결과 (O/X)"
+
+  - field_key: result_item_3
+    region_type: handwritten_field
+    bbox: {x1: 2032, y1: 1488, x2: 2256, y2: 1788}
+    description: "점검항목 3번 결과 (O/X)"
+
+  - field_key: result_item_4
+    region_type: handwritten_field
+    bbox: {x1: 2036, y1: 1800, x2: 2256, y2: 2088}
+    description: "점검항목 4번 결과 (O/X)"
+
+  - field_key: result_item_5
+    region_type: handwritten_field
+    bbox: {x1: 2032, y1: 2092, x2: 2256, y2: 2396}
+    description: "점검항목 5번 결과 (O/X)"
+
+  - field_key: result_item_6
+    region_type: handwritten_field
+    bbox: {x1: 2032, y1: 2400, x2: 2256, y2: 2696}
+    description: "점검항목 6번 결과 (O/X)"
+
+  # ── 작성자 영역 ───────────────────────────────────
+  # 팀명 / 직급 / 성명 / 서명을 단일 박스로 통합
+  # 이유: 작성자마다 각 항목을 레이블 좌측 또는 우측에 기입하는 위치가 다름
+  #       → 세분화된 박스보다 하나의 넓은 박스로 전체 커버 후 VLM이 파싱
+  - field_key: writer_block
+    region_type: handwritten_field
+    bbox: {x1: 304, y1: 2748, x2: 2292, y2: 2872}
+    description: "작성자 전체 수기란 (팀명·직급·성명·서명 포함)"

@@ -71,6 +71,9 @@ __all__ = [
     "ValidatedResult",
     # P5 직렬화 / P6 DB 적재
     "PipelineOutput",
+    # PDF 어댑터
+    "PageImage",
+    "PdfDocumentResult",
     # 검토 큐
     "CorrectedField",
     "ReviewQueueItem",
@@ -423,6 +426,34 @@ class PipelineOutput:
 
 
 # ═══════════════════════════════════════════════
+#  PDF 어댑터 (pdf_adapter_design.md §3)
+# ═══════════════════════════════════════════════
+
+@dataclass
+class PageImage:
+    """PdfAdapter가 반환하는 단일 페이지 이미지."""
+    doc_id: str                  # 원본 PDF doc_id (페이지 식별자는 page_number로 구분)
+    page_number: int             # 1-based
+    total_pages: int
+    image_array: np.ndarray      # H×W×3 uint8 RGB
+    render_dpi: int
+    original_width_pt: float     # PDF 원본 너비 (pt = 1/72 inch)
+    original_height_pt: float
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PdfDocumentResult:
+    """멀티페이지 PDF 처리 결과 — 페이지별 PipelineOutput 집합."""
+    doc_id: str                          # 원본 PDF doc_id
+    total_pages: int
+    pages: list["PipelineOutput"]        # doc_id = "{원본}_p{N:02d}"
+    overall_status: "PipelineStatus"
+    processing_ms: float = 0.0
+    warnings: list[str] = field(default_factory=list)
+
+
+# ═══════════════════════════════════════════════
 #  검토 큐
 # ═══════════════════════════════════════════════
 
@@ -456,6 +487,11 @@ class ReviewQueueItem:
     priority: ReviewPriority
     reason: ReviewReason
     processing_path: ProcessingPath   # vlm, fallback, none
+
+    # PDF 멀티페이지 추적 — 단일 이미지 입력은 모두 None
+    parent_doc_id: Optional[str] = None
+    page_number: Optional[int] = None
+    total_pages: Optional[int] = None
 
     # 자동 처리 결과 (있는 경우)
     validated_result: Optional[ValidatedResult] = None

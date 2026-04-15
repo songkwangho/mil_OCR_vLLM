@@ -62,6 +62,37 @@ docker run --rm --gpus device=0 --network host \
 | T9 | 결재란 2패스 처리 | S5 패스1 구조 추출 → 패스2 셀 내용 추출, 오케스트레이터 태스크 생성 흐름 |
 | T10 | 서명 탐지 | 서명 있는 셀 → `signature_present: true`, 빈 셀 → `false` |
 
+### PDF 어댑터
+
+| # | 케이스 | 검증 포인트 |
+|---|--------|-----------|
+| T11 | PDF 단일 페이지 입력 | PdfAdapter 렌더링 → `PageImage` 생성 → 기존 파이프라인 정상 통과 |
+| T12 | PDF 멀티페이지 입력 | 페이지별 독립 처리, `doc_id` = `{원본}_p{N:02d}`, `PdfDocumentResult` 집계 |
+| T13 | PDF 일부 페이지 실패 | `overall_status=partial`, 실패 페이지만 검토 큐 적재, 성공 페이지 DB 기록 |
+| T14 | 암호화/손상 PDF | `PdfAdapterError` → `PdfDocumentResult(status=failed)`, 검토 큐 적재 |
+| T15 | PDF → DB 페이지 추적 | `parent_doc_id`, `page_number`, `total_pages` 컬럼 기록 확인 |
+
+**T12 세부 검증**:
+- `pdf_summary.json` 생성 확인 (`{doc_id}/pdf_summary.json`)
+- 각 페이지 결과 디렉토리 `p01/`, `p02/` 구조 확인
+- `review_queue_id` 가 페이지 단위로 발급되는지 확인
+
+**T13 세부 검증**:
+- `PdfDocumentResult.overall_status = "partial"`
+- 실패 페이지 `ReviewQueueItem.parent_doc_id` = 원본 PDF doc_id
+- 성공 페이지 `PipelineOutput.status = "success"` + DB 레코드 존재 확인
+
+### 전비품 확인서 작성 점검표 (equipment_checklist)
+
+| # | 케이스 | 검증 포인트 |
+|---|--------|-----------|
+| T_chk1 | PDF 정상 입력 (1페이지) | `form_type=equipment_checklist`, O/X 6항목 추출, `document_date`, `writer_block` |
+| T_chk2 | TemplateAugmentor 적용 확인 | PP-DocLayout 누락 영역 보완, `augmented_count > 0`, `source="template"` 영역 확인 |
+| T_chk3 | form_identifier 버전 분기 | FormClassifier가 `"별지 제3-2호 서식"` 추출 → TemplateAugmentor v1.0 선택 |
+| T_chk4 | O/X 판독 경계 케이스 | 흐릿한 O → `result_confidence < 0.75` → OCR 힌트 재시도 트리거 |
+| T_chk5 | CHK-001 트리거 | `checklist_items` 길이 ≠ 6 → `severity=HIGH` → 검토 큐 적재 |
+| T_chk6 | 서명 탐지 | `writer.signature_present = true` (서명 있음) / `false` (없음) 이진 분류 |
+
 **T8 세부 검증**:
 - 허프 성공 케이스: `unwrapped=true`, VLM이 직선화된 이미지 수신 확인
 - 허프 실패 케이스: `unwrapped=false`, context_hint 포함 원본 크롭 수신 확인
@@ -94,9 +125,11 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
     │   ├── result.json           ← LayoutResult (removed_count, merged_count)
     │   └── layout_visualization.png
     ├── P3A/
-    │   └── result.json           ← form_type, form_confidence
+    │   └── result.json           ← form_type, form_confidence, form_identifier
     │
     ├── [military 경로]
+    │   ├── P2.5A5/
+    │   │   └── result.json       ← augmented_count, 추가된 template 영역 목록
     │   ├── P2.5B/
     │   │   └── result.json       ← {region_id → InstructionSpec}
     │   ├── P2.5C/
@@ -138,6 +171,36 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 2. S5_pass1/result.json → 결재란 셀 구조와 content_type 정확도
 3. S2_S3_S4_S6/seal/unwrapped.png → 허프 직선화 품질 확인
 4. S7/result.json → official_document.json 스키마 준수 + low_confidence_fields
+
+**PDF 입력 시 추가 저장 구조**:
+
+```
+data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
+└── {pdf_doc_id}/                      ← 원본 PDF 문서 ID
+    ├── pdf_summary.json               ← 전체 페이지 집계
+    │     {
+    │       "doc_id": "전비품확인서_001",
+    │       "total_pages": 2,
+    │       "overall_status": "partial",
+    │       "pages": [
+    │         {"page": 1, "doc_id": "전비품확인서_001_p01", "status": "success"},
+    │         {"page": 2, "doc_id": "전비품확인서_001_p02", "status": "review"}
+    │       ]
+    │     }
+    ├── p01/                           ← 페이지별 기존 구조 그대로
+    │   ├── P1/, P2/, P2.5A/, P3A/
+    │   ├── [military] P2.5A5/, P2.5B/, P2.5C/, P3B/
+    │   └── P4/, P5/, P6/
+    └── p02/
+        └── (동일 구조)
+```
+
+**디버깅 흐름 (PDF 입력)**:
+
+1. `pdf_summary.json` → `overall_status` 및 페이지별 성공/실패 분포 확인
+2. 실패 페이지 `p0N/P3A/result.json` → form_type, form_identifier 정상 추출 여부
+3. `p0N/P2.5A5/result.json` → TemplateAugmentor augmented_count 및 추가 영역 확인
+4. `review_queue.db` → 실패 페이지 큐 항목의 `parent_doc_id`, `page_number` 기록 확인
 
 ---
 
@@ -199,6 +262,45 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
           "detected": 2
         }
       }
+    },
+    {
+      "doc_id": "전비품확인서_001",
+      "status": "partial",
+      "processing_path": "pdf",
+      "form_type": null,
+      "total_ms": 9840.2,
+      "total_pages": 1,
+      "pdf_pages": [
+        {
+          "doc_id": "전비품확인서_001_p01",
+          "status": "success",
+          "processing_path": "vlm",
+          "form_type": "equipment_checklist",
+          "form_identifier": "별지 제3-2호 서식",
+          "total_ms": 9620.5,
+          "timings": {
+            "pdf_render": 210.3,
+            "P1": 280.1, "P2": 52.4, "P2_5A": 11.2,
+            "P3A": 430.8,
+            "P2_5A5": 3.1,
+            "P2_5B": 6.2, "P2_5C": 9.1,
+            "P3B": 8310.4, "P4": 4.2, "P5": 3.8, "P6": 19.2
+          },
+          "template_augmentor": {
+            "augmented_count": 6,
+            "version_selected": "1.0",
+            "form_identifier_matched": "별지 제3-2호 서식"
+          },
+          "p3b_batches": [
+            {"pixel_budget": 1120, "region_count": 7, "ms": 8310.4}
+          ],
+          "retry_stats": {
+            "retry_count": 1,
+            "retried_fields": ["result_item_3"],
+            "retry_ms": 980.1
+          }
+        }
+      ]
     }
   ]
 }
@@ -217,10 +319,13 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 7. **[other] Skill 실행 결과**: S5 패스1 셀 구조, SealPreprocessor 허프 성공/실패, 각 배치 처리 시간
 8. **P4 검증 결과**: overall_confidence, 오류 수, 검토 큐 적재 여부
 9. **실패 시**: 실패 단계, 에러 메시지, 스택 트레이스
-10. **문서별 요약**:
-    - military: `[PASS/FAIL] {doc_id} form={form_type} total=Xms P3B=Xms retry={N}건`
+10. **[military] TemplateAugmentor 결과**: augmented_count, version_selected, form_identifier_matched
+11. **[PDF] 페이지별 처리**: `[PDF] {doc_id} {N}페이지 렌더링 완료 (Xms)`, 페이지별 form_type
+12. **문서별 요약**:
+    - military: `[PASS/FAIL] {doc_id} form={form_type} total=Xms P3B=Xms retry={N}건 aug={N}건`
     - other: `[PASS/FAIL] {doc_id} form=other total=Xms hough={success/fail} sig={N}건`
-11. **전체 요약**: 처리 건수, military/other/review_queue 분포, 평균 처리 시간
+    - pdf: `[PASS/FAIL/PARTIAL] {doc_id} pages={total} success={N} review={N} failed={N} total=Xms`
+13. **전체 요약**: 처리 건수, military/other/pdf/review_queue 분포, 평균 처리 시간
 
 ---
 
@@ -228,38 +333,47 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 
 | 일자 | 환경 | 케이스 | 결과 | 비고 |
 |------|------|--------|------|------|
-| 2026-04-08 | H100 / vLLM v0.19.0 | T1 기본 경로 | 3건 PASS | Phase 1 초기 통합 |
-| 2026-04-10 21:09 | H100 / vLLM v0.19.0 | T1 48px+재시도+OCR힌트 | 3건 PASS, 28.1s | guided_json 미enforce, JSON parse warning 152건 |
-| 2026-04-14 00:41 | 동일 | T1 (xgrammar 플래그 인식 실패) | 3건 PASS, other 경로 | vLLM 구옵션 기동 실패 발견 |
-| **2026-04-14 01:31** | H100 / vLLM v0.19.0 (`--structured-outputs-config` 적용) | **T1 + T4 (other/skill_registry)** | **3건 PASS, errors=0** | JSON parse warning 0, `skill_stats` 기록, 총 26.7~47.8s |
-| (예정) | — | T2, T3 | — | Fusion ON DPI 분기 |
+| 2026-04-08 | H100 / vLLM v0.19.0 | T1 기본 경로 | 3건 PASS | Phase 1 통합 테스트 |
+| (예정) | vLLM 재기동 후 | T1 | — | guided_json enforce 검증 |
+| (예정) | — | T2, T3 | — | Fusion ON DPI 분기 검증 |
+| (예정) | — | T4 | — | Other → Skill Registry 경로 |
 | (예정) | — | T5 | — | Fallback 전환 |
 | (예정) | — | T7 | — | OCR-augmented 힌트 효과 |
 | (예정) | — | T8 | — | 인장 인식, 허프 성공/실패 분기 |
-| (예정) | — | T9 | — | 결재란 pass2 셀 실행 (현재 pass2_tasks=0 관찰) |
+| (예정) | — | T9 | — | 결재란 2패스 처리 |
 | (예정) | — | T10 | — | 서명 탐지 이진 분류 |
+| (예정) | — | T11~T15 | — | PDF 어댑터 단일/멀티페이지/실패 케이스 |
+| (예정) | — | T_chk1~T_chk6 | — | 전비품 확인서 작성 점검표 전체 검증 |
 
-### 6-1. 2026-04-14 01:31 상세
+### 6-1. Phase 1-E 잔존 이슈 (통합 테스트에서 발견)
 
-3문서 모두 `status=other_document`, `processing_path=skill_registry`, `errors=0`:
+| 우선순위 | 이슈 | 조치 | 상태 |
+|---------|------|------|------|
+| 🔴 즉시 | vLLM 재기동 — guided_json enforce 미적용 | `docker compose restart vllm-server` | 미완 |
+| 🔴 즉시 | PaddleOCR 가중치 폐쇄망 배치 | `Dockerfile.pipeline` COPY 추가 | 미완 |
+| 🟡 샘플 확보 후 | 재시도 경로 실검증 | 군수 서식 샘플 확보 후 T7 실행 | 대기 |
+| 🟡 구현 후 | Skill Registry end-to-end 검증 | T4/T8/T9/T10 실행 | 대기 |
+| 🟢 선택 | vLLM 변동성 N=3 반복 측정 | 재기동 후 동일 조건 3회 | 미완 |
 
-| 문서 | total | P1 | P2 | P3A | SkillRegistry | S2 호출수 | pass1_tables | pass2_tasks |
-|------|-------|------|------|------|----------------|-----------|--------------|-------------|
-| 국회공문서 | 47.8s | 753ms | 6.7s | 11.8s | 28.5s | 16 | 2 | 0 |
-| 전역지원서_1 | 7.5s | 53ms | 99ms | 143ms | 7.2s | 7 | 1 | 0 |
-| 전역지원서_2 | 10.8s | 58ms | 122ms | 143ms | 10.5s | 6 | 1 | 0 |
+### 6-2. 향후 계획 타당성 및 문제점
 
-결과 경로: [data/pipeline_outputs/20260414_013123/](../data/pipeline_outputs/20260414_013123/)
+**[R1] vLLM 최적화 옵션 재기동 필요**
+docker-compose.yml 수정 완료, 컨테이너 재기동 미수행. `docker compose restart vllm-server` 후 region_traces.json의 raw_response가 JSON 형식으로 변화하는지 확인.
 
-- `pass2_tasks=0`: S5 pass1이 `table_type=other, cells=[]`만 반환. 스키마 호환 또는 표 판정 기준 재검토 필요.
-- 첫 문서의 P2/P3A 소요가 큰 것은 PP-DocLayoutV3 + vLLM 웜업. 2번째부터 ~7~10s로 정상화.
+**[R2] SealPreprocessor 허프 실패율 미측정**
+T8에서 허프 성공/실패 분포를 측정하고, 실패율이 30%+ 이면 극좌표 변환을 선택적 최적화로 격하하고 원본 크롭 직접 VLM 전달 방식을 기본으로 변경.
 
-### 6-2. 검증 필요한 리스크
+**[R3] S3 HandwritingReader 수기 인식 실측치 부재**
+국회공문서 샘플(또는 공개 의안 PDF 기반 합성 샘플) 10~20장으로 수기 인식률 실측 후 신뢰도 임계값 0.75를 현실화.
 
-| # | 이슈 | 보완 계획 |
-|---|------|---------|
-| R1 | SealPreprocessor 허프 실패율 미측정 | T8에서 성공/실패 분포 수집, 실패율 30%+ 시 휴리스틱 격하 |
-| R2 | S3 HandwritingReader 한국어 수기 실측치 부재 | 합성 샘플 10~20장으로 0-shot 인식률 측정 후 임계값 보정 |
-| R3 | pass2 태스크 0건 문제 | S5 pass1 출력 분석, 실제 표(결재란 등) 샘플로 재현성 검증 |
-| R4 | vLLM 출력 변동성 기준치 미수립 | 동일 문서 N=3 반복 측정 |
-| R5 | PaddleOCR 가중치 폐쇄망 배치 | `Dockerfile.pipeline`에 `~/.paddlex/official_models/` COPY 추가 |
+**[R4] 처리 시간 10초 이내 마진**
+other 경로 예상 처리 시간: S1(0.5s) + S5패스1(1s) + S6배치(0.5s) + S2배치(1s) + S3/S4/S5패스2배치(3s) + S7(1.5s) = ~7.5s. Mode B 트리거 시 추가 VLM 호출로 10초 초과 가능. T4 실측 필요.
+
+**[R5] PDF 렌더링 메모리 사용량**
+멀티페이지 PDF 처리 시 PdfAdapter가 모든 페이지를 메모리에 렌더링 후 순차 처리. 100페이지 PDF의 경우 A4 300dpi 기준 약 2480×3508×3 bytes × 100 = ~2.4GB 메모리 필요. 대용량 PDF 처리 시 페이지별 스트리밍 렌더링으로 전환 필요 여부를 T12 실측 후 판단.
+
+**[R6] equipment_checklist O/X 판독 오인식**
+수기 O와 반쯤 열린 O(미완성 원)의 구분이 핵심 리스크. T_chk4에서 경계 케이스 집계 후 `result_confidence` 임계값(현재 0.75) 조정. OCR-augmented 힌트가 O/X 단일 문자 인식에 효과적인지도 함께 측정.
+
+**[R7] form_identifier 미추출 케이스**
+별지 번호가 문서 상단에서 잘리거나 인쇄 품질이 낮으면 FormClassifier가 `form_identifier=null`을 반환. TemplateAugmentor가 첫 번째 버전(v1.0)으로 폴백하므로 현재 버전에서는 문제없으나, 서식 개정 이후 버전이 2개 이상이 되면 잘못된 버전이 선택될 수 있음. T_chk3에서 form_identifier 추출 성공률 측정.
