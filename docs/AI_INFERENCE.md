@@ -281,13 +281,23 @@ def align_to_48(image: np.ndarray) -> np.ndarray:
 
 ```python
 CROP_PADDING_RATIO = {
-    "table":             0.05,  # 열/행 헤더 포함
+    "table":             0.02,  # 열/행 헤더만 (큰 bbox에서 인접 영역 침범 방지)
     "handwritten_field": 0.15,  # 양식 레이블·경계선 포함 (문맥 중요)
     "seal":              0.10,
     "text":              0.05,
     "default":           0.05,
 }
+# 비율 × 면적이 폭주하는 것을 막기 위한 영역 타입별 절대 상한
+CROP_PADDING_MAX_PX = {
+    "table": 30, "figure": 30, "chart": 30,
+    "handwritten_field": 24, "seal": 40, "text": 16,
+    "header": 16, "footer": 16, "signature": 24,
+    "default": 24,
+}
+# 적용식: pad = min(MAX_PX[rt], max(MIN_PX, int(bbox_w × RATIO[rt])))
 ```
+
+> **사례**: A4 300dpi 표 영역(1854×1950)에 5% 비율만 적용하면 pad=92px로 인접 writer 영역(y=2748~)을 침범하여 OCR 오염이 발생. 절대 상한 30px 도입 후 침범 차단 (2026-04-15 회귀).
 
 ### 4-6. P3-B — StructuredExtractor
 

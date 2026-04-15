@@ -58,11 +58,27 @@ DEFAULT_PIXEL_BUDGETS: dict[str, int] = {
 # 영역 타입별 패딩 비율 (bbox 대비) — 공백 패딩이 아닌 원본 이미지 맥락 포함
 # AI_INFERENCE.md §4-5: handwritten_field 0.15 (양식 레이블·경계선 포함)
 DEFAULT_CROP_PADDING_RATIO: dict[str, float] = {
-    "table":             0.05,   # 5% — 열/행 헤더 포함
-    "handwritten_field": 0.15,   # 15% — 양식 레이블·경계선 (현재 RegionType에는 없음, 확장 대비)
+    "table":             0.02,   # 2% — 열/행 헤더만 포함 (상·하단 인접 영역 오염 방지)
+    "handwritten_field": 0.15,   # 15% — 양식 레이블·경계선
     "seal":              0.10,
     "text":              0.05,
     "default":           0.05,
+}
+
+# 영역 타입별 패딩 절대 상한(px) — 큰 bbox에서 비율 × 면적이 과도해지는 것 방지
+# 예: 1854×1950 table에 5% 적용 시 pad_x=92, pad_y=97 → 인접 writer 영역 침범
+DEFAULT_CROP_PADDING_MAX_PX: dict[str, int] = {
+    "table":             30,
+    "figure":            30,
+    "chart":             30,
+    "formula":           24,
+    "handwritten_field": 24,
+    "seal":              40,
+    "text":              16,
+    "header":            16,
+    "footer":            16,
+    "signature":         24,
+    "default":           24,
 }
 
 
@@ -104,6 +120,7 @@ class ResolutionRouter:
         self._padding_ratios = dict(DEFAULT_CROP_PADDING_RATIO)
         if self.cfg.crop_padding_ratio:
             self._padding_ratios.update(self.cfg.crop_padding_ratio)
+        self._padding_max_px = dict(DEFAULT_CROP_PADDING_MAX_PX)
 
     def get_pixel_budget(self, region_type: str) -> int:
         """영역 타입에 대한 pixel_budget 반환."""
@@ -202,8 +219,9 @@ class ResolutionRouter:
             else str(region.region_type)
         )
         ratio = self.get_padding_ratio(rt)
-        pad_x = max(self.cfg.min_crop_padding_px, int(bbox_w * ratio))
-        pad_y = max(self.cfg.min_crop_padding_px, int(bbox_h * ratio))
+        max_pad = self._padding_max_px.get(rt, self._padding_max_px.get("default", 24))
+        pad_x = min(max_pad, max(self.cfg.min_crop_padding_px, int(bbox_w * ratio)))
+        pad_y = min(max_pad, max(self.cfg.min_crop_padding_px, int(bbox_h * ratio)))
 
         x1 = max(0, b.x1 - pad_x)
         y1 = max(0, b.y1 - pad_y)

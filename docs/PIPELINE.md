@@ -158,7 +158,8 @@ class LayoutRegion:
     bbox: BoundingBox
     confidence: float
     polygon: Optional[list[tuple[float, float]]] = None
-    source: str = "model"  # "model" | "template" — TemplateAugmentor 출처 구분
+    source: str = "model"             # "model" | "template" | "template_matched"
+    field_key: Optional[str] = None   # TemplateAugmentor 부여. Assembler가 region→schema 역참조에 사용
 
 @dataclass
 class RawLayoutResult:
@@ -245,6 +246,7 @@ class InstructionSpec:
     pixel_budget: int = 560
     ocr_hint: Optional[str] = None
     is_retry: bool = False
+    field_key: Optional[str] = None   # TemplateAugmentor 부여. sub-schema 분해/Assembler 역참조용
 ```
 
 ### 2-5. ResolutionRouter 출력 (military 경로)
@@ -311,6 +313,7 @@ class VLMResult:
     processing_time_ms: float = 0.0
     retry_count: int = 0
     warnings: list[str] = field(default_factory=list)
+    assembled_json: Optional[dict] = None  # Assembler 조립 결과 (x-assembly-rules 있는 서식)
 ```
 
 ### 2-7. 후처리 결과
@@ -442,21 +445,39 @@ class FormClassifier:
 
 **파일**: `src/vlm/template_augmentor.py`
 
-**역할**: P3-A가 form_type을 확정한 직후, 해당 서식의 미리 정의된 필드 bbox를 LayoutResult에 병합합니다. PP-DocLayout이 놓친 고정 인쇄 필드를 보완하여 추출 완전성을 보장합니다.
+**역할**: P3-A가 form_type을 확정한 직후, 서식 템플릿(`configs/form_templates/{form_type}.yaml`)의 필드 bbox를 LayoutResult에 병합하고 **각 region에 `field_key`를 부여**합니다. 이 field_key가 P2.5-B에서 sub-schema 분해를 트리거하고, P3-B 이후 Assembler가 region별 결과를 재조립하는 키가 됩니다.
 
 **삽입 위치**: 오케스트레이터에서 P3-A → P2.5-A.5 → P2.5-B 순서로 호출.
 
+**v3 병합 정책 (포함도 기반)** — 단순 IoU가 아닌 양방향 포함도(containment)와 보호 영역 규칙으로 PP-DocLayout 결과를 흡수·보존합니다.
+
+```
+각 템플릿 field f에 대해:
+  consumable = []
+  for each PP region p:
+      if p.region_type in {seal, signature, figure, table}: continue   # 보호
+      c_pp,  c_tpl = containment(p, f)        # = inter / area(p), inter / area(f)
+      if c_tpl > 0.9: continue                # 템플릿이 PP에 내포 → PP는 컨테이너
+      if c_pp > 0.7:  consumable.append(p)    # PP 70%+ 가 f 안 → 흡수
+
+  consume(consumable)
+  if len(consumable) == 1 and not _is_small_contained(p, f):
+      # 1:1 정합 → PP bbox 재사용 (실측 좌표가 더 정확)
+      emit LayoutRegion(bbox=p.bbox, source="template_matched", field_key=f.field_key)
+  else:
+      # 0개 또는 다중 매칭 → 템플릿 bbox로 단일 region (대표값)
+      emit LayoutRegion(bbox=f.bbox, source="template", field_key=f.field_key)
+
+# Step 2: 흡수되지 않은 PP 영역(인장·서명 등 동적)은 그대로 보존 (field_key=None)
+```
+
 ```python
 class TemplateAugmentor:
-    """서식 템플릿 기반 bbox 병합 — PP-DocLayout 누락 보완.
+    """서식 템플릿 기반 region 재구성 — military 전용."""
 
-    military 경로 전용. other 경로에는 적용하지 않는다.
-    서식이 고정되어 있다는 전제 하에 동작하며,
-    수기로 추가되는 동적 요소(인장, 서명)는 PP-DocLayout 탐지 결과를 유지한다.
-    """
-
-    MERGE_IOU_THRESHOLD = 0.5   # 이 이상이면 PP-DocLayout 결과 우선
-    TEMPLATE_CONFIDENCE  = 0.70  # 템플릿 보완 영역에 부여하는 기본 신뢰도
+    CONTAINMENT_THRESHOLD = 0.7         # PP가 템플릿에 ≥70% 포함되면 흡수
+    TEMPLATE_INSIDE_PP_THRESHOLD = 0.9  # 템플릿이 PP에 ≥90% 내포되면 PP는 컨테이너
+    PROTECTED = {"seal", "signature", "figure", "table"}
 
     def __init__(self, templates_dir: str = "configs/form_templates"):
         self._dir = Path(templates_dir)
@@ -466,65 +487,18 @@ class TemplateAugmentor:
         self,
         layout: LayoutResult,
         form_type: FormType,
-        form_identifier: Optional[str] = None,   # FormClassifier가 추출한 식별자
-        warnings: Optional[list[str]] = None,
+        form_identifier: Optional[str] = None,
+        stats: Optional[TemplateAugmentorStats] = None,
     ) -> LayoutResult:
-        """form_type + form_identifier로 버전을 선택하여 LayoutResult에 병합.
+        """위 정책 박스에 따라 LayoutResult를 재구성.
 
-        Args:
-            layout:          P2.5-A 정제 완료 결과
-            form_type:       P3-A 분류 결과
-            form_identifier: 서식 식별자 문자열 (예: "별지 제3-2호 서식")
-                             versions 배열에서 매칭 → 해당 버전 fields 로드
-                             None 또는 미매칭 → 배열 첫 번째 버전(최신) 사용
-            warnings:        경고 수집 리스트
+        반환된 LayoutResult.regions 순서:
+          ① 템플릿 field마다 region (field_key 부여, source="template" or "template_matched")
+          ② 흡수되지 않은 PP-DocLayout 동적 region (field_key=None — 인장·서명·표 등)
 
-        Returns:
-            augmented_count가 갱신된 새 LayoutResult
+        본문 구현은 src/vlm/template_augmentor.py 참조.
         """
-        template_fields = self._load_template(form_type, form_identifier)
-        if not template_fields:
-            return layout  # 템플릿 없음 → 원본 그대로 반환
-
-        existing_bboxes = [r.bbox for r in layout.regions]
-        new_regions = list(layout.regions)
-        augmented = 0
-
-        for field_def in template_fields:
-            tbbox = BoundingBox(**field_def["bbox"])
-
-            # 기존 탐지 결과와 IoU 계산 — 겹치면 PP-DocLayout 결과 우선
-            if any(_iou(tbbox, eb) > self.MERGE_IOU_THRESHOLD for eb in existing_bboxes):
-                continue
-
-            # 미탐지 → 템플릿 bbox 추가
-            new_region = LayoutRegion(
-                region_id=f"tmpl_{field_def['field_key']}",
-                region_type=RegionType(field_def["region_type"]),
-                bbox=tbbox,
-                confidence=self.TEMPLATE_CONFIDENCE,
-                source="template",
-            )
-            new_regions.append(new_region)
-            augmented += 1
-
-        if augmented == 0:
-            return layout
-
-        # reading_order 재정렬: 좌상→우하 기준으로 새 영역 삽입
-        new_order = _sort_reading_order(new_regions)
-        return LayoutResult(
-            doc_id=layout.doc_id,
-            page_width=layout.page_width,
-            page_height=layout.page_height,
-            regions=new_regions,
-            reading_order=new_order,
-            analysis_mode=layout.analysis_mode,
-            removed_count=layout.removed_count,
-            merged_count=layout.merged_count,
-            augmented_count=augmented,
-            warnings=layout.warnings,
-        )
+        ...
 
     def _load_template(
         self,
@@ -663,6 +637,19 @@ class InstructionRouter:
 - analysis 필드 JSON Schema 최상단 → CoT 효과
 - 영어 지시문 + 한국어 필드명 하이브리드
 
+#### 3-4-1. Sub-schema 분해 (`_extract_sub_schema`)
+
+`x-assembly-rules`가 정의된 스키마(예: `equipment_checklist`)는 region마다 **full schema의 일부만** guided_json으로 전달합니다. 이로써 1-shot 예시의 full-schema 출력 패턴이 sub-schema 디코딩을 오염시키지 않고, 각 크롭이 자기 책임 영역만 채웁니다.
+
+| field_key | 전달되는 sub-schema | 비고 |
+|---|---|---|
+| `result_item_3` | `x-checklist-item-schema` + `item_number: const=3` | VLM이 번호를 헷갈리지 않도록 const 주입 |
+| `writer_block` | `properties.writer` (team/rank/name/signature_present) | object 그대로 |
+| `document_date` | `{type: string}` | 문자열 리터럴만 출력 |
+| `form_identifier` | `{type: string}` | 동상 |
+
+field_key가 부여된 region에는 full-shot 1-shot 대신 `_build_field_key_instruction()`이 만든 **field_key 전용 짧은 지시문**(스키마 본문을 그대로 첨부)이 사용됩니다.
+
 ### 3-5. P2.5-C ResolutionRouter (military 전용)
 
 **파일**: `src/vlm/resolution_router.py`
@@ -684,6 +671,8 @@ class ResolutionRouter:
         return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 ```
 
+**크롭 패딩 — 비율 + 절대 상한**: `pad = min(MAX_PX[rt], max(MIN_PX, int(bbox_w × RATIO[rt])))`. 큰 bbox(예: table 1854×1950)에 단순 비율(5%=92px)을 적용하면 인접 영역(writer 등)을 침범하므로 영역별 절대 상한을 둡니다. 기본값: `table/figure/chart=30px`, `seal=40px`, `text/header/footer=16px`, `default=24px`.
+
 ### 3-6. P3-B StructuredExtractor (military 전용)
 
 **파일**: `src/vlm/structured_extractor.py`
@@ -701,6 +690,32 @@ class StructuredExtractor:
         seal/signature 영역은 S4/S6 Skill로 위임.
         """
 ```
+
+**field_key blob 보존**: `spec.field_key`가 있으면 VLM 출력 dict/list/스칼라 **전체를 단일 FieldValue로 저장**(`field_key=spec.field_key, region_id=cropped.region_id`)합니다. JSON 키 단위로 분해하지 않으므로 sub-schema 응답이 그대로 Assembler로 전달됩니다. 재시도 시 `field_key`를 신규 InstructionSpec에 그대로 전파합니다.
+
+### 3-7. Assembler (military 전용 — `x-assembly-rules` 정의 서식)
+
+**파일**: `src/vlm/assembler.py`
+
+`extract()` 종료 시 `schema.x-assembly-rules`가 있으면 region별 FieldValue를 full schema dict로 조립해 `VLMResult.assembled_json`에 부착합니다.
+
+```python
+class Assembler:
+    def assemble(self, fields, schema, region_field_key_map, warnings) -> dict | None:
+        # 1) region_id → field_key 역참조로 field_map 구성 (confidence 높은 결과 우선)
+        # 2) x-assembly-rules: {field_key → "checklist_items.0" 같은 JSON Path}
+        # 3) _set_path()로 nested dict에 값 삽입
+        # 4) checklist_items 6개 누락 자동 보완 + alias 매핑(item_result/handwritten_mark → result)
+        ...
+```
+
+**주요 동작**:
+- VLM이 `[{...}]`로 1원소 리스트 감싼 경우 자동 언래핑
+- `item_number=null`은 인덱스 기반 보정
+- `checklist_items` 6개 미달 시 `{"item_number": i+1, "result": "?", "result_confidence": 0.0}` 기본값 삽입
+- `x-assembly-rules`가 없는 스키마는 None 반환 → 기존 `fields[]` 기반 처리 유지 (하위 호환)
+
+P4 검증은 `assembled_json` 우선, 없으면 기존 `raw_json` 파싱 폴백.
 
 ---
 

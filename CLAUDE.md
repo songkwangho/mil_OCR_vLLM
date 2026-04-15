@@ -138,15 +138,18 @@ PP-DocLayout Fine-tuning과 상호 보완:
 
 - **Layout Fusion**: V3(구조) + plus-L(텍스트) 결합, DPI 기반 분기
 - **Crop-then-Infer**: LayoutPostProcessor 정제 → 영역별 크롭(48px 배수) → Gemma4
-- **FormClassifier 선행**: 저해상도 분류 → form_type → 경로 분기
-- **TemplateAugmentor**: form_type 확정 후 서식 템플릿 bbox 병합 → PP-DocLayout 누락 보완 (military 전용)
-- **military InstructionRouter**: region_type + form_type → 도메인 맥락 + 1-shot 예시
+- **PdfAdapter**: PDF 입력은 fitz로 페이지별 RGB 렌더링(기본 300dpi) → 페이지마다 단일 이미지로 P1~P6 통과 → `PdfDocumentResult` 집계
+- **FormClassifier 선행**: 저해상도 분류 → form_type + form_identifier → 경로 분기
+- **TemplateAugmentor (v3)**: 템플릿 우선 병합 + field_key 부여. PP region 포함도 ≥0.7 면 흡수, ≥0.9 역포함은 컨테이너로 보존, `seal/signature/figure/table` 보호. 단일 매칭이면 PP bbox 재사용, 다중 매칭이면 템플릿 bbox로 통합.
+- **Sub-schema 분해 + Assembler**: `x-assembly-rules` 정의된 스키마는 region별로 sub-schema(예: `result_item_3` → `item_number: const=3`)만 VLM에 전달 → 결과를 region_id로 역참조해 full schema dict로 조립(`VLMResult.assembled_json`)
+- **CROP_PADDING_MAX_PX**: 비율 패딩에 절대 상한(예: table=30px) → 큰 bbox에서 인접 영역 오염 방지
+- **military InstructionRouter**: region_type + form_type → 도메인 맥락 + 1-shot. field_key가 있으면 full-shot 대신 sub-schema 전용 짧은 instruction 사용
 - **OCR-augmented**: 저신뢰 영역에 PaddleOCR 선행 → 텍스트 힌트로 VLM 정확도 보강
 - **ResolutionRouter 배치 순서**: 140→560→1120 토큰 그룹 순차 배치 (vLLM 패딩 최소화)
 - **SealPreprocessor**: HSV 적색 분리 → 허프 원 탐지 → 극좌표 직선화 (학습 불필요)
 - **TableExtractor 2패스**: 패스1(구조 추출) → 패스2(셀별 Skill 라우팅)
 - **SignatureDetector**: 서명 존재 여부 이진 분류 (OCR 아님)
-- **저신뢰 재시도**: logprobs 임계값 미달 → pixel_budget 상향 후 재호출
+- **저신뢰 재시도**: logprobs 임계값 미달 → pixel_budget 상향 후 재호출 (field_key 보존)
 - **SPOF 대비**: 수준A(헬스체크) + 수준B(fallback) + 수준C(검토 큐)
 
 ---
@@ -155,7 +158,6 @@ PP-DocLayout Fine-tuning과 상호 보완:
 
 ### Phase 1 잔여 — 남은 핵심 작업
 
-- [ ] **TemplateAugmentor 구현** — `src/vlm/template_augmentor.py` 신규. 서식별 템플릿 정의 `configs/form_templates/*.yaml`. military 경로 오케스트레이터에 P3-A 직후 삽입.
 - [ ] **S2 PrintedTextReader / S3 HandwritingReader 정식 구현** — 현재는 skill_registry의 `_stub_text_skill`이 guided_json으로 대체 처리. 한국어 수기 인식률 실측(10~20장) 후 임계값 보정 필요.
 - [ ] **S7 StructuredAggregator 구현** — 현재 Skill 결과를 region_id 단위 FieldValue로 평탄화. official_document 스키마에 맞춘 최종 집계가 필요.
 - [ ] **OCR-augmented 힌트** — `ocr_hint_provider.py`는 구현됐으나 PaddleOCR 가중치의 오프라인 배치(`~/.paddlex/official_models/`)와 `Dockerfile.pipeline` COPY 반영 필요.
@@ -163,6 +165,12 @@ PP-DocLayout Fine-tuning과 상호 보완:
 - [ ] **검출률 측정** — `scripts/evaluate_layout_detection.py --n 50` (PP-DocLayoutV3 기준치 확보).
 - [ ] **T8/T9/T10 통합 테스트 확장** — 인장/결재란 2패스/서명 탐지 시나리오 결과 축적.
 - [ ] **vLLM 변동성 측정** — 동일 문서 N=3 반복으로 기준치 수립 (전역지원서_2 이전 +99% 케이스).
+- [ ] **P4 신뢰도 재산출 (assembled_json 대응)** — field_key blob 단일 FieldValue로 저장되면서 토큰 단위 logprobs 평균이 의미 없어짐. assembled_json 트리 단위로 sub-field 신뢰도 분해·집계 필요. (현재 전비품 확인서에서 overall_confidence=0.13 관찰)
+- [ ] **도메인 사전 기반 필드 교정** — 인식 모호성이 잦은 폐쇄집합 필드(계급·부대코드 등)에 대한 이중 방어.
+  - **1차: 스키마 enum 강제** — `equipment_checklist.json` `writer.rank` 등에 한국군 직급 enum 추가 → xgrammar가 디코딩 단계에서 차단.
+  - **2차: 후처리 정규화 사전** — `rank_normalizer.py` 등 소형 모듈로 Levenshtein 최근접 매칭, 거리 > 2 이면 검토 큐 플래그.
+  - **확장 후보**: `nsn/K-NSN`은 `pattern` (guidance 백엔드 필요), `unit_code`는 부대 실재 DB 조회로 보강.
+  - **지식그래프는 보류** — 현 단계 단일 필드 오인식 수정엔 ROI 나쁨. Phase 3 검토 큐 대시보드와 함께 재검토.
 
 ### Phase 2 (06~07월)
 
@@ -219,11 +227,13 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | P2 | 레이아웃 탐지 (Fusion) | `src/preprocess/layout_analyzer.py` | ✅ |
 | P2.5-A | LayoutPostProcessor | `src/preprocess/layout_postprocessor.py` | ✅ |
 | — | SealPreprocessor | `src/preprocess/seal_preprocessor.py` | ✅ 극좌표 언래핑 + 허프 실패 폴백 |
-| P3-A | FormClassifier | `src/vlm/form_classifier.py` | ✅ military/other 분기 |
-| P2.5-A.5 | TemplateAugmentor | `src/vlm/template_augmentor.py` | 🔴 신규 구현 필요 |
-| P2.5-B | InstructionRouter | `src/vlm/instruction_router.py` | ✅ 1-shot + OCR 힌트 |
-| P2.5-C | ResolutionRouter | `src/vlm/resolution_router.py` | ✅ 48px 정렬 + DISPATCH_ORDER |
-| P3-B | StructuredExtractor | `src/vlm/structured_extractor.py` | ✅ 저신뢰 재시도 로직 포함 |
+| — | PdfAdapter | `src/input/pdf_adapter.py` | ✅ fitz 기반 PDF→PageImage, 멀티페이지 |
+| P3-A | FormClassifier | `src/vlm/form_classifier.py` | ✅ military/other 분기 + form_identifier (guided_json) |
+| P2.5-A.5 | TemplateAugmentor | `src/vlm/template_augmentor.py` | ✅ v3: 포함도 기반 다중 PP 흡수, field_key 부여 |
+| P2.5-B | InstructionRouter | `src/vlm/instruction_router.py` | ✅ 1-shot + OCR 힌트 + sub-schema 분해(`_extract_sub_schema`) |
+| P2.5-C | ResolutionRouter | `src/vlm/resolution_router.py` | ✅ 48px 정렬 + DISPATCH_ORDER + 패딩 절대 상한 |
+| P3-B | StructuredExtractor | `src/vlm/structured_extractor.py` | ✅ 저신뢰 재시도 + field_key blob 보존 + Assembler 호출 |
+| — | Assembler | `src/vlm/assembler.py` | ✅ x-assembly-rules 기반 region→full dict 조립, 누락 자동 보완 |
 | — | OCR 힌트 제공자 | `src/vlm/ocr_hint_provider.py` | 🟡 구현 완료, 폐쇄망 가중치 배치 필요 |
 | — | Skill Registry | `src/vlm/skill_registry.py` | ✅ DISPATCH_ORDER [140,560,1120] + SkillDispatchStats |
 | — | S2 PrintedTextReader | `src/vlm/skills/printed_text_reader.py` | 🔴 미구현 (Stub 대체 중) |
@@ -241,7 +251,7 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | — | VLM 헬스 모니터 | `src/pipeline/health_monitor.py` | ✅ |
 | — | Layout 추론 서비스 | `src/preprocess/layout_server.py` | ✅ |
 | — | 스키마 레지스트리 | `src/domain/schema_registry.py` | ✅ v1/ 스캔 + `get()` 별칭 (`other→official_document`) |
-| — | JSON Schemas v1 | `src/domain/schemas/v1/*.json` | ✅ 8종 (5 military + `_fallback` + `_general` + `official_document`) |
+| — | JSON Schemas v1 | `src/domain/schemas/v1/*.json` | ✅ 9종 (6 military 포함 `equipment_checklist` + `_fallback`/`_general`/`official_document`). `x-assembly-rules`/`x-checklist-item-schema` 지원 |
 | — | Docker 구성 | `docker-compose.yml` + `docker/Dockerfile.*` | ✅ vLLM 0.19.0 호환 (`--structured-outputs-config`) |
 
 > **Legacy 유지**: `instruction_builder.py` (InstructionRouter 래퍼), `gemma4_engine.py` (하위 호환용)

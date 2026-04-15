@@ -178,6 +178,32 @@ src/domain/schema_registry.py    ← form_type + version → Schema 조회
 
 **효과**: 0-shot 대비 hallucination율 ~100% → ~1.8% 감소 (IEEE 2025).
 
+### 4-2-1. x-assembly-rules / x-checklist-item-schema (region 단위 추출용)
+
+스키마 한 번을 페이지 1회 호출로 채우는 대신, **template field 단위 region별 sub-schema 호출** 후 Assembler가 재조립하는 패턴을 지원하기 위한 두 개의 비표준 키.
+
+```json
+{
+  "x-assembly-rules": {
+    "document_date":  "document_date",
+    "result_item_1":  "checklist_items.0",
+    ...
+    "result_item_6":  "checklist_items.5",
+    "writer_block":   "writer",
+    "form_identifier": "form_identifier"
+  },
+  "x-checklist-item-schema": {
+    "type": "object",
+    "properties": {"item_number": {...}, "result": {...}, "result_confidence": {...}},
+    "required": ["item_number", "result", "result_confidence"]
+  }
+}
+```
+
+- `x-assembly-rules`: TemplateAugmentor가 부여한 `field_key` → 최종 dict의 JSON Path 매핑. Assembler(`src/vlm/assembler.py`)가 이 규칙으로 region 결과를 `assembled_json`에 배치합니다.
+- `x-checklist-item-schema`: 배열 원소 단위 sub-schema 정의 (xgrammar로 array.items에 직접 const 주입이 까다로워서 분리). InstructionRouter `_extract_sub_schema()`가 `result_item_N` field_key에 대해 이 스키마를 복사하고 `item_number: const=N` 을 주입해 사용합니다.
+- `x-assembly-rules`가 없는 스키마는 Assembler가 None 반환 → 기존 fields[] 기반 처리 유지 (하위 호환).
+
 ### 4-3. official_document.json (공문서 — other 경로 S7 전용)
 
 ```json

@@ -165,6 +165,8 @@ class LayoutRegion:
     bbox: BoundingBox
     confidence: float                 # [0.0–1.0]
     polygon: Optional[list[tuple[float, float]]] = None  # V3 polygon points (없으면 None)
+    source: str = "model"             # "model" | "template" | "template_matched"
+    field_key: Optional[str] = None   # 템플릿에서 부여. None이면 field_key 기반 라우팅 비대상
 
 
 @dataclass
@@ -201,6 +203,7 @@ class LayoutResult:
     analysis_mode: AnalysisMode = AnalysisMode.HEURISTIC
     removed_count: int = 0            # 제거된 박스 수
     merged_count: int = 0             # 병합된 블록 수
+    augmented_count: int = 0          # TemplateAugmentor가 field_key 부여한 region 수
     warnings: list[str] = field(default_factory=list)
 
 
@@ -227,6 +230,7 @@ class InstructionSpec:
     pixel_budget: int = 280
     ocr_hint: Optional[str] = None
     is_retry: bool = False
+    field_key: Optional[str] = None   # 템플릿에서 부여 (Assembler가 역참조)
 
 
 @dataclass
@@ -356,6 +360,7 @@ class VLMResult:
     processing_path: ProcessingPath = ProcessingPath.VLM
     warnings: list[str] = field(default_factory=list)
     retry_count: int = 0              # 저신뢰 재시도 발생 횟수 (모니터링용)
+    assembled_json: Optional[dict] = None  # Assembler가 조립한 full schema dict (x-assembly-rules 있는 서식만)
 
 
 # ═══════════════════════════════════════════════

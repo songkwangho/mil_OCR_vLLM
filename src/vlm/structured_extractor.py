@@ -330,6 +330,28 @@ class StructuredExtractor:
                 trace=trace,
             )
 
+        # ─── Assembler: x-assembly-rules 있는 스키마는 region별 결과를 full dict로 조립 ───
+        assembled_json = None
+        if schema and schema.get("x-assembly-rules"):
+            from src.vlm.assembler import Assembler
+            region_field_key_map: dict[str, str] = {}
+            for regions in groups.values():
+                for cr in regions:
+                    fk = getattr(cr.instruction_spec, "field_key", None)
+                    if fk:
+                        region_field_key_map[cr.region_id] = fk
+            assembled_json = Assembler().assemble(
+                fields=all_fields,
+                schema=schema,
+                region_field_key_map=region_field_key_map,
+                warnings=warnings,
+            )
+            if assembled_json:
+                logger.info(
+                    "[P3-B][%s] Assembler 조립 완료: keys=%s",
+                    doc_id, list(assembled_json.keys()),
+                )
+
         processing_time_ms = (time.time() - t0) * 1000
 
         logger.info(
@@ -351,6 +373,7 @@ class StructuredExtractor:
             processing_time_ms=round(processing_time_ms, 1),
             warnings=warnings,
             retry_count=retry_count,
+            assembled_json=assembled_json,
         )
 
     def _retry_low_confidence_fields(
@@ -424,6 +447,7 @@ class StructuredExtractor:
                 json_schema=spec.json_schema,
                 pixel_budget=new_budget,
                 is_retry=True,
+                field_key=getattr(spec, "field_key", None),
             )
             if hint:
                 retry_spec = InstructionRouter.with_ocr_hint(retry_spec, hint)
@@ -580,6 +604,35 @@ class StructuredExtractor:
         if parsed is None:
             warnings.append(f"Region {cropped.region_id}: JSON parse failed")
             return [], [], [], text
+
+        # region에 template field_key가 지정된 경우:
+        # VLM 출력 전체(dict/list/스칼라)를 단일 FieldValue로 보존 → Assembler가 온전히 복원
+        template_field_key = getattr(spec, "field_key", None)
+        if template_field_key:
+            val_str = (
+                json.dumps(parsed, ensure_ascii=False)
+                if isinstance(parsed, (list, dict))
+                else str(parsed)
+            )
+            # logprobs 전체 평균으로 신뢰도 산출
+            all_lps = [
+                lp.get("logprob", 0.0) if isinstance(lp, dict) else float(lp)
+                for lp in (logprobs or [])
+            ]
+            confidence = calc_field_confidence(all_lps, "text")
+            fields.append(FieldValue(
+                field_key=template_field_key,
+                raw_value=val_str,
+                corrected_value=val_str,
+                data_type="text",
+                confidence=confidence,
+                token_logprobs=all_lps,
+                is_flagged=is_flagged(confidence, "text"),
+                region_id=cropped.region_id,
+            ))
+            if isinstance(parsed, dict):
+                domain_codes = _detect_domain_codes(parsed)
+            return fields, [], domain_codes, text
 
         if isinstance(parsed, dict):
             # logprobs → 필드별 신뢰도

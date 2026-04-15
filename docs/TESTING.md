@@ -333,27 +333,29 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 
 | 일자 | 환경 | 케이스 | 결과 | 비고 |
 |------|------|--------|------|------|
-| 2026-04-08 | H100 / vLLM v0.19.0 | T1 기본 경로 | 3건 PASS | Phase 1 통합 테스트 |
-| (예정) | vLLM 재기동 후 | T1 | — | guided_json enforce 검증 |
-| (예정) | — | T2, T3 | — | Fusion ON DPI 분기 검증 |
-| (예정) | — | T4 | — | Other → Skill Registry 경로 |
+| 2026-04-08 | H100 / vLLM v0.19.0 | T1 기본 경로 | 3건 PASS | Phase 1 초기 통합 |
+| 2026-04-14 01:31 | + xgrammar enforce | T1 + T4 (other/skill_registry) | 3건 PASS, errors=0, JSON parse warning 0 | Skill Registry 경로 합류 |
+| 2026-04-15 04:26 | + PdfAdapter | T1 + T11 (PDF 단일 페이지) | 4건 PASS (PDF 1건 포함), 전비품확인서 → equipment_checklist 정확 분류 | PDF→PageImage→파이프라인 통과 검증 |
+| 2026-04-15 07:27 | + Sub-schema/Assembler | T_chk1 (전비품 확인서) | checklist 6항목 정확(O-O-O-X-X-O), writer 정상, CHK-001~004 모두 통과 | sub-schema 분해 + Assembler 조립 도입 |
+| **2026-04-15 08:17** | + 패딩 절대 상한 + TemplateAugmentor v3 | **T_chk1 안정화** | table 크롭 1920×2016(이전 2016×2160), writer 영역 침범 제거, 6항목 + writer + form_identifier 정확 | writer_block 영역 다중 PP(footer+text) 흡수 후 단일 region |
+| (예정) | — | T2, T3 | — | Fusion ON DPI 분기 |
 | (예정) | — | T5 | — | Fallback 전환 |
-| (예정) | — | T7 | — | OCR-augmented 힌트 효과 |
-| (예정) | — | T8 | — | 인장 인식, 허프 성공/실패 분기 |
-| (예정) | — | T9 | — | 결재란 2패스 처리 |
+| (예정) | — | T7 | — | OCR-augmented 힌트 효과 측정 |
+| (예정) | — | T8 | — | 인장 허프 성공/실패 분기 |
+| (예정) | — | T9 | — | 결재란 2패스 (현재 pass2_tasks=0 관찰) |
 | (예정) | — | T10 | — | 서명 탐지 이진 분류 |
-| (예정) | — | T11~T15 | — | PDF 어댑터 단일/멀티페이지/실패 케이스 |
-| (예정) | — | T_chk1~T_chk6 | — | 전비품 확인서 작성 점검표 전체 검증 |
+| (예정) | — | T12~T15 | — | PDF 멀티페이지/실패 케이스 |
+| (예정) | — | T_chk2~T_chk6 | — | 전비품 확인서 경계 케이스 |
 
-### 6-1. Phase 1-E 잔존 이슈 (통합 테스트에서 발견)
+### 6-1. 잔존 이슈 (2026-04-15 기준)
 
 | 우선순위 | 이슈 | 조치 | 상태 |
 |---------|------|------|------|
-| 🔴 즉시 | vLLM 재기동 — guided_json enforce 미적용 | `docker compose restart vllm-server` | 미완 |
-| 🔴 즉시 | PaddleOCR 가중치 폐쇄망 배치 | `Dockerfile.pipeline` COPY 추가 | 미완 |
-| 🟡 샘플 확보 후 | 재시도 경로 실검증 | 군수 서식 샘플 확보 후 T7 실행 | 대기 |
-| 🟡 구현 후 | Skill Registry end-to-end 검증 | T4/T8/T9/T10 실행 | 대기 |
-| 🟢 선택 | vLLM 변동성 N=3 반복 측정 | 재기동 후 동일 조건 3회 | 미완 |
+| 🟡 | P4 신뢰도 산출 — assembled_json 미반영 | field_key blob 단일 FieldValue로 logprobs 평균 의미 상실. 트리 기반 sub-confidence 재산출 필요 | 미완 (CLAUDE.md 로드맵) |
+| 🟡 | rank "대원"/"대위" 오인식 1회 관찰 | enum 강제 + 후처리 정규화 사전 (CLAUDE.md 로드맵) | 미완 |
+| 🟡 | TableExtractor pass2_tasks=0 | S5 pass1 출력의 table_type/cells 품질 점검 | 대기 |
+| 🟡 | PaddleOCR 가중치 폐쇄망 배치 | `Dockerfile.pipeline` COPY 추가 | 미완 |
+| 🟢 | vLLM 변동성 N=3 반복 측정 | 동일 문서 반복 실행 | 미완 |
 
 ### 6-2. 향후 계획 타당성 및 문제점
 

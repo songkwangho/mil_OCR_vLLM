@@ -260,11 +260,22 @@ class InstructionRouter:
             system_prompt = _DEFAULT_SYSTEM_PROMPT
 
         # 6) json_schema (SchemaRegistry)
-        json_schema: Optional[dict] = None
+        full_schema: Optional[dict] = None
         if form_type_value:
             # unknown → _fallback, 그 외 → form_type
             schema_id = "_fallback" if form_type_value == "unknown" else form_type_value
-            json_schema = self._schema_registry.load(schema_id)
+            full_schema = self._schema_registry.load(schema_id)
+
+        # 6-1) field_key 기반 sub-schema 분해 (x-assembly-rules 있는 서식만)
+        region_field_key = getattr(region, "field_key", None)
+        if region_field_key and full_schema and full_schema.get("x-assembly-rules"):
+            json_schema = self._extract_sub_schema(region_field_key, full_schema)
+            # field_key 전용 짧은 instruction — full-schema 1-shot 예시는 오히려 혼란을 줌
+            user_instruction = _build_field_key_instruction(
+                region_field_key, json_schema
+            )
+        else:
+            json_schema = full_schema
 
         # 7) pixel_budget
         pixel_budget = _DEFAULT_PIXEL_BUDGETS.get(
@@ -279,7 +290,50 @@ class InstructionRouter:
             user_instruction=user_instruction,
             json_schema=json_schema,
             pixel_budget=pixel_budget,
+            field_key=region_field_key,
         )
+
+    # ─── sub-schema 분해 ──────────────────────────
+
+    def _extract_sub_schema(self, field_key: str, full_schema: dict) -> dict:
+        """field_key에 해당하는 sub-schema를 full_schema에서 추출.
+
+        - result_item_N (1~6): x-checklist-item-schema (또는 checklist_items.items) +
+          item_number const=N
+        - writer_block: properties.writer
+        - 그 외: x-assembly-rules 경로의 top-level properties 또는 properties[field_key]
+        """
+        import copy
+        import re
+
+        properties: dict = full_schema.get("properties", {}) or {}
+        assembly_rules: dict = full_schema.get("x-assembly-rules", {}) or {}
+
+        m = re.match(r"result_item_(\d+)$", field_key)
+        if m:
+            item_number = int(m.group(1))
+            item_schema = full_schema.get("x-checklist-item-schema")
+            if item_schema is None:
+                checklist_prop = properties.get("checklist_items", {}) or {}
+                item_schema = checklist_prop.get("items", {})
+            if item_schema:
+                sub = copy.deepcopy(item_schema)
+                sub.setdefault("properties", {})["item_number"] = {
+                    "type": "integer",
+                    "const": item_number,
+                }
+                return sub
+
+        path = assembly_rules.get(field_key)
+        if path:
+            top_key = path.split(".")[0]
+            if top_key in properties:
+                return properties[top_key]
+
+        if field_key in properties:
+            return properties[field_key]
+
+        return full_schema
 
     def route_all(
         self,
@@ -422,3 +476,52 @@ class InstructionRouter:
             len(self._extraction_instructions),
             path,
         )
+
+
+def _build_field_key_instruction(field_key: str, sub_schema: dict) -> str:
+    """field_key 전용 VLM 지시문.
+
+    TemplateAugmentor가 부여한 field_key에 대해, full-schema 1-shot 없이
+    sub-schema만을 따르는 간결한 지시문을 생성.
+    """
+    import json as _json
+    import re
+
+    m = re.match(r"result_item_(\d+)$", field_key)
+    if m:
+        n = int(m.group(1))
+        return (
+            f"이 크롭 이미지는 전비품 확인서 점검항목 {n}번의 점검결과 칸(O/X) 입니다.\n"
+            "수기로 표시된 기호만 판단하여 다음 JSON Schema에 맞춰 출력하세요.\n"
+            "result 값은 반드시 \"O\", \"X\", \"?\" 중 하나여야 합니다.\n"
+            f"item_number는 반드시 {n} 이어야 합니다.\n\n"
+            "[Schema]\n"
+            f"{_json.dumps(sub_schema, ensure_ascii=False, indent=2)}\n\n"
+            "추가 설명, 다른 필드, 코드 블록 표시 없이 JSON 객체 하나만 출력하세요."
+        )
+    if field_key == "writer_block":
+        return (
+            "이 크롭 이미지는 전비품 확인서 작성자 정보(팀명·직급·성명·서명)를 포함합니다.\n"
+            "다음 JSON Schema에 맞춰 필드를 추출하세요. 서명이 존재하면 signature_present=true 입니다.\n\n"
+            "[Schema]\n"
+            f"{_json.dumps(sub_schema, ensure_ascii=False, indent=2)}\n\n"
+            "다른 키를 추가하지 말고 schema 그대로 JSON만 출력하세요."
+        )
+    if field_key == "document_date":
+        return (
+            "이 크롭 이미지는 전비품 확인서 작성 일자(수기)입니다.\n"
+            "날짜 문자열만 JSON 문자열 리터럴로 출력하세요. 예: \"2026년 4월 15일\"\n"
+            "객체·배열·코드블록 없이 문자열 하나만 반환하세요."
+        )
+    if field_key == "form_identifier":
+        return (
+            "이 크롭 이미지는 서식 식별자 텍스트입니다. 예: \"별지 제3-2호 서식\"\n"
+            "문자열 리터럴만 JSON 형식으로 출력하세요."
+        )
+    return (
+        f"이 영역의 내용을 다음 JSON Schema에 맞춰 출력하세요.\n"
+        f"field_key: {field_key}\n\n"
+        "[Schema]\n"
+        f"{_json.dumps(sub_schema, ensure_ascii=False, indent=2)}\n\n"
+        "스키마 외의 키를 추가하지 마세요."
+    )

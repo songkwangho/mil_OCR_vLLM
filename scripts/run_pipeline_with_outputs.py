@@ -181,8 +181,11 @@ def save_p2_5a(out_dir: Path, result: PipelineResult):
             "region_type": rt,
             "bbox": {"x1": r.bbox.x1, "y1": r.bbox.y1, "x2": r.bbox.x2, "y2": r.bbox.y2},
             "confidence": round(r.confidence, 4),
+            "source": getattr(r, "source", "model"),
+            "field_key": getattr(r, "field_key", None),
         })
     raw_count = len(p2_raw.regions) if p2_raw else "N/A"
+    tpl_stats = getattr(result, "template_augmentor_stats", None)
     _save_json(d / "result.json", {
         "doc_id": p2.doc_id,
         "page_width": p2.page_width,
@@ -191,6 +194,18 @@ def save_p2_5a(out_dir: Path, result: PipelineResult):
         "refined_region_count": len(p2.regions),
         "removed_count": getattr(p2, "removed_count", 0),
         "merged_count": getattr(p2, "merged_count", 0),
+        "augmented_count": getattr(p2, "augmented_count", 0),
+        "template_augmentor": (
+            {
+                "augmented_count": tpl_stats.augmented_count,
+                "pp_matched_count": tpl_stats.pp_matched_count,
+                "version_selected": tpl_stats.version_selected,
+                "form_identifier_matched": tpl_stats.form_identifier_matched,
+                "template_loaded": tpl_stats.template_loaded,
+                "skipped_reason": tpl_stats.skipped_reason,
+            }
+            if tpl_stats is not None else None
+        ),
         "regions": regions_data,
         "reading_order": p2.reading_order,
         "analysis_mode": p2.analysis_mode.value if hasattr(p2.analysis_mode, 'value') else str(p2.analysis_mode),
@@ -225,6 +240,7 @@ def save_p2_5b(out_dir: Path, result: PipelineResult):
             "region_type": rt,
             "form_type": ft,
             "pixel_budget": spec.pixel_budget,
+            "field_key": getattr(spec, "field_key", None),
             "system_prompt": spec.system_prompt,
             "user_instruction": spec.user_instruction,
             "json_schema": spec.json_schema,
@@ -338,6 +354,7 @@ def save_p3(out_dir: Path, result: PipelineResult):
         "processing_time_ms": round(p3.processing_time_ms, 1),
         "retry_count": getattr(p3, "retry_count", 0),
         "retried_fields": [f["field_key"] for f in fields_data if f.get("was_retried")],
+        "assembled_json": getattr(p3, "assembled_json", None),
         "warnings": p3.warnings,
     })
 

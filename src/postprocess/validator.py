@@ -218,21 +218,26 @@ def _parse_date(s: str) -> Optional[datetime]:
     return None
 
 
-def _validate_equipment_checklist(raw_json: str) -> list[ValidationError]:
+def _validate_equipment_checklist(data_or_raw) -> list[ValidationError]:
     """CHK-001~004 — 전비품 확인서 점검표 전용 룰.
 
-    raw_json은 P3-B가 저장한 VLM 원본 JSON 문자열. checklist_items/writer 중첩 구조를 검증.
+    Accept either an assembled dict (preferred) or a raw JSON string (fallback).
     """
     errors: list[ValidationError] = []
-    if not raw_json:
+    if data_or_raw is None:
         return errors
-    try:
-        import json as _json
-        data = _json.loads(raw_json)
-    except Exception:
-        return errors
-    if not isinstance(data, dict):
-        return errors
+    if isinstance(data_or_raw, dict):
+        data = data_or_raw
+    else:
+        if not data_or_raw:
+            return errors
+        try:
+            import json as _json
+            data = _json.loads(data_or_raw)
+        except Exception:
+            return errors
+        if not isinstance(data, dict):
+            return errors
 
     items = data.get("checklist_items")
 
@@ -378,9 +383,8 @@ class P4Validator:
             all_errors.extend(_validate_date_logic(fields))
             all_errors.extend(_validate_missing_fields(fields, form_type))
             if form_type == "equipment_checklist":
-                all_errors.extend(
-                    _validate_equipment_checklist(vlm_result.raw_json)
-                )
+                payload = vlm_result.assembled_json or vlm_result.raw_json
+                all_errors.extend(_validate_equipment_checklist(payload))
 
         # error_id 재번호 부여
         for i, err in enumerate(all_errors):
