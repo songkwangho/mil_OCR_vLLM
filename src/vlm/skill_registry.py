@@ -29,6 +29,8 @@ from src.interfaces.types import (
     SkillTask,
 )
 from src.vlm.budget_config import DISPATCH_ORDER, PIXEL_BUDGETS as PIXEL_BUDGET
+from src.vlm.skills.handwriting_reader import HandwritingReader
+from src.vlm.skills.printed_text_reader import PrintedTextReader
 from src.vlm.skills.seal_reader import SealReader
 from src.vlm.skills.signature_detector import SignatureDetector
 from src.vlm.skills.table_extractor import TableExtractor
@@ -90,13 +92,27 @@ class SkillDispatchStats:
 # ─────────────────────────────────────────────
 
 class SkillRegistry:
-    """Skill 인스턴스 lazy 관리 + 태스크 디스패치."""
+    """Skill 인스턴스 lazy 관리 + 태스크 디스패치.
 
-    def __init__(self, vlm_client: VLMClient):
+    S2 PrintedTextReader / S3 HandwritingReader는 공통 도메인 서비스이므로
+    Orchestrator가 생성한 단일 인스턴스를 주입받습니다. 이렇게 하면
+    StructuredExtractor(military 경로)와 SkillRegistry(other 경로)가 동일한
+    S2/S3 인스턴스를 참조하게 됩니다.
+    """
+
+    def __init__(
+        self,
+        vlm_client: VLMClient,
+        printed_text_reader: PrintedTextReader,
+        handwriting_reader: HandwritingReader,
+    ):
         self.vlm = vlm_client
-        self._skills: dict[str, object] = {}
+        self._skills: dict[str, object] = {
+            "S2": printed_text_reader,
+            "S3": handwriting_reader,
+        }
 
-    # Skill lazy 초기화 — S4/S5/S6만 구현 (S2/S3는 후속 구현, 현재는 더미 라우팅)
+    # Skill lazy 초기화 — S4/S5/S6만 자체 생성, S2/S3는 주입받음
     def _get_skill(self, skill_name: str):
         if skill_name in self._skills:
             return self._skills[skill_name]
@@ -107,7 +123,7 @@ class SkillRegistry:
         elif skill_name == "S6":
             inst = SignatureDetector(vlm_client=self.vlm)
         else:
-            inst = None  # S2/S3 미구현 — 호출 시 텍스트 Stub 처리
+            inst = None
         self._skills[skill_name] = inst
         return inst
 
@@ -234,8 +250,16 @@ class SkillRegistry:
     def _run_single(self, task: SkillTask, skill_name: str) -> SkillResult:
         skill = self._get_skill(skill_name)
         if skill is None:
-            # S2/S3 미구현 — PrintedTextReader/HandwritingReader 간이 Stub
-            return _stub_text_skill(self.vlm, task, skill_name)
+            logger.warning("[SkillRegistry] 미등록 skill=%s region=%s",
+                           skill_name, task.region_id)
+            return SkillResult(
+                region_id=task.region_id,
+                skill_name=skill_name,
+                content="",
+                confidence=0.0,
+                content_type="error",
+                warnings=[f"skill_not_registered: {skill_name}"],
+            )
         try:
             return skill.run(task)
         except Exception as e:
@@ -282,89 +306,3 @@ def _crop_with_padding(
     return image[y1:y2, x1:x2].copy()
 
 
-def _stub_text_skill(vlm: VLMClient, task: SkillTask, skill_name: str) -> SkillResult:
-    """S2/S3 Stub — 단순 한국어 텍스트 추출 (guided_json 없이 순수 텍스트).
-
-    TODO: S2 PrintedTextReader / S3 HandwritingReader 정식 구현 시 교체.
-    """
-    from src.vlm.vlm_client import encode_image_base64
-
-    if skill_name == "S3":
-        system = (
-            "You are a Korean handwriting recognition specialist.\n"
-            "Recognize the handwritten Korean text exactly as written.\n"
-            "Common confusion pairs: ㄱ/ㅋ, ㄴ/ㄹ, ㅏ/ㅓ, 1/ㅣ, 0/O. Mark ambiguous chars with [?].\n"
-            "Output JSON: {\"text\": \"...\", \"confidence\": 0.0~1.0}."
-        )
-        schema = {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            },
-            "required": ["text", "confidence"],
-            "additionalProperties": False,
-        }
-        content_type = "handwritten"
-    else:  # S2
-        system = (
-            "You are a Korean document OCR assistant.\n"
-            "Extract all printed Korean text from this region exactly as written.\n"
-            "Mark illegible characters as [?].\n"
-            "Output JSON: {\"text\": \"...\", \"confidence\": 0.0~1.0}."
-        )
-        schema = {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            },
-            "required": ["text", "confidence"],
-            "additionalProperties": False,
-        }
-        content_type = "printed"
-
-    instruction = "위 영역의 한국어 텍스트를 JSON으로 추출하세요."
-    if task.context:
-        instruction += f"\n[셀 역할] {task.context}"
-
-    try:
-        b64 = encode_image_base64(task.cropped_image, max_size=task.pixel_budget)
-        resp = vlm.call(
-            image_b64=b64,
-            instruction=instruction,
-            system_prompt=system,
-            guided_json=schema,
-            pixel_budget=task.pixel_budget,
-        )
-    except Exception as e:
-        return SkillResult(
-            region_id=task.region_id,
-            skill_name=skill_name,
-            content="",
-            confidence=0.0,
-            content_type=content_type,
-            warnings=[f"vlm_call_failed: {type(e).__name__}"],
-        )
-
-    raw = resp.get("content", "") or ""
-    from src.vlm.skills.seal_reader import _loads_relaxed
-    data = _loads_relaxed(raw)
-    if data is not None:
-        text = str(data.get("text", "") or "")
-        try:
-            conf = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
-        except (TypeError, ValueError):
-            conf = 0.0
-    else:
-        text = raw.strip()
-        conf = 0.0
-
-    return SkillResult(
-        region_id=task.region_id,
-        skill_name=skill_name,
-        content=text,
-        confidence=conf,
-        content_type=content_type,
-        raw_response=raw,
-    )

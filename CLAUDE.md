@@ -160,7 +160,7 @@ PP-DocLayout Fine-tuning과 상호 보완:
 
 ### Phase 1 잔여 — 남은 핵심 작업
 
-- [ ] **S2 PrintedTextReader / S3 HandwritingReader 정식 구현** — 현재는 skill_registry의 `_stub_text_skill`이 guided_json으로 대체 처리. 한국어 수기 인식률 실측(10~20장) 후 임계값 보정 필요.
+- [x] **S2 PrintedTextReader / S3 HandwritingReader 정식 구현** — 공통 도메인 서비스로 격상. StructuredExtractor(military)와 SkillRegistry(other)가 Orchestrator DI로 단일 인스턴스 공유. S3는 신뢰도<0.70 시 프롬프트 변형 재시도. 한국어 수기 인식률 실측(10~20장)은 후속.
 - [ ] **S7 StructuredAggregator 구현** — 현재 Skill 결과를 region_id 단위 FieldValue로 평탄화. official_document 스키마에 맞춘 최종 집계가 필요.
 - [ ] **OCR-augmented 힌트** — `ocr_hint_provider.py`는 구현됐으나 PaddleOCR 가중치의 오프라인 배치(`~/.paddlex/official_models/`)와 `Dockerfile.pipeline` COPY 반영 필요.
 - [ ] **1-shot 예시 자산화** — `configs/instruction_examples/*.yaml` 서식별 예시 작성.
@@ -241,8 +241,8 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | — | OCR 힌트 제공자 | `src/vlm/ocr_hint_provider.py` | 🟡 구현 완료, 폐쇄망 가중치 배치 필요 |
 | — | Skill Registry | `src/vlm/skill_registry.py` | ✅ DISPATCH_ORDER [140,560,1120] + SkillDispatchStats |
 | — | Skill JSON 파서 | `src/vlm/skills/_parsing.py` | ✅ _loads_relaxed 공용화 (seal/signature/table에서 사용) |
-| — | S2 PrintedTextReader | `src/vlm/skills/printed_text_reader.py` | 🔴 미구현 (Stub 대체 중) |
-| — | S3 HandwritingReader | `src/vlm/skills/handwriting_reader.py` | 🔴 미구현 (Stub 대체 중) |
+| — | S2 PrintedTextReader | `src/vlm/skills/printed_text_reader.py` | ✅ 공통 도메인 서비스 — other + military(unknown) text/header/footer |
+| — | S3 HandwritingReader | `src/vlm/skills/handwriting_reader.py` | ✅ 공통 도메인 서비스 — 모든 form_type의 handwritten_field. `task.json_schema` 있으면 guided_json으로 구조화 JSON 반환(`_loads_relaxed_any`로 코드펜스 정제), 없으면 순수 텍스트. 신뢰도<0.70 시 프롬프트 변형 재시도 |
 | — | S4 SealReader | `src/vlm/skills/seal_reader.py` | ✅ |
 | — | S5 TableExtractor | `src/vlm/skills/table_extractor.py` | ✅ pass1/pass2 |
 | — | S6 SignatureDetector | `src/vlm/skills/signature_detector.py` | ✅ |
@@ -296,8 +296,8 @@ mil_OCR_v2/
 │   │   │   ├── seal_reader.py          (S4 ✅)
 │   │   │   ├── table_extractor.py      (S5 ✅ 2패스)
 │   │   │   ├── signature_detector.py   (S6 ✅)
-│   │   │   ├── printed_text_reader.py  (S2 🔴 미구현)
-│   │   │   ├── handwriting_reader.py   (S3 🔴 미구현)
+│   │   │   ├── printed_text_reader.py  (S2 ✅ 공통 도메인 서비스)
+│   │   │   ├── handwriting_reader.py   (S3 ✅ 공통 도메인 서비스 + 재시도)
 │   │   │   └── aggregator.py           (S7 🔴 미구현)
 │   │   ├── ocr_hint_provider.py
 │   │   ├── form_classifier.py

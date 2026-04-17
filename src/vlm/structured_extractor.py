@@ -28,13 +28,15 @@ if TYPE_CHECKING:
 
 import numpy as np
 
-from src.interfaces.enums import CodeType, FormType, ProcessingPath
+from src.interfaces.enums import CodeType, FormType, ProcessingPath, RegionType
 from src.interfaces.types import (
     CroppedRegion,
     DomainCode,
     FieldValue,
     InstructionSpec,
     RecognizedTable,
+    SkillResult,
+    SkillTask,
     VLMResult,
 )
 
@@ -229,6 +231,8 @@ class StructuredExtractor:
         self,
         config: Optional[StructuredExtractorConfig] = None,
         ocr_hint_provider=None,
+        printed_text_reader=None,
+        handwriting_reader=None,
     ):
         self.cfg = config or StructuredExtractorConfig()
         # VLMClient: 모든 vLLM 호출을 위임
@@ -244,6 +248,9 @@ class StructuredExtractor:
         )
         # OCR-augmented 힌트 제공자 (선택적, 저신뢰 재시도 시 활용)
         self._ocr_hint_provider = ocr_hint_provider
+        # 공통 도메인 서비스 — Orchestrator가 주입. 생략 시 지연 생성.
+        self._s2 = printed_text_reader
+        self._s3 = handwriting_reader
 
     def extract(
         self,
@@ -293,7 +300,7 @@ class StructuredExtractor:
             for cropped in regions:
                 region_t0 = time.time()
                 try:
-                    result = self._process_single(cropped, schema, warnings)
+                    result = self._process_single(cropped, schema, warnings, form_type)
                     region_ms = (time.time() - region_t0) * 1000
                     if result is None:
                         if trace is not None:
@@ -598,13 +605,77 @@ class StructuredExtractor:
 
         return retry_count
 
+    # ─────────────────────────────────────────────
+    #  S2/S3 공통 도메인 서비스 위임
+    # ─────────────────────────────────────────────
+
+    def _get_s2_s3(self, skill_name: str):
+        """S2/S3 지연 생성. Orchestrator가 주입하지 않은 경우 자체 생성."""
+        if skill_name == "S2":
+            if self._s2 is None:
+                from src.vlm.skills.printed_text_reader import PrintedTextReader
+                self._s2 = PrintedTextReader(vlm_client=self._vlm_client)
+            return self._s2
+        if skill_name == "S3":
+            if self._s3 is None:
+                from src.vlm.skills.handwriting_reader import HandwritingReader
+                self._s3 = HandwritingReader(vlm_client=self._vlm_client)
+            return self._s3
+        return None
+
+    def _delegate_to_skill(
+        self,
+        cropped: CroppedRegion,
+        spec: InstructionSpec,
+        skill,
+        skill_name: str,
+        form_type: Optional[FormType],
+    ) -> tuple[list[FieldValue], list[RecognizedTable], list[DomainCode], str]:
+        """S2/S3에 위임 실행 후 SkillResult → FieldValue 변환.
+
+        S3 구조화 응답(content_type="structured")은 이미 JSON 문자열이므로
+        raw_value에 그대로 보존 → Assembler가 blob으로 복원한다. field_key가 있으면
+        Assembler의 x-assembly-rules 매칭 대상이 된다.
+        """
+        spec_field_key = getattr(spec, "field_key", None) if spec else None
+        spec_schema = getattr(spec, "json_schema", None) if spec else None
+        task = SkillTask(
+            region_id=cropped.region_id,
+            region_type=cropped.region_type,
+            cropped_image=cropped.cropped_image,
+            pixel_budget=cropped.pixel_budget,
+            context=spec.user_instruction if spec else "",
+            form_type=form_type,
+            field_key=spec_field_key,
+            json_schema=spec_schema if skill_name == "S3" else None,
+        )
+        result: SkillResult = skill.run(task)
+        field_key = spec_field_key or f"{skill_name.lower()}_{cropped.region_id}"
+        field = FieldValue(
+            field_key=field_key,
+            raw_value=result.content,
+            corrected_value=result.content,
+            data_type="text",
+            confidence=result.confidence,
+            token_logprobs=[],
+            is_flagged=(result.confidence < 0.70 or not result.content),
+            region_id=cropped.region_id,
+        )
+        return [field], [], [], result.content
+
     def _process_single(
         self,
         cropped: CroppedRegion,
         schema: Optional[dict],
         warnings: list[str],
+        form_type: Optional[FormType] = None,
     ) -> Optional[tuple[list[FieldValue], list[RecognizedTable], list[DomainCode], str]]:
         """단일 CroppedRegion 처리.
+
+        region_type 기반 위임:
+          - HANDWRITTEN_FIELD → S3 HandwritingReader (모든 form_type)
+          - TEXT/HEADER/FOOTER + form_type=UNKNOWN → S2 PrintedTextReader
+          - 나머지 → 기존 guided_json 경로
 
         Returns:
             (fields, tables, domain_codes, raw_json) 또는 None
@@ -613,11 +684,27 @@ class StructuredExtractor:
         from src.vlm.logprobs_scorer import calc_field_confidence, is_flagged
 
         spec = cropped.instruction_spec
+        region_type_enum = cropped.region_type
         region_type = (
-            cropped.region_type.value
-            if hasattr(cropped.region_type, "value")
-            else str(cropped.region_type)
+            region_type_enum.value
+            if hasattr(region_type_enum, "value")
+            else str(region_type_enum)
         )
+
+        # ─── S3 위임: handwritten_field (모든 form_type) ───
+        if region_type_enum == RegionType.HANDWRITTEN_FIELD:
+            return self._delegate_to_skill(
+                cropped, spec, self._get_s2_s3("S3"), "S3", form_type,
+            )
+
+        # ─── S2 위임: text/header/footer + unknown form_type ───
+        if (
+            region_type_enum in (RegionType.TEXT, RegionType.HEADER, RegionType.FOOTER)
+            and form_type == FormType.UNKNOWN
+        ):
+            return self._delegate_to_skill(
+                cropped, spec, self._get_s2_s3("S2"), "S2", form_type,
+            )
 
         # 이미지 인코딩 (pixel_budget 기반 최대 크기)
         max_px = int((cropped.pixel_budget * 28 * 28) ** 0.5)

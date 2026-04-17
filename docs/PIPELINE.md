@@ -200,6 +200,8 @@ class SkillTask:
     pixel_budget: int
     context: str = ""
     form_type: Optional[FormType] = None
+    field_key: Optional[str] = None       # TemplateAugmentor/InstructionRouter 부여
+    json_schema: Optional[dict] = None    # sub-schema (있으면 S3가 guided_json으로 사용)
 
 @dataclass
 class SkillResult:
@@ -764,27 +766,63 @@ SKILL_ROUTING = {
 }
 ```
 
-### 4-3. S2 PrintedTextReader
+### 4-3. S2 PrintedTextReader — 공통 도메인 서비스
 
 **파일**: `src/vlm/skills/printed_text_reader.py`
 
 ```python
 class PrintedTextReader:
+    """인쇄 텍스트 전용. 처리 경로(military/other) 무관 — region_type 기반 호출.
+    guided_json 없이 순수 텍스트 추출 + 토큰 logprobs 기하평균 신뢰도."""
+    SKILL_NAME = "S2"
     PIXEL_BUDGET = 560
-    # guided_json 없이 순수 텍스트 추출
-    # 이유: 인쇄 텍스트는 스키마 강제보다 정확한 텍스트 추출이 우선
 ```
 
-### 4-4. S3 HandwritingReader
+**호출 시나리오**:
+- other 경로 SkillRegistry: `region_type ∈ {text, header, footer}` → S2
+- military 경로 StructuredExtractor: `form_type == UNKNOWN` & `region_type ∈ {text, header, footer}` → S2
+
+### 4-4. S3 HandwritingReader — 공통 도메인 서비스
 
 **파일**: `src/vlm/skills/handwriting_reader.py`
 
 ```python
 class HandwritingReader:
+    """수기 인식 전용. 처리 경로 무관 — region_type=handwritten_field 모든 form_type.
+    신뢰도 < 0.70 시 다른 system prompt로 1회 재호출."""
+    SKILL_NAME = "S3"
     PIXEL_BUDGET = 1120
-    # context: S5 패스1이 제공한 셀 역할
-    # 신뢰도 < 0.70 → 동일 영역 재호출 (다른 프롬프트 변형)
+    RETRY_CONFIDENCE_THRESHOLD = 0.70
+
+    def run(task: SkillTask) -> SkillResult:
+        if task.json_schema is not None:
+            return self._run_with_schema(task)   # guided_json → 구조화 JSON
+        return self._run_plain_text(task)        # 순수 텍스트
 ```
+
+**분기** (sub-schema 전달 여부 기반):
+
+| task.json_schema | 반환 content_type | 용도 |
+|------------------|------------------|------|
+| None             | `handwritten` (순수 텍스트) | unknown / other 경로 |
+| 제공 (sub-schema) | `structured` (JSON 문자열) | military 서식, x-assembly-rules 적용 영역 |
+
+**구조화 응답 정제**: guided_json을 쓰더라도 VLM이 간헐적으로 ```` ```json ```` 코드 펜스를 섞어 반환하는 케이스가 있어, S3가 `_loads_relaxed_any`로 파싱 후 `json.dumps`로 재직렬화하여 Assembler가 바로 dict로 복원할 수 있도록 한다.
+
+**호출 시나리오**: 모든 경로에서 `region_type == HANDWRITTEN_FIELD` → S3 위임. `field_key`/`json_schema`는 StructuredExtractor의 `_delegate_to_skill`이 `InstructionSpec`에서 그대로 전달한다.
+
+### 4-4-1. S2/S3 위임 매트릭스 (StructuredExtractor)
+
+| region_type | form_type | 처리 방식 |
+|-------------|-----------|----------|
+| handwritten_field | 모든 타입 (schema 있음) | **S3 위임 (구조화)** — sub-schema를 guided_json으로 전달 |
+| handwritten_field | 모든 타입 (schema 없음) | **S3 위임 (순수 텍스트)** |
+| text/header/footer | unknown | **S2 위임** |
+| text/header/footer | military (unknown 제외) | 기존 guided_json (field_key 있음) |
+| table | 모든 타입 | `_process_table` (HTML+logprobs) |
+| seal | — | 해당 경로에서는 없음 (other만) |
+
+S2/S3 인스턴스는 Orchestrator가 단일로 생성해 StructuredExtractor와 SkillRegistry 양쪽에 주입합니다 (`_get_printed_text_reader`, `_get_handwriting_reader`).
 
 ### 4-5. S4 SealReader
 
@@ -1015,12 +1053,14 @@ class FallbackPolicy:
 | `vlm_client.py` | vLLM HTTP 통신, base64 인코딩, logprobs 파싱 | 이미지 크롭, 도메인 코드 감지 |
 | `template_augmentor.py` | 서식 템플릿 로드, IoU 비교, bbox 병합 | VLM 통신, 크롭 |
 | `resolution_router.py` | bbox 크롭 + 패딩 + 48px 정렬 + 배치 그룹화 | VLM 통신 |
-| `structured_extractor.py` | military 배치 VLM 호출, 필드 추출, 재시도 | 이미지 크롭 |
+| `structured_extractor.py` | military 배치 VLM 호출, 필드 추출, 재시도. `HANDWRITTEN_FIELD`→S3 위임, `TEXT/HEADER/FOOTER`+`unknown`→S2 위임, 나머지는 guided_json | 이미지 크롭 |
 | `form_classifier.py` | 서식 분류 (military/other 분기) | 필드 추출, 크롭 |
 | `ocr_hint_provider.py` | PaddleOCR 선행 실행, 힌트 문자열 생성 | VLM 호출, 크롭 |
 | `seal_preprocessor.py` | HSV 분리 + 허프 탐지 + 극좌표 변환 | VLM 호출, 크롭 |
 | `skills/table_extractor.py` | 2패스 표 처리, 셀 태스크 반환 | VLM 직접 호출 |
 | `skills/signature_detector.py` | 서명 이진 탐지만 | OCR, 텍스트 추출 |
+| `skills/printed_text_reader.py` | **공통 도메인 서비스** — region_type=text/header/footer 인쇄 텍스트 추출. guided_json 없이 순수 텍스트 + logprobs 신뢰도 | 경로별 분기, 스키마 강제 |
+| `skills/handwriting_reader.py` | **공통 도메인 서비스** — region_type=handwritten_field 수기 인식. 신뢰도<0.70 시 프롬프트 변형 재시도 | 경로별 분기, 스키마 강제 |
 | `vlm/budget_config.py` | `PIXEL_BUDGETS`, `FALLBACK_PIXEL_BUDGET`, `DISPATCH_ORDER` 중앙화 | region_type 결정 |
 | `skills/_parsing.py` | VLM 응답 JSON 관대 파서(`_loads_relaxed`) 공용화 | VLM 호출 |
 | `preprocess/bbox_utils.py` | `compute_iou(a, b)` 공용 IoU 계산 | bbox 변환, 크롭 |

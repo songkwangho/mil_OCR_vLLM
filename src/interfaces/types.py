@@ -257,13 +257,20 @@ class SealProcessResult:
 
 @dataclass
 class SkillTask:
-    """오케스트레이터가 Skill에 전달하는 작업 단위."""
+    """오케스트레이터가 Skill에 전달하는 작업 단위.
+
+    field_key / json_schema: StructuredExtractor(military) 경로에서 S3가
+    sub-schema를 guided_json으로 받아 구조화 JSON을 반환하도록 한다.
+    other/unknown 경로에서는 둘 다 None이며 S3는 순수 텍스트만 반환한다.
+    """
     region_id: str
     region_type: RegionType
     cropped_image: np.ndarray
     pixel_budget: int
     context: str = ""
     form_type: Optional[FormType] = None
+    field_key: Optional[str] = None
+    json_schema: Optional[dict] = None
 
 
 @dataclass

@@ -232,7 +232,7 @@ class PipelineOrchestrator:
         return self._components["ocr_hint"]
 
     def _get_p3b(self):
-        """P3-B StructuredExtractor (OCRHintProvider 주입)."""
+        """P3-B StructuredExtractor (OCRHintProvider + S2/S3 공통 도메인 서비스 주입)."""
         if "p3b" not in self._components:
             from src.vlm.structured_extractor import (
                 StructuredExtractor,
@@ -246,9 +246,42 @@ class PipelineOrchestrator:
             self._components["p3b"] = StructuredExtractor(
                 config=config,
                 ocr_hint_provider=ocr_provider,
+                printed_text_reader=self._get_printed_text_reader(),
+                handwriting_reader=self._get_handwriting_reader(),
             )
             logger.info("오케스트레이터: P3-B 초기화 완료")
         return self._components["p3b"]
+
+    def _get_shared_vlm_client(self):
+        """S2/S3 / SkillRegistry가 공유하는 VLMClient (OpenAI 호환 HTTP)."""
+        if "vlm_client" not in self._components:
+            from src.vlm.vlm_client import VLMClient
+            self._components["vlm_client"] = VLMClient(
+                base_url=self.cfg.vllm_base_url,
+                model_name="/models/gemma4/gemma-4-26b-a4b-it/",
+                monitor=self._get_health_monitor(),
+            )
+        return self._components["vlm_client"]
+
+    def _get_printed_text_reader(self):
+        """S2 PrintedTextReader — StructuredExtractor와 SkillRegistry 공유."""
+        if "s2" not in self._components:
+            from src.vlm.skills.printed_text_reader import PrintedTextReader
+            self._components["s2"] = PrintedTextReader(
+                vlm_client=self._get_shared_vlm_client(),
+            )
+            logger.info("오케스트레이터: S2 PrintedTextReader 초기화 완료")
+        return self._components["s2"]
+
+    def _get_handwriting_reader(self):
+        """S3 HandwritingReader — StructuredExtractor와 SkillRegistry 공유."""
+        if "s3" not in self._components:
+            from src.vlm.skills.handwriting_reader import HandwritingReader
+            self._components["s3"] = HandwritingReader(
+                vlm_client=self._get_shared_vlm_client(),
+            )
+            logger.info("오케스트레이터: S3 HandwritingReader 초기화 완료")
+        return self._components["s3"]
 
     def _get_template_augmentor(self):
         """P2.5-A.5 TemplateAugmentor — military 서식 템플릿 bbox 병합."""
@@ -266,16 +299,14 @@ class PipelineOrchestrator:
         return stats
 
     def _get_skill_registry(self):
-        """Skill Registry (other 경로)."""
+        """Skill Registry (other 경로) — S2/S3 공통 인스턴스 주입."""
         if "skill_registry" not in self._components:
             from src.vlm.skill_registry import SkillRegistry
-            from src.vlm.vlm_client import VLMClient
-            vlm = VLMClient(
-                base_url=self.cfg.vllm_base_url,
-                model_name="/models/gemma4/gemma-4-26b-a4b-it/",
-                monitor=self._get_health_monitor(),
+            self._components["skill_registry"] = SkillRegistry(
+                vlm_client=self._get_shared_vlm_client(),
+                printed_text_reader=self._get_printed_text_reader(),
+                handwriting_reader=self._get_handwriting_reader(),
             )
-            self._components["skill_registry"] = SkillRegistry(vlm_client=vlm)
             logger.info("오케스트레이터: SkillRegistry 초기화 완료")
         return self._components["skill_registry"]
 
