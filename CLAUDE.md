@@ -29,6 +29,8 @@
 | `docs/AI_TRAINING.md` | Fine-tuning 전략·합성 데이터·교정 데이터 파이프라인 | AI 재학습 작업 시 |
 | `docs/TESTING.md` | 통합 테스트 절차·결과 구조·타이밍 기록 | 테스트 작업 시 |
 | `docs/FRONTEND.md` | 검토 큐 UI·API 엔드포인트 (현재 미구현) | 프론트엔드 작업 시 |
+| `docs/equipment_checklist_design.md` | 전비품 확인서(x-assembly-rules) 설계 명세 | 체크리스트 서식 작업 시 |
+| `docs/pdf_adapter_design.md` | PdfAdapter + PdfDocumentResult 설계 명세 | PDF 입력·멀티페이지 집계 작업 시 |
 
 **작업 시 이 파일(CLAUDE.md) + 해당 영역의 docs 파일만 읽어서 진행합니다.**
 
@@ -163,13 +165,13 @@ PP-DocLayout Fine-tuning과 상호 보완:
 - [ ] **OCR-augmented 힌트** — `ocr_hint_provider.py`는 구현됐으나 PaddleOCR 가중치의 오프라인 배치(`~/.paddlex/official_models/`)와 `Dockerfile.pipeline` COPY 반영 필요.
 - [ ] **1-shot 예시 자산화** — `configs/instruction_examples/*.yaml` 서식별 예시 작성.
 - [ ] **검출률 측정** — `scripts/evaluate_layout_detection.py --n 50` (PP-DocLayoutV3 기준치 확보).
-- [ ] **T8/T9/T10 통합 테스트 확장** — 인장/결재란 2패스/서명 탐지 시나리오 결과 축적.
-- [ ] **vLLM 변동성 측정** — 동일 문서 N=3 반복으로 기준치 수립 (전역지원서_2 이전 +99% 케이스).
+- [x] **T8/T9/T10 통합 테스트 확장** — `tests/test_T8_seal_integration.py` + `tests/test_T9_T10_skills_integration.py` 자동화 스위트 추가 (40 pass 확인).
+- [x] **vLLM 변동성 측정** — `scripts/measure_vllm_variance.py` 구축, N=3 반복 결과는 `data/variance_reports/`에 저장. 결정론 점수 20% 관측 — R3에 연계.
 - [ ] **P4 신뢰도 재산출 (assembled_json 대응)** — field_key blob 단일 FieldValue로 저장되면서 토큰 단위 logprobs 평균이 의미 없어짐. assembled_json 트리 단위로 sub-field 신뢰도 분해·집계 필요. (현재 전비품 확인서에서 overall_confidence=0.13 관찰)
   - 하위 과제: `vlm_client.extract_field_logprobs` 위치 추적 미구현으로 필드별 신뢰도가 유사 값으로 수렴하는 문제 포함 (variance 측정 20% 결정론 점수의 한 원인).
 - [ ] **도메인 사전 기반 필드 교정** — 인식 모호성이 잦은 폐쇄집합 필드(계급·부대코드 등)에 대한 이중 방어.
   - **1차: 스키마 enum 강제** — `equipment_checklist.json` `writer.rank` 등에 한국군 직급 enum 추가 → xgrammar가 디코딩 단계에서 차단.
-  - **2차: 후처리 정규화 사전** — `rank_normalizer.py` 등 소형 모듈로 Levenshtein 최근접 매칭, 거리 > 2 이면 검토 큐 플래그.
+  - **2차: 후처리 정규화 사전** — `rank_normalizer.py` 1차 구현 완료 (Levenshtein 최근접). 검토 큐 플래그 연동은 P4 통합 예정.
   - **확장 후보**: `nsn/K-NSN`은 `pattern` (guidance 백엔드 필요), `unit_code`는 부대 실재 DB 조회로 보강.
   - **지식그래프는 보류** — 현 단계 단일 필드 오인식 수정엔 ROI 나쁨. Phase 3 검토 큐 대시보드와 함께 재검토.
 
@@ -222,8 +224,8 @@ PP-DocLayout Fine-tuning과 상호 보완:
 
 | P# | 컴포넌트 | 소스 파일 | 상태 |
 |----|----------|----------|------|
-| — | 공용 인터페이스 | `src/interfaces/` | ✅ Enum+dataclass (SkillTask/Result, TableStructure, SealProcessResult 포함) |
-| — | 오케스트레이터 | `src/pipeline/orchestrator.py` | ✅ military/other 분기 완료 (`_process_other_document`) |
+| — | 공용 인터페이스 | `src/interfaces/` | ✅ Enum+dataclass (`ValidatedResult.assembled_json`, `PdfDocumentResult.page_results`, `FieldValue.region_id/was_retried` 포함) |
+| — | 오케스트레이터 | `src/pipeline/orchestrator.py` | ✅ military/other 분기 완료 (`_process_other_document`) + `_aggregate_pdf_status` OTHER_DOCUMENT 처리 |
 | P1 | 화질 보정 + SR | `src/preprocess/preprocessor.py` | ✅ |
 | P2 | 레이아웃 탐지 (Fusion) | `src/preprocess/layout_analyzer.py` | ✅ |
 | P2.5-A | LayoutPostProcessor | `src/preprocess/layout_postprocessor.py` | ✅ |
@@ -235,8 +237,10 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | P2.5-C | ResolutionRouter | `src/vlm/resolution_router.py` | ✅ 48px 정렬 + DISPATCH_ORDER + 패딩 절대 상한 |
 | P3-B | StructuredExtractor | `src/vlm/structured_extractor.py` | ✅ 저신뢰 재시도 + field_key blob 보존 + Assembler 호출 |
 | — | Assembler | `src/vlm/assembler.py` | ✅ x-assembly-rules 기반 region→full dict 조립, 누락 자동 보완 |
+| — | Budget Config | `src/vlm/budget_config.py` | ✅ PIXEL_BUDGETS/FALLBACK_PIXEL_BUDGET/DISPATCH_ORDER 중앙화 |
 | — | OCR 힌트 제공자 | `src/vlm/ocr_hint_provider.py` | 🟡 구현 완료, 폐쇄망 가중치 배치 필요 |
 | — | Skill Registry | `src/vlm/skill_registry.py` | ✅ DISPATCH_ORDER [140,560,1120] + SkillDispatchStats |
+| — | Skill JSON 파서 | `src/vlm/skills/_parsing.py` | ✅ _loads_relaxed 공용화 (seal/signature/table에서 사용) |
 | — | S2 PrintedTextReader | `src/vlm/skills/printed_text_reader.py` | 🔴 미구현 (Stub 대체 중) |
 | — | S3 HandwritingReader | `src/vlm/skills/handwriting_reader.py` | 🔴 미구현 (Stub 대체 중) |
 | — | S4 SealReader | `src/vlm/skills/seal_reader.py` | ✅ |
@@ -244,12 +248,14 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | — | S6 SignatureDetector | `src/vlm/skills/signature_detector.py` | ✅ |
 | — | S7 StructuredAggregator | `src/vlm/skills/aggregator.py` | 🔴 미구현 (region_id 단위 평탄화로 임시 대체) |
 | — | VLM 공용 클라이언트 | `src/vlm/vlm_client.py` | ✅ |
-| P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ✅ 경로별 임계값 |
+| P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ✅ 경로별 임계값 + region_id/was_retried 보존 |
+| — | 계급 정규화 | `src/postprocess/rank_normalizer.py` | ✅ 한국군 계급 Levenshtein 최근접 매칭 |
+| — | bbox 유틸 | `src/preprocess/bbox_utils.py` | ✅ compute_iou 공용화 (layout_postprocessor/template_augmentor 사용) |
 | P5 | 직렬화 | `src/postprocess/serializer.py` | ✅ |
-| P6 | DB 적재 | `src/postprocess/db_loader.py` | ✅ |
-| — | 수동 검토 큐 | `src/postprocess/review_queue.py` | ✅ |
-| — | Fallback 서비스 | `src/fallback/ocr_fallback_service.py` | ✅ |
-| — | VLM 헬스 모니터 | `src/pipeline/health_monitor.py` | ✅ |
+| P6 | DB 적재 | `src/postprocess/db_loader.py` | ✅ per-URL 캐시 + `assembled_json` Text 컬럼 |
+| — | 수동 검토 큐 | `src/postprocess/review_queue.py` | ✅ per-URL 캐시 + `RQ-YYYYMMDD-HHMMSS-{doc_id}-{uuid[:6]}` 형식 |
+| — | Fallback 서비스 | `src/fallback/ocr_fallback_service.py`, `fallback_http_client.py` | ✅ Docker 분리 모드 지원 |
+| — | VLM 헬스 모니터 | `src/pipeline/health_monitor.py` | ✅ `record_failure(reason)` public |
 | — | Layout 추론 서비스 | `src/preprocess/layout_server.py` | ✅ |
 | — | 스키마 레지스트리 | `src/domain/schema_registry.py` | ✅ v1/ 스캔 + `get()` 별칭 (`other→official_document`) |
 | — | JSON Schemas v1 | `src/domain/schemas/v1/*.json` | ✅ 9종 (6 military 포함 `equipment_checklist` + `_fallback`/`_general`/`official_document`). `x-assembly-rules`/`x-checklist-item-schema` 지원 |
@@ -268,16 +274,24 @@ mil_OCR_v2/
 │   ├── AI_INFERENCE.md
 │   ├── AI_TRAINING.md
 │   ├── TESTING.md
-│   └── FRONTEND.md
+│   ├── FRONTEND.md
+│   ├── equipment_checklist_design.md    ← 신규 (x-assembly-rules 설계)
+│   └── pdf_adapter_design.md            ← 신규 (PdfAdapter + PdfDocumentResult)
 ├── src/
 │   ├── interfaces/
+│   ├── input/
+│   │   └── pdf_adapter.py               ← fitz 기반 PDF → PageImage
 │   ├── pipeline/
 │   ├── preprocess/
-│   │   └── seal_preprocessor.py
+│   │   ├── seal_preprocessor.py
+│   │   └── bbox_utils.py                ← 신규 (compute_iou 공용)
 │   ├── vlm/
-│   │   ├── template_augmentor.py  ← 신규 (PP-DocLayout 누락 보완)
+│   │   ├── template_augmentor.py        ← PP-DocLayout 누락 보완
+│   │   ├── assembler.py                 ← x-assembly-rules 조립기
+│   │   ├── budget_config.py             ← 신규 (PIXEL_BUDGETS/DISPATCH_ORDER)
 │   │   ├── skill_registry.py
 │   │   ├── skills/
+│   │   │   ├── _parsing.py              ← 신규 (_loads_relaxed 공용)
 │   │   │   ├── seal_reader.py          (S4 ✅)
 │   │   │   ├── table_extractor.py      (S5 ✅ 2패스)
 │   │   │   ├── signature_detector.py   (S6 ✅)
@@ -291,7 +305,10 @@ mil_OCR_v2/
 │   │   ├── structured_extractor.py
 │   │   └── vlm_client.py
 │   ├── postprocess/
+│   │   └── rank_normalizer.py           ← 신규 (한국군 계급 정규화)
 │   ├── fallback/
+│   │   ├── ocr_fallback_service.py
+│   │   └── fallback_http_client.py      ← Docker 분리 모드용
 │   └── domain/
 │       ├── schema_registry.py
 │       └── schemas/v1/
@@ -300,6 +317,7 @@ mil_OCR_v2/
 │           ├── inventory_sheet.json
 │           ├── handover_doc.json
 │           ├── inspection_report.json
+│           ├── equipment_checklist.json (x-assembly-rules)
 │           ├── _fallback.json
 │           ├── _general.json
 │           └── official_document.json
@@ -313,19 +331,31 @@ mil_OCR_v2/
 │   │       └── structured_extractor_v1/
 │   └── fallback/
 ├── data/
+│   ├── raw/                          (입력 문서)
+│   ├── pipeline_outputs/             (각 단계별 산출물 타임스탬프 폴더)
+│   └── variance_reports/             (scripts/measure_vllm_variance.py 출력)
 ├── docker/
 ├── docker-compose.yml
 ├── scripts/
+│   ├── run_pipeline_with_outputs.py  (단계별 산출 저장)
+│   ├── download_paddle_models.py     (OCR 힌트 가중치 오프라인 배치)
+│   └── measure_vllm_variance.py      (R3 변동성 측정)
 ├── training/
 ├── configs/
 │   ├── instruction_examples/
-│   └── form_templates/            ← 신규 (TemplateAugmentor용 서식별 bbox 정의)
+│   └── form_templates/               ← TemplateAugmentor용 서식별 bbox 정의
 │       ├── supply_request.yaml
 │       ├── maintenance_record.yaml
 │       ├── inventory_sheet.yaml
 │       ├── handover_doc.yaml
-│       └── inspection_report.yaml
+│       ├── inspection_report.yaml
+│       └── equipment_checklist.yaml
 └── tests/
+    ├── test_integration_pipeline.py  (기본 E2E)
+    ├── test_T2_T3_fusion.py          (Layout Fusion)
+    ├── test_T5_fallback_routing.py   (Fallback 라우팅)
+    ├── test_T8_seal_integration.py   (인장)
+    └── test_T9_T10_skills_integration.py (Skill 파이프라인)
 ```
 
 ---

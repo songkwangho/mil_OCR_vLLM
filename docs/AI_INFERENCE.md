@@ -248,10 +248,11 @@ if should_insert_hint(region, prev_confidence):
 
 ### 4-5. P2.5-C — ResolutionRouter
 
-**pixel_budget 기준값**:
+**pixel_budget 기준값** (`src/vlm/budget_config.py`에서 중앙 관리):
 
 ```python
-PIXEL_BUDGET = {
+# src/vlm/budget_config.py
+PIXEL_BUDGETS = {
     "table":             1120,  # 셀 경계·미세 글씨 → 최고 해상도
     "handwritten_field": 1120,  # 수기 기입란 — 560에서 상향 (한국어 획 구분 필수)
     "seal":               560,  # 원형 배치 텍스트
@@ -262,7 +263,11 @@ PIXEL_BUDGET = {
     "header":             140,  # 대형 텍스트, 저해상도로 충분
     "footer":             140,
 }
+FALLBACK_PIXEL_BUDGET = 560
+DISPATCH_ORDER = (140, 560, 1120)  # vLLM 패딩 최소화를 위한 배치 순서
 ```
+
+`resolution_router.py`, `skill_registry.py`, `instruction_router.py`가 모두 이 모듈에서 import하므로 변경 시 한 곳만 수정하면 전 경로에 반영됩니다.
 
 **48px 배수 정렬 — SigLIP 패치 효율 최적화**:
 
@@ -480,6 +485,8 @@ restart: unless-stopped
 | `scripts/test_vlm.py` | P3-A/P3-B VLM 단독 테스트 |
 | `scripts/run_pipeline_with_outputs.py` | 전체 + 단계별 출력 저장 |
 | `scripts/evaluate_layout_detection.py` | PP-DocLayout 검출률 측정 |
+| `scripts/measure_vllm_variance.py` | 동일 문서 N회 반복 → 결정론/변동성 리포트 (`data/variance_reports/`) |
+| `scripts/download_paddle_models.py` | PaddleOCR 힌트 가중치 오프라인 배치 (`~/.paddlex/official_models/`) |
 
 ---
 

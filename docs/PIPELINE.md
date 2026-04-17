@@ -136,6 +136,7 @@ class PdfDocumentResult:
     doc_id: str                      # 원본 PDF doc_id
     total_pages: int
     pages: list[PipelineOutput]      # doc_id = "{원본}_p{N:02d}"
+    page_results: list[Any]          # 원시 페이지별 결과 (서버 응답 및 디버깅용)
     overall_status: PipelineStatus
     processing_ms: float
     warnings: list[str] = field(default_factory=list)
@@ -314,6 +315,19 @@ class VLMResult:
     retry_count: int = 0
     warnings: list[str] = field(default_factory=list)
     assembled_json: Optional[dict] = None  # Assembler 조립 결과 (x-assembly-rules 있는 서식)
+
+@dataclass
+class ValidatedResult:
+    """P4 출력 — 룰 검증 + 신뢰도 보정 결과. P5가 진실의 원천으로 assembled_json을 사용."""
+    doc_id: str
+    fields: list[FieldValue]            # region_id/was_retried 포함된 보정 버전
+    tables: list[RecognizedTable]
+    validation_errors: list[ValidationError]
+    overall_confidence: float
+    review_required: bool
+    flagged_fields: list[str]
+    processing_path: ProcessingPath = ProcessingPath.VLM
+    assembled_json: Optional[dict] = None  # VLMResult로부터 승계
 ```
 
 ### 2-7. 후처리 결과
@@ -1007,6 +1021,11 @@ class FallbackPolicy:
 | `seal_preprocessor.py` | HSV 분리 + 허프 탐지 + 극좌표 변환 | VLM 호출, 크롭 |
 | `skills/table_extractor.py` | 2패스 표 처리, 셀 태스크 반환 | VLM 직접 호출 |
 | `skills/signature_detector.py` | 서명 이진 탐지만 | OCR, 텍스트 추출 |
+| `vlm/budget_config.py` | `PIXEL_BUDGETS`, `FALLBACK_PIXEL_BUDGET`, `DISPATCH_ORDER` 중앙화 | region_type 결정 |
+| `skills/_parsing.py` | VLM 응답 JSON 관대 파서(`_loads_relaxed`) 공용화 | VLM 호출 |
+| `preprocess/bbox_utils.py` | `compute_iou(a, b)` 공용 IoU 계산 | bbox 변환, 크롭 |
+| `postprocess/rank_normalizer.py` | 한국군 계급 Levenshtein 최근접 매칭 | 스키마 검증 |
+| `pipeline/health_monitor.py` | VLM 연속 실패 추적, `record_failure(reason)`/`is_healthy()` | Fallback 라우팅 결정 |
 
 ---
 

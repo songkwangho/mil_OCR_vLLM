@@ -127,10 +127,13 @@ class PdfDocumentResult:
     doc_id: str                          # 원본 PDF doc_id
     total_pages: int
     pages: list[PipelineOutput]          # 페이지 순서 유지, doc_id = "{원본}_p{N:02d}"
+    page_results: list[Any]              # 원시 페이지별 결과 (서버 응답, 디버깅용)
     overall_status: PipelineStatus       # 집계 상태 (§4 참조)
     processing_ms: float
     warnings: list[str] = field(default_factory=list)
 ```
+
+> `page_results`는 구현 단계에서 추가된 필드로, `pages`가 P1~P6 `PipelineOutput`을 담는 반면 `page_results`는 오케스트레이터 내부 집계 이전의 원시 처리 결과(페이지별 raw 서버 응답, 디버그 로그 포함)를 보존합니다. 프론트엔드는 `pages`만 참조하면 되고, `page_results`는 장애 분석 및 저수준 디버깅 용도입니다.
 
 > `src/interfaces/enums.py` — `PipelineStatus.PARTIAL` 추가 (M1):
 
@@ -529,16 +532,16 @@ PDF 입력 시 `data/pipeline_outputs/{YYYYMMDD_HHMMSS}/` 구조:
 
 | 파일 | 변경 내용 | 크기 |
 |------|---------|------|
-| `src/input/pdf_adapter.py` | **신규 생성** | — |
-| `src/interfaces/types.py` | `PageImage`, `PdfDocumentResult` 추가 | 소 |
+| `src/input/pdf_adapter.py` | **신규 생성**. `_render_page`는 `pix.n` 기반 동적 채널 수로 렌더링 | — |
+| `src/interfaces/types.py` | `PageImage`, `PdfDocumentResult(page_results 포함)` 추가 | 소 |
 | `src/interfaces/enums.py` | `PipelineStatus.PARTIAL` 추가 (M1) | 최소 |
-| `src/pipeline/orchestrator.py` | `process()` 분기 + `_process_pdf()` 추가 | 중 |
-| `src/postprocess/db_loader.py` | `parent_doc_id`, `page_number`, `total_pages` 컬럼 기록 (M3) | 소 |
-| `src/postprocess/review_queue.py` | `ReviewQueueItem`에 `parent_doc_id`, `page_number`, `total_pages` 추가 (M4) | 소 |
+| `src/pipeline/orchestrator.py` | `process()` 분기 + `_process_pdf()` + `_aggregate_pdf_status`(OTHER_DOCUMENT 처리 포함) | 중 |
+| `src/postprocess/db_loader.py` | `parent_doc_id`, `page_number`, `total_pages` 컬럼 + `assembled_json` Text 컬럼, per-URL `_db_cache` 캐시 | 소 |
+| `src/postprocess/review_queue.py` | `ReviewQueueItem`에 `parent_doc_id`, `page_number`, `total_pages` 추가. `queue_id` 형식: `RQ-YYYYMMDD-HHMMSS-{doc_id}-{uuid[:6]}`. `avg_wait_minutes` 구현 | 소 |
 | `src/interfaces/__init__.py` | 신규 타입 export 추가 | 최소 |
 | P1~P6 컴포넌트 전체 | **변경 없음** | — |
 | `docker/Dockerfile.pipeline` | `pymupdf>=1.24.0` 추가 | 1줄 |
-| DB 스키마 | `ocr_results` 테이블에 컬럼 3개 추가 | 소 |
+| DB 스키마 | `ocr_results`에 `parent_doc_id/page_number/total_pages/assembled_json` 컬럼 추가 | 소 |
 
 ---
 

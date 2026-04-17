@@ -16,6 +16,20 @@ HF_HUB_OFFLINE=1 \
 python scripts/run_pipeline_with_outputs.py --input-dir data/raw
 ```
 
+**pytest 자동화 스위트**:
+
+```bash
+# 전체 (40 pass + 1 skipped)
+PYTHONPATH=/workspace pytest tests/ -v
+
+# 개별
+pytest tests/test_integration_pipeline.py          # 기본 E2E (military/other)
+pytest tests/test_T2_T3_fusion.py                  # Layout Fusion (T2/T3)
+pytest tests/test_T5_fallback_routing.py           # Fallback 라우팅 (T5)
+pytest tests/test_T8_seal_integration.py           # 인장 처리 (T8)
+pytest tests/test_T9_T10_skills_integration.py     # Skill 파이프라인 (T9/T10)
+```
+
 **옵션 B — Pipeline 컨테이너 내부 실행**:
 
 ```bash
@@ -337,7 +351,8 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 | 2026-04-14 01:31 | + xgrammar enforce | T1 + T4 (other/skill_registry) | 3건 PASS, errors=0, JSON parse warning 0 | Skill Registry 경로 합류 |
 | 2026-04-15 04:26 | + PdfAdapter | T1 + T11 (PDF 단일 페이지) | 4건 PASS (PDF 1건 포함), 전비품확인서 → equipment_checklist 정확 분류 | PDF→PageImage→파이프라인 통과 검증 |
 | 2026-04-15 07:27 | + Sub-schema/Assembler | T_chk1 (전비품 확인서) | checklist 6항목 정확(O-O-O-X-X-O), writer 정상, CHK-001~004 모두 통과 | sub-schema 분해 + Assembler 조립 도입 |
-| **2026-04-15 08:17** | + 패딩 절대 상한 + TemplateAugmentor v3 | **T_chk1 안정화** | table 크롭 1920×2016(이전 2016×2160), writer 영역 침범 제거, 6항목 + writer + form_identifier 정확 | writer_block 영역 다중 PP(footer+text) 흡수 후 단일 region |
+| 2026-04-15 08:17 | + 패딩 절대 상한 + TemplateAugmentor v3 | T_chk1 안정화 | table 크롭 1920×2016(이전 2016×2160), writer 영역 침범 제거, 6항목 + writer + form_identifier 정확 | writer_block 영역 다중 PP(footer+text) 흡수 후 단일 region |
+| **2026-04-17 02:26** | + 코드 클렌징 (064c1f3) | 통합 pytest + pipeline run | 40 pass / 1 skipped, pipeline 4건 errors=0 (warnings=17) | budget_config/_parsing/bbox_utils/rank_normalizer 중앙화, gemma4_engine/instruction_builder 삭제, region_id/was_retried/assembled_json 전 경로 보존 확인 |
 | (예정) | — | T2, T3 | — | Fusion ON DPI 분기 |
 | (예정) | — | T5 | — | Fallback 전환 |
 | (예정) | — | T7 | — | OCR-augmented 힌트 효과 측정 |
@@ -354,8 +369,8 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 | 🟡 | P4 신뢰도 산출 — assembled_json 미반영 | field_key blob 단일 FieldValue로 logprobs 평균 의미 상실. 트리 기반 sub-confidence 재산출 필요 | 미완 (CLAUDE.md 로드맵) |
 | 🟡 | rank "대원"/"대위" 오인식 1회 관찰 | enum 강제 + 후처리 정규화 사전 (CLAUDE.md 로드맵) | 미완 |
 | 🟡 | TableExtractor pass2_tasks=0 | S5 pass1 출력의 table_type/cells 품질 점검 | 대기 |
-| 🟡 | PaddleOCR 가중치 폐쇄망 배치 | `Dockerfile.pipeline` COPY 추가 | 미완 |
-| 🟢 | vLLM 변동성 N=3 반복 측정 | 동일 문서 반복 실행 | 미완 |
+| 🟡 | PaddleOCR 가중치 폐쇄망 배치 | `Dockerfile.pipeline` COPY 추가 (`scripts/download_paddle_models.py`로 사전 준비) | 미완 |
+| 🟢 | vLLM 변동성 N=3 반복 측정 | `scripts/measure_vllm_variance.py` 사용, 결과는 `data/variance_reports/`에 JSON+MD 저장 | ✅ 인프라 구축, 결정론 점수 20% 관측 |
 
 ### 6-2. 향후 계획 타당성 및 문제점
 
