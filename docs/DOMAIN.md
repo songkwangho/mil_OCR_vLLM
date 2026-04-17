@@ -23,6 +23,8 @@
 - `unknown` = 군수 서식인데 어떤 서식인지 모름 → 군수 처리 경로 유지
 - `other` = 군수 서식이 아님 → Skill Registry, 검토 큐 미적재
 
+**한국어 명칭의 용도**: 위 표의 한국어 명칭은 `src/domain/form_type_labels.py`에 `FORM_TYPE_LABELS`로 중앙화되어 있으며, P5가 `assembled_json.document_title` 필드에 정적으로 주입합니다. form_type은 P3-A에서 확정되므로 VLM이 문서 제목을 추출하지 않으며, PP-DocLayout이 인쇄 제목 영역을 탐지해 VLM이 자의 생성한 `document_title` 키는 P5에서 제거됩니다. `other`는 S7 StructuredAggregator 미구현으로 None(주입 건너뜀).
+
 ### 1-2. Other 문서 처리 정책
 
 군수 서식이 아닌 문서(공문서, 지시문, 개인 서류 등)가 입력될 경우:

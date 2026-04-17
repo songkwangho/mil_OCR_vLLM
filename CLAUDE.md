@@ -251,7 +251,8 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ✅ 경로별 임계값 + region_id/was_retried 보존 |
 | — | 계급 정규화 | `src/postprocess/rank_normalizer.py` | ✅ 한국군 계급 Levenshtein 최근접 매칭 |
 | — | bbox 유틸 | `src/preprocess/bbox_utils.py` | ✅ compute_iou 공용화 (layout_postprocessor/template_augmentor 사용) |
-| P5 | 직렬화 | `src/postprocess/serializer.py` | ✅ |
+| P5 | 직렬화 | `src/postprocess/serializer.py` | ✅ assembled_json 있는 서식에 `document_title` 정적 주입 + fields[] 중복 제거 (조건부) |
+| — | FormType 라벨 매핑 | `src/domain/form_type_labels.py` | ✅ FormType → 한국어 공식 명칭, P5에서 document_title 주입 |
 | P6 | DB 적재 | `src/postprocess/db_loader.py` | ✅ per-URL 캐시 + `assembled_json` Text 컬럼 |
 | — | 수동 검토 큐 | `src/postprocess/review_queue.py` | ✅ per-URL 캐시 + `RQ-YYYYMMDD-HHMMSS-{doc_id}-{uuid[:6]}` 형식 |
 | — | Fallback 서비스 | `src/fallback/ocr_fallback_service.py`, `fallback_http_client.py` | ✅ Docker 분리 모드 지원 |
@@ -311,6 +312,7 @@ mil_OCR_v2/
 │   │   └── fallback_http_client.py      ← Docker 분리 모드용
 │   └── domain/
 │       ├── schema_registry.py
+│       ├── form_type_labels.py          ← 신규 (FormType → 한국어 명칭)
 │       └── schemas/v1/
 │           ├── supply_request.json
 │           ├── maintenance_record.json

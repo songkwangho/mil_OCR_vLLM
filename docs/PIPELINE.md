@@ -1025,6 +1025,8 @@ class FallbackPolicy:
 | `skills/_parsing.py` | VLM 응답 JSON 관대 파서(`_loads_relaxed`) 공용화 | VLM 호출 |
 | `preprocess/bbox_utils.py` | `compute_iou(a, b)` 공용 IoU 계산 | bbox 변환, 크롭 |
 | `postprocess/rank_normalizer.py` | 한국군 계급 Levenshtein 최근접 매칭 | 스키마 검증 |
+| `domain/form_type_labels.py` | FormType → 한국어 공식 명칭 매핑 (`FORM_TYPE_LABELS`) | 스키마/룰 검증 |
+| `postprocess/serializer.py` | P5 직렬화, assembled_json 있을 때 document_title 정적 주입 + fields[] 중복 제거 | assembled_json None 서식은 원본 보존 |
 | `pipeline/health_monitor.py` | VLM 연속 실패 추적, `record_failure(reason)`/`is_healthy()` | Fallback 라우팅 결정 |
 
 ---

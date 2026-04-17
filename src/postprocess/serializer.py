@@ -16,10 +16,37 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from src.interfaces.enums import OutputFormat
+from src.domain.form_type_labels import get_document_title
+from src.interfaces.enums import FormType, OutputFormat
 from src.interfaces.types import FieldValue, ValidatedResult
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_document_title_fields(fields: list[FieldValue]) -> list[FieldValue]:
+    """VLM이 자의 생성한 document_title 필드 제거.
+
+    form_type이 P3-A에서 확정되므로 document_title은 정적 매핑으로 주입되며
+    (fields[] → _inject_document_title), PP-DocLayout이 인쇄 고정 텍스트 영역을
+    탐지해 VLM이 document_title 키를 만들어낸 경우는 confidence=0.0으로 의미가 없다.
+    """
+    return [f for f in fields if f.field_key != "document_title"]
+
+
+def _inject_document_title(assembled: Optional[dict], form_type: FormType) -> Optional[dict]:
+    """assembled_json 최상단에 document_title을 주입 (first key)."""
+    if assembled is None:
+        return None
+    title = get_document_title(form_type)
+    if title is None:
+        return assembled
+    # 기존 document_title 제거 후 첫 번째 키로 삽입
+    rebuilt = {"document_title": title}
+    for k, v in assembled.items():
+        if k == "document_title":
+            continue
+        rebuilt[k] = v
+    return rebuilt
 
 
 @dataclass
@@ -148,7 +175,7 @@ class P5Serializer:
 
     사용법:
         serializer = P5Serializer()
-        json_str, xml_str, csv_rows = serializer.serialize(validated_result)
+        json_str, xml_str, csv_rows = serializer.serialize(validated_result, form_type)
     """
 
     def __init__(self, cfg: Optional[P5SerializerConfig] = None):
@@ -157,23 +184,44 @@ class P5Serializer:
     def serialize(
         self,
         result: ValidatedResult,
+        form_type: Optional[FormType] = None,
     ) -> tuple[Optional[str], Optional[str], list[dict[str, str]]]:
         """ValidatedResult를 지정된 형식으로 직렬화.
+
+        form_type: P3-A에서 확정된 서식 유형. assembled_json.document_title을
+        정적 매핑으로 주입하는 데 사용. None이면 주입 건너뜀.
+
+        document_title 정제는 assembled_json이 있는 서식(x-assembly-rules 적용)
+        에만 적용한다. assembled_json이 None인 서식은 fields[] 원본을 그대로
+        유지해야 document_title 필드가 소실되지 않는다.
 
         Returns:
             (json_output, xml_output, csv_rows)
         """
+        from dataclasses import replace
+
+        if result.assembled_json is not None and form_type is not None:
+            cleaned_fields = _strip_document_title_fields(result.fields)
+            cleaned_assembled = _inject_document_title(result.assembled_json, form_type)
+            cleaned_result = replace(
+                result,
+                fields=cleaned_fields,
+                assembled_json=cleaned_assembled,
+            )
+        else:
+            cleaned_result = result
+
         json_output = None
         xml_output = None
         csv_rows: list[dict[str, str]] = []
 
         for fmt in self.cfg.formats:
             if fmt == OutputFormat.JSON:
-                json_output = _serialize_json(result, self.cfg.json_indent)
+                json_output = _serialize_json(cleaned_result, self.cfg.json_indent)
             elif fmt == OutputFormat.XML:
-                xml_output = _serialize_xml(result, self.cfg.xml_root_tag)
+                xml_output = _serialize_xml(cleaned_result, self.cfg.xml_root_tag)
             elif fmt == OutputFormat.CSV:
-                csv_rows = _serialize_csv(result)
+                csv_rows = _serialize_csv(cleaned_result)
 
         logger.info(
             "P5: 직렬화 완료 (doc_id=%s, json=%s, xml=%s, csv=%d)",

@@ -732,7 +732,7 @@ class PipelineOrchestrator:
         json_out, xml_out, csv_rows = None, None, []
         serialized = self._run_step(
             "P5", result,
-            lambda: self._get_p5().serialize(p4_out),
+            lambda: self._get_p5().serialize(p4_out, form_type=p3_out.form_type),
         )
         if serialized:
             json_out, xml_out, csv_rows = serialized
