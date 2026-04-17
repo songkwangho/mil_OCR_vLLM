@@ -15,7 +15,7 @@ import cv2
 import httpx
 import numpy as np
 
-from src.interfaces.enums import FormType, ProcessingPath
+from src.interfaces.enums import FormType
 from src.interfaces.types import (
     LayoutResult,
     PreprocessedImage,

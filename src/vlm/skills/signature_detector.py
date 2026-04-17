@@ -12,7 +12,7 @@ import json
 import logging
 
 from src.interfaces.types import SkillResult, SkillTask
-from src.vlm.skills.seal_reader import _loads_relaxed
+from src.vlm.skills._parsing import _loads_relaxed
 from src.vlm.vlm_client import VLMClient, encode_image_base64
 
 logger = logging.getLogger(__name__)

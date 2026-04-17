@@ -125,6 +125,7 @@ services:
     volumes:
       - ./models/t1_sr:/models/t1_sr:ro
       # t2_layout은 layout 컨테이너가 직접 마운트 (pipeline에서 불필요)
+      - ./models/ocr_hint:/root/.paddlex/official_models:ro   # PaddleOCR 한국어 가중치
       - ./data:/data
       - ./configs:/configs:ro
     environment:

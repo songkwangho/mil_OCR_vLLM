@@ -21,7 +21,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -43,34 +43,32 @@ class P6DBLoaderConfig:
 #  SQLAlchemy 모델 정의
 # ─────────────────────────────────────────────
 
-_engine = None
-_SessionLocal = None
-_Base = None
+# URL별 (engine, SessionLocal, tables) 캐시 — 테스트에서 서로 다른 DB URL 지원
+_db_cache: dict[str, tuple] = {}
 
 
 def _get_db(db_url: str):
-    """DB 엔진 및 세션 초기화 (지연 로딩)."""
-    global _engine, _SessionLocal, _Base
-
-    if _engine is not None:
-        return _engine, _SessionLocal
+    """DB 엔진 및 세션 초기화 (URL별 캐시)."""
+    if db_url in _db_cache:
+        return _db_cache[db_url]
 
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker, declarative_base
 
-    _Base = declarative_base()
-    _engine = create_engine(db_url, echo=False)
-    _SessionLocal = sessionmaker(bind=_engine)
+    Base = declarative_base()
+    engine = create_engine(db_url, echo=False)
+    SessionLocal = sessionmaker(bind=engine)
 
-    _define_tables(_Base)
-    _Base.metadata.create_all(_engine)
+    tables = _define_tables(Base)
+    Base.metadata.create_all(engine)
     logger.info("P6: DB 초기화 완료 (%s)", db_url)
 
-    return _engine, _SessionLocal
+    _db_cache[db_url] = (engine, SessionLocal, tables)
+    return engine, SessionLocal, tables
 
 
-def _define_tables(Base):
-    """SQLAlchemy ORM 테이블 정의 (v2 스키마)."""
+def _define_tables(Base) -> dict:
+    """SQLAlchemy ORM 테이블 정의 (v2 스키마). 반환: 클래스 dict."""
     from sqlalchemy import Column, String, Float, Boolean, Integer, Text, DateTime, ForeignKey
 
     class DocumentRecord(Base):
@@ -84,10 +82,11 @@ def _define_tables(Base):
         review_required = Column(Boolean, default=False)
         review_queue_id = Column(String(100))
         schema_version = Column(String(20), default="1.0.0")
+        assembled_json = Column(Text)  # Assembler 조립 결과 (x-assembly-rules 서식만)
         json_output = Column(Text)
         xml_output = Column(Text)
         processed_at = Column(DateTime)
-        created_at = Column(DateTime, default=datetime.utcnow)
+        created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     class FieldRecord(Base):
         __tablename__ = "fields"
@@ -110,11 +109,13 @@ def _define_tables(Base):
         timings_json = Column(Text)
         error_count = Column(Integer, default=0)
         warning_count = Column(Integer, default=0)
-        created_at = Column(DateTime, default=datetime.utcnow)
+        created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    _define_tables.DocumentRecord = DocumentRecord
-    _define_tables.FieldRecord = FieldRecord
-    _define_tables.PipelineRunRecord = PipelineRunRecord
+    return {
+        "DocumentRecord": DocumentRecord,
+        "FieldRecord": FieldRecord,
+        "PipelineRunRecord": PipelineRunRecord,
+    }
 
 
 class P6DBLoader:
@@ -203,10 +204,10 @@ class P6DBLoader:
         review_queue_id: Optional[str],
     ) -> list[str]:
         """DB 삽입."""
-        _, SessionLocal = _get_db(self.cfg.db_url)
-        DocumentRecord = _define_tables.DocumentRecord
-        FieldRecord = _define_tables.FieldRecord
-        PipelineRunRecord = _define_tables.PipelineRunRecord
+        _, SessionLocal, tables = _get_db(self.cfg.db_url)
+        DocumentRecord = tables["DocumentRecord"]
+        FieldRecord = tables["FieldRecord"]
+        PipelineRunRecord = tables["PipelineRunRecord"]
 
         session = SessionLocal()
         record_ids = []
@@ -221,7 +222,12 @@ class P6DBLoader:
                 existing.review_queue_id = review_queue_id
                 existing.json_output = json_output if self.cfg.store_serialized else None
                 existing.xml_output = xml_output if self.cfg.store_serialized else None
-                existing.processed_at = datetime.utcnow()
+                existing.assembled_json = (
+                    json.dumps(validated.assembled_json, ensure_ascii=False)
+                    if self.cfg.store_serialized and getattr(validated, "assembled_json", None) is not None
+                    else None
+                )
+                existing.processed_at = datetime.now(timezone.utc)
                 session.query(FieldRecord).filter_by(doc_id=validated.doc_id).delete()
             else:
                 doc_record = DocumentRecord(
@@ -232,9 +238,14 @@ class P6DBLoader:
                     confidence=validated.overall_confidence,
                     review_required=validated.review_required,
                     review_queue_id=review_queue_id,
+                    assembled_json=(
+                        json.dumps(validated.assembled_json, ensure_ascii=False)
+                        if self.cfg.store_serialized and getattr(validated, "assembled_json", None) is not None
+                        else None
+                    ),
                     json_output=json_output if self.cfg.store_serialized else None,
                     xml_output=xml_output if self.cfg.store_serialized else None,
-                    processed_at=datetime.utcnow(),
+                    processed_at=datetime.now(timezone.utc),
                 )
                 session.add(doc_record)
             session.flush()

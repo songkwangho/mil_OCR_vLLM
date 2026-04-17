@@ -87,7 +87,11 @@
       "description": "작성자 정보",
       "properties": {
         "team": {"type": "string", "description": "소속 팀명. 예: '군수관리팀'"},
-        "rank": {"type": "string", "description": "직급/계급. 예: '대위'"},
+        "rank": {
+          "type": "string",
+          "enum": ["이병","일병","상병","병장","하사","중사","상사","원사","준위","소위","중위","대위","소령","중령","대령","준장","소장","중장","대장"],
+          "description": "직급/계급"
+        },
         "name": {"type": "string", "description": "성명. 예: '김정식'"},
         "signature_present": {"type": "boolean", "description": "서명란 수기 서명 존재 여부"}
       },

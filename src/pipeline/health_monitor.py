@@ -78,6 +78,14 @@ class VLMHealthMonitor:
 
         self._last_check = time.time()
 
+    def record_failure(self, reason: str) -> None:
+        """외부 VLM 호출 실패를 모니터에 피드백.
+
+        헬스체크 폴링과 독립적으로 failure 카운터를 증가시키되,
+        _last_check은 갱신하지 않는다 — 다음 polling cycle에서 실제 /health 재확인이 가능하도록.
+        """
+        self._on_failure(reason)
+
     def _on_failure(self, reason: str) -> None:
         """헬스체크 실패 처리."""
         self._consecutive_failures += 1

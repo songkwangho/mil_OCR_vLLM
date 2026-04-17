@@ -629,15 +629,10 @@ class P1Preprocessor:
                 img_bgr, original_dpi, target_dpi,
                 doc_input.source_type, params, notes
             )
-        elif band == DpiResolutionBand.MID:
-            img_bgr, effective_dpi = self._process_mid(
-                img_bgr, original_dpi, target_dpi,
-                doc_input.source_type, params, notes
-            )
         else:
-            img_bgr, effective_dpi = self._process_high(
+            img_bgr, effective_dpi = self._process_mid_high(
                 img_bgr, original_dpi, target_dpi,
-                doc_input.source_type, params, notes
+                doc_input.source_type, params, band, notes
             )
 
         # Step 4: 원근 보정 (카메라 + MID 이상만)
@@ -750,7 +745,11 @@ class P1Preprocessor:
 
                 return img, effective_dpi, sr_applied
 
+        except ImportError as e:
+            logger.warning("LOW: SR 패키지 누락 — 배포 설정 확인 필요 (Lanczos fallback): %s", e)
+            notes.append(f"LOW: SR 패키지 누락 → Lanczos fallback: {e}")
         except Exception as e:
+            logger.warning("LOW: SR 런타임 오류 → Lanczos fallback: %s", e)
             notes.append(f"LOW: SR 인핸서 실패 → Lanczos fallback: {e}")
 
         # Lanczos fallback
@@ -765,34 +764,19 @@ class P1Preprocessor:
         effective_dpi = int(original_dpi * min(2.0, target_dpi / original_dpi))
         return img, effective_dpi, False
 
-    def _process_mid(
+    def _process_mid_high(
         self,
         img: np.ndarray,
         original_dpi: int,
         target_dpi: int,
         source_type: SourceType,
         params: BandParams,
+        band: DpiResolutionBand,
         notes: list[str],
     ) -> tuple[np.ndarray, int]:
-        """MID 구간: 경량 노이즈 제거 + 표준 리사이즈."""
-        notes.append("=== MID band: standard processing ===")
-        img = _resize_standard(img, original_dpi, target_dpi, notes)
-        if params.apply_denoise:
-            img = _denoise(img, source_type, self.cfg.fax_mode,
-                           params.denoise_patch_distance, notes)
-        return img, target_dpi
-
-    def _process_high(
-        self,
-        img: np.ndarray,
-        original_dpi: int,
-        target_dpi: int,
-        source_type: SourceType,
-        params: BandParams,
-        notes: list[str],
-    ) -> tuple[np.ndarray, int]:
-        """HIGH 구간: 전체 기능 활성화."""
-        notes.append("=== HIGH band: full processing ===")
+        """MID/HIGH 구간: resize + 조건부 denoise. 두 구간은 BandParams 차이로만 구분됨."""
+        label = "MID" if band == DpiResolutionBand.MID else "HIGH"
+        notes.append(f"=== {label} band: standard processing ===")
         img = _resize_standard(img, original_dpi, target_dpi, notes)
         if params.apply_denoise:
             img = _denoise(img, source_type, self.cfg.fax_mode,
@@ -804,25 +788,3 @@ class P1Preprocessor:
 #  소스 유형별 프리셋 팩토리
 # ─────────────────────────────────────────────
 
-def make_preprocessor_for_source(source_type: SourceType) -> P1Preprocessor:
-    """입력 소스 유형에 최적화된 설정으로 P1Preprocessor 생성."""
-    presets = {
-        SourceType.SCAN: P1PreprocessorConfig(
-            enable_perspective_correction=False,
-        ),
-        SourceType.CAMERA: P1PreprocessorConfig(
-            enable_perspective_correction=True,
-            low_dpi_use_lanczos=True,
-            low_dpi_apply_clahe=True,
-        ),
-        SourceType.FAX: P1PreprocessorConfig(
-            enable_perspective_correction=False,
-            fax_mode=True,
-            low_dpi_apply_clahe=True,
-        ),
-        SourceType.PDF_EXPORT: P1PreprocessorConfig(
-            enable_perspective_correction=False,
-            low_dpi_apply_clahe=False,
-        ),
-    }
-    return P1Preprocessor(config=presets.get(source_type, P1PreprocessorConfig()))

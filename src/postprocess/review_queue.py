@@ -13,7 +13,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -44,34 +45,32 @@ class ReviewQueueConfig:
 #  SQLAlchemy 모델
 # ─────────────────────────────────────────────
 
-_rq_engine = None
-_rq_SessionLocal = None
-_rq_Base = None
+# URL별 (engine, SessionLocal, tables) 캐시 — 테스트에서 서로 다른 DB URL 지원
+_rq_db_cache: dict[str, tuple] = {}
 
 
 def _get_rq_db(db_url: str):
-    """검토 큐 DB 초기화."""
-    global _rq_engine, _rq_SessionLocal, _rq_Base
-
-    if _rq_engine is not None:
-        return _rq_engine, _rq_SessionLocal
+    """검토 큐 DB 초기화 (URL별 캐시)."""
+    if db_url in _rq_db_cache:
+        return _rq_db_cache[db_url]
 
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker, declarative_base
 
-    _rq_Base = declarative_base()
-    _rq_engine = create_engine(db_url, echo=False)
-    _rq_SessionLocal = sessionmaker(bind=_rq_engine)
+    Base = declarative_base()
+    engine = create_engine(db_url, echo=False)
+    SessionLocal = sessionmaker(bind=engine)
 
-    _define_rq_tables(_rq_Base)
-    _rq_Base.metadata.create_all(_rq_engine)
+    tables = _define_rq_tables(Base)
+    Base.metadata.create_all(engine)
     logger.info("ReviewQueue: DB 초기화 완료 (%s)", db_url)
 
-    return _rq_engine, _rq_SessionLocal
+    _rq_db_cache[db_url] = (engine, SessionLocal, tables)
+    return engine, SessionLocal, tables
 
 
-def _define_rq_tables(Base):
-    """검토 큐 테이블 정의."""
+def _define_rq_tables(Base) -> dict:
+    """검토 큐 테이블 정의. 반환: 클래스 dict."""
     from sqlalchemy import Column, String, Integer, Text, DateTime, Boolean
 
     class ReviewRecord(Base):
@@ -79,7 +78,7 @@ def _define_rq_tables(Base):
         id = Column(Integer, primary_key=True, autoincrement=True)
         queue_id = Column(String(100), unique=True, nullable=False, index=True)
         doc_id = Column(String(100), nullable=False, index=True)
-        enqueued_at = Column(DateTime, default=datetime.utcnow)
+        enqueued_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
         priority = Column(String(20))
         reason = Column(String(50))
         processing_path = Column(String(20))
@@ -93,7 +92,7 @@ def _define_rq_tables(Base):
         corrected_fields_json = Column(Text)
         reviewer_notes = Column(Text)
 
-    _define_rq_tables.ReviewRecord = ReviewRecord
+    return {"ReviewRecord": ReviewRecord}
 
 
 class ReviewQueue:
@@ -128,7 +127,10 @@ class ReviewQueue:
         """
         import json
 
-        queue_id = f"RQ-{datetime.now().strftime('%Y%m%d')}-{validated.doc_id}"
+        queue_id = (
+            f"RQ-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+            f"-{validated.doc_id}-{uuid.uuid4().hex[:6]}"
+        )
 
         # 우선순위 결정
         has_critical = any(
@@ -144,8 +146,8 @@ class ReviewQueue:
             logger.warning("ReviewQueue: DB 미사용 — queue_id=%s (메모리)", queue_id)
             return queue_id
 
-        _, SessionLocal = _get_rq_db(self.cfg.db_url)
-        ReviewRecord = _define_rq_tables.ReviewRecord
+        _, SessionLocal, tables = _get_rq_db(self.cfg.db_url)
+        ReviewRecord = tables["ReviewRecord"]
 
         session = SessionLocal()
         try:
@@ -201,8 +203,8 @@ class ReviewQueue:
             return []
 
         import json
-        _, SessionLocal = _get_rq_db(self.cfg.db_url)
-        ReviewRecord = _define_rq_tables.ReviewRecord
+        _, SessionLocal, tables = _get_rq_db(self.cfg.db_url)
+        ReviewRecord = tables["ReviewRecord"]
 
         session = SessionLocal()
         try:
@@ -250,8 +252,10 @@ class ReviewQueue:
                 critical_count=0, normal_count=0, avg_wait_minutes=0.0,
             )
 
-        _, SessionLocal = _get_rq_db(self.cfg.db_url)
-        ReviewRecord = _define_rq_tables.ReviewRecord
+        _, SessionLocal, tables = _get_rq_db(self.cfg.db_url)
+        ReviewRecord = tables["ReviewRecord"]
+
+        from sqlalchemy import func as sa_func
 
         session = SessionLocal()
         try:
@@ -264,12 +268,23 @@ class ReviewQueue:
                 status="pending", priority="normal"
             ).count()
 
+            # 평균 대기 시간 — 진행 중(pending/in_review) 레코드 기준
+            avg_wait = 0.0
+            oldest = session.query(
+                sa_func.min(ReviewRecord.enqueued_at)
+            ).filter(ReviewRecord.status.in_(["pending", "in_review"])).scalar()
+            if oldest is not None:
+                # SQLite가 naive datetime으로 반환하는 경우 UTC로 간주
+                if oldest.tzinfo is None:
+                    oldest = oldest.replace(tzinfo=timezone.utc)
+                avg_wait = (datetime.now(timezone.utc) - oldest).total_seconds() / 60.0
+
             return ReviewQueueStats(
                 total_pending=pending,
                 total_in_review=in_review,
                 critical_count=critical,
                 normal_count=normal,
-                avg_wait_minutes=0.0,  # TODO: 평균 대기 시간 산출
+                avg_wait_minutes=round(avg_wait, 2),
             )
         finally:
             session.close()

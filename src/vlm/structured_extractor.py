@@ -1,7 +1,7 @@
 """P3-B — StructuredExtractor
 
 pixel_budget 기준 배치 그룹을 Gemma4에 전송하여 구조화 추출을 수행합니다.
-기존 gemma4_engine.py의 필드 추출 + 표 인식 로직을 분리한 컴포넌트.
+VLMClient에 모든 vLLM 호출을 위임하며, 필드 추출·표 인식·저신뢰 재시도를 담당합니다.
 
 처리 흐름:
   1. pixel_budget별 CroppedRegion 그룹 수신 (P2.5-C ResolutionRouter 출력)
@@ -20,8 +20,11 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from src.pipeline.health_monitor import VLMHealthMonitor
 
 import numpy as np
 
@@ -51,20 +54,10 @@ _CODE_PATTERNS: list[tuple[str, CodeType]] = [
 
 
 def _safe_json_loads(text: str) -> Optional[dict]:
-    """VLM 응답에서 JSON 객체를 견고하게 파싱.
+    """VLM 응답에서 JSON 객체(dict)를 견고하게 파싱.
 
-    실제 운영에서 VLM은 guided_json을 따라야 하지만 종종 다음 패턴을 섞어
-    반환합니다:
-      1. ```json ... ``` 마크다운 코드 펜스
-      2. JSON 앞·뒤에 자연어 설명
-      3. 단일 따옴표 사용
-      4. 끝부분에 trailing comma 또는 절단
-
-    파싱 시도 순서:
-      1. raw text 그대로 json.loads
-      2. 코드 펜스(```json ... ```) 안쪽 추출 후 재시도
-      3. 가장 바깥 { ... } 블록 추출 후 재시도
-      4. 모두 실패 시 None
+    dict만 반환 — 필드 순회 경로(spec.field_key 없음)에서 사용.
+    top-level string/list/scalar 허용이 필요하면 `_loads_any`를 사용.
     """
     if not text:
         return None
@@ -104,6 +97,54 @@ def _safe_json_loads(text: str) -> Optional[dict]:
                     except (json.JSONDecodeError, TypeError):
                         break
 
+    return None
+
+
+def _loads_any(text: str):
+    """VLM 응답에서 JSON 최상위 값을 타입 구별 없이 파싱 (dict/list/str/num/bool/None).
+
+    sub-schema 분해 경로에서 field_key가 있는 region은 단일 값(문자열 리터럴 등)을
+    반환할 수 있다. 이 경우 `_safe_json_loads`(dict 전용)는 None을 반환하므로
+    별도 함수로 top-level 값을 살려 Assembler에 그대로 전달한다.
+
+    반환:
+      - 파싱 성공: 파이썬 값 (dict/list/str/int/float/bool/None)
+      - 파싱 실패: 센티넬 문자열 sentinel 사용 대신 None만 쓰지 않도록
+        Exception을 호출자에게 제기하지 않고, raw text를 그대로 쓰도록 상위에서 폴백.
+    """
+    if not text:
+        return None
+
+    # 1) 그대로
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 2) 코드 펜스
+    fence = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if fence:
+        try:
+            return json.loads(fence.group(1).strip())
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 3) dict/list 블록 탐색
+    for ob, cb in (("{", "}"), ("[", "]")):
+        start = text.find(ob)
+        if start < 0:
+            continue
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == ob:
+                depth += 1
+            elif text[i] == cb:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start : i + 1])
+                    except (json.JSONDecodeError, TypeError):
+                        break
     return None
 
 
@@ -162,6 +203,8 @@ class StructuredExtractorConfig:
     retry_threshold: float = 0.60       # 이하면 재시도 대상
     max_retries: int = 1                # 영역당 최대 재시도 횟수
 
+    monitor: "Optional[VLMHealthMonitor]" = field(default=None, repr=False)
+
 
 # pixel_budget 한 단계 상향 매핑 (재시도 시 사용)
 RETRY_BUDGET_MAP: dict[int, int] = {
@@ -188,20 +231,19 @@ class StructuredExtractor:
         ocr_hint_provider=None,
     ):
         self.cfg = config or StructuredExtractorConfig()
-        self._client = None
+        # VLMClient: 모든 vLLM 호출을 위임
+        from src.vlm.vlm_client import VLMClient
+        self._vlm_client = VLMClient(
+            base_url=self.cfg.vllm_base_url,
+            model_name=self.cfg.model_name,
+            max_tokens=self.cfg.max_tokens,
+            temperature=self.cfg.temperature,
+            top_logprobs=self.cfg.top_logprobs,
+            timeout=self.cfg.request_timeout,
+            monitor=self.cfg.monitor,
+        )
         # OCR-augmented 힌트 제공자 (선택적, 저신뢰 재시도 시 활용)
         self._ocr_hint_provider = ocr_hint_provider
-
-    def _get_client(self):
-        """OpenAI 클라이언트 지연 초기화."""
-        if self._client is None:
-            from openai import OpenAI
-            self._client = OpenAI(
-                base_url=self.cfg.vllm_base_url,
-                api_key="not-needed",
-                timeout=self.cfg.request_timeout,
-            )
-        return self._client
 
     def extract(
         self,
@@ -309,6 +351,8 @@ class StructuredExtractor:
                         "[P3-B] 영역 처리 실패 (%s): %s",
                         cropped.region_id, e,
                     )
+                    if self.cfg.monitor is not None:
+                        self.cfg.monitor.record_failure(f"structured_extractor:{type(e).__name__}")
                     if trace is not None:
                         trace.append({
                             "region_id": cropped.region_id,
@@ -601,13 +645,25 @@ class StructuredExtractor:
         domain_codes: list[DomainCode] = []
 
         parsed = _safe_json_loads(text) if text else None
+        template_field_key = getattr(spec, "field_key", None)
+
+        # sub-schema 분해 경로에서는 top-level이 dict가 아닐 수 있음 (예: document_date는 문자열 리터럴).
+        # dict 파서가 실패해도 template_field_key가 있으면 _loads_any로 재시도하여
+        # 스칼라/리스트도 FieldValue blob으로 보존한다.
+        if parsed is None and template_field_key and text:
+            alt = _loads_any(text)
+            if alt is not None:
+                parsed = alt
+            else:
+                # JSON 파싱 완전 실패 — 원문 문자열을 그대로 사용 (Assembler가 검토 큐로 전달)
+                parsed = text.strip()
+
         if parsed is None:
             warnings.append(f"Region {cropped.region_id}: JSON parse failed")
             return [], [], [], text
 
         # region에 template field_key가 지정된 경우:
         # VLM 출력 전체(dict/list/스칼라)를 단일 FieldValue로 보존 → Assembler가 온전히 복원
-        template_field_key = getattr(spec, "field_key", None)
         if template_field_key:
             val_str = (
                 json.dumps(parsed, ensure_ascii=False)
@@ -712,54 +768,21 @@ class StructuredExtractor:
         guided_json: Optional[dict] = None,
         pixel_budget: Optional[int] = None,
     ) -> dict[str, Any]:
-        """vLLM OpenAI 호환 API 호출."""
-        client = self._get_client()
+        """VLMClient에 위임하는 vLLM 호출 래퍼.
 
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-
-        messages.append({
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{image_b64}"},
-                },
-                {"type": "text", "text": instruction},
-            ],
-        })
-
-        extra_body: dict[str, Any] = {
-            "logprobs": True,
-            "top_logprobs": self.cfg.top_logprobs,
-        }
-        if guided_json is not None:
-            extra_body["guided_json"] = guided_json
-        if pixel_budget:
-            extra_body["mm_processor_kwargs"] = {
-                "max_pixels": pixel_budget * 28 * 28,
-            }
-
-        response = client.chat.completions.create(
-            model=self.cfg.model_name,
-            messages=messages,
-            max_tokens=self.cfg.max_tokens,
-            temperature=self.cfg.temperature,
-            extra_body=extra_body,
+        Returns:
+            {"text": str, "logprobs": list[dict], "finish_reason": str}
+        """
+        resp = self._vlm_client.call(
+            image_b64=image_b64,
+            instruction=instruction,
+            system_prompt=system_prompt,
+            guided_json=guided_json,
+            logprobs=True,
+            pixel_budget=pixel_budget,
         )
-
-        choice = response.choices[0]
-        text = choice.message.content or ""
-
-        logprobs_data: list[dict] = []
-        if hasattr(choice, "logprobs") and choice.logprobs:
-            content_logprobs = getattr(choice.logprobs, "content", None)
-            if content_logprobs:
-                for token_info in content_logprobs:
-                    logprobs_data.append({
-                        "token": getattr(token_info, "token", ""),
-                        "logprob": getattr(token_info, "logprob", 0.0),
-                    })
-
-        return {"text": text, "logprobs": logprobs_data}
+        return {
+            "text": resp.get("content", ""),
+            "logprobs": resp.get("logprobs") or [],
+            "finish_reason": resp.get("finish_reason", "stop"),
+        }

@@ -13,12 +13,15 @@ Output: (FormType, float)  — form_type, form_confidence
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
 from src.interfaces.enums import FormType
+
+if TYPE_CHECKING:
+    from src.pipeline.health_monitor import VLMHealthMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,7 @@ class FormClassifierConfig:
     # vLLM 서버 연결
     vllm_base_url: str = "http://localhost:8000/v1"
     model_name: str = "/models/gemma4/gemma-4-26b-a4b-it/"
+    monitor: "Optional[VLMHealthMonitor]" = field(default=None, repr=False)
 
     # 분류용 pixel_budget (140 토큰 = 저해상도, 추론 비용 최소화)
     classify_pixel_budget: int = 140
@@ -166,6 +170,8 @@ class FormClassifier:
         except Exception as e:
             warnings.append(f"FormClassifier failed: {e}")
             logger.error("[P3-A] 서식 분류 실패: %s", e)
+            if self.cfg.monitor is not None:
+                self.cfg.monitor.record_failure(f"form_classifier:{type(e).__name__}")
             return FormType.UNKNOWN, 0.0, None
 
     def _call_classify(self, image_b64: str) -> dict:

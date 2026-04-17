@@ -21,6 +21,7 @@ Output : ValidatedResult
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime
@@ -38,6 +39,8 @@ from src.vlm.logprobs_scorer import (
     PENALTY_ARITHMETIC,
     PENALTY_CODE_FORMAT,
     PENALTY_DATE_LOGIC,
+    PENALTY_MISSING_FIELD,
+    PENALTY_FORMAT,
     get_threshold,
     is_flagged,
 )
@@ -70,7 +73,6 @@ def _validate_arithmetic(fields: list[FieldValue]) -> list[ValidationError]:
     items_field = field_map.get("items")
     if items_field:
         try:
-            import json
             items = json.loads(items_field.corrected_value)
             if isinstance(items, list):
                 for i, item in enumerate(items):
@@ -102,7 +104,6 @@ def _validate_arithmetic(fields: list[FieldValue]) -> list[ValidationError]:
     grand_total_field = field_map.get("grand_total")
     if grand_total_field and items_field:
         try:
-            import json
             items = json.loads(items_field.corrected_value)
             if isinstance(items, list):
                 expected_total = sum(
@@ -153,7 +154,6 @@ def _validate_code_format(fields: list[FieldValue]) -> list[ValidationError]:
     items_field = next((f for f in fields if f.field_key == "items"), None)
     if items_field:
         try:
-            import json
             items = json.loads(items_field.corrected_value)
             if isinstance(items, list):
                 for i, item in enumerate(items):
@@ -232,8 +232,7 @@ def _validate_equipment_checklist(data_or_raw) -> list[ValidationError]:
         if not data_or_raw:
             return errors
         try:
-            import json as _json
-            data = _json.loads(data_or_raw)
+            data = json.loads(data_or_raw)
         except Exception:
             return errors
         if not isinstance(data, dict):
@@ -301,6 +300,88 @@ def _validate_equipment_checklist(data_or_raw) -> list[ValidationError]:
     return errors
 
 
+def _normalize_rank_in_assembled(vlm_result: VLMResult) -> None:
+    """assembled_json의 writer.rank 정규화 + fields[writer_block] blob 동기화.
+
+    writer_block은 sub-schema 분해 경로에서 단일 FieldValue(JSON blob)로 저장된다.
+    assembled_json만 수정하면 P5 output.json의 fields[]에는 원본이 남아 혼선을 주므로,
+    fields blob도 정규화된 rank로 재직렬화한다.
+    """
+    assembled = getattr(vlm_result, "assembled_json", None)
+    if not isinstance(assembled, dict):
+        return
+    writer = assembled.get("writer")
+    if not isinstance(writer, dict):
+        return
+    raw_rank = writer.get("rank")
+    if not isinstance(raw_rank, str) or not raw_rank.strip():
+        return
+    from src.postprocess.rank_normalizer import normalize_rank
+    normalized, corrected, flagged = normalize_rank(raw_rank)
+    if corrected:
+        writer["rank"] = normalized
+        logger.info("[P4] rank 정규화: '%s' → '%s'", raw_rank, normalized)
+        # fields[writer_block] blob 동기화
+        for f in vlm_result.fields:
+            if f.field_key != "writer_block" or not isinstance(f.raw_value, str):
+                continue
+            try:
+                blob = json.loads(f.raw_value)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(blob, dict) or blob.get("rank") != raw_rank:
+                continue
+            blob["rank"] = normalized
+            new_blob = json.dumps(blob, ensure_ascii=False)
+            f.raw_value = new_blob
+            f.corrected_value = new_blob
+    if flagged:
+        vlm_result.warnings.append(f"[P4] rank '{raw_rank}' 정규화 실패 — 검토 필요")
+
+
+def _compute_assembled_confidence(
+    assembled: dict,
+    fields: list[FieldValue],
+) -> float:
+    """assembled_json 트리 기반 신뢰도 산출.
+
+    checklist_items[i].result_confidence → VLM 자가 평가 직접 사용
+    writer/date/identifier → region FieldValue의 logprob 신뢰도 사용
+    가중 평균: checklist 60%, writer 20%, date 10%, identifier 10%
+    """
+    # checklist_items — VLM이 반환한 result_confidence 직접 활용
+    items = assembled.get("checklist_items")
+    if isinstance(items, list) and items:
+        item_confs = []
+        for item in items:
+            if isinstance(item, dict):
+                rc = item.get("result_confidence")
+                if isinstance(rc, (int, float)):
+                    item_confs.append(float(rc))
+        checklist_conf = sum(item_confs) / len(item_confs) if item_confs else 0.0
+    else:
+        checklist_conf = 0.0
+
+    # writer/date/identifier — FieldValue에서 field_key로 매칭
+    field_conf_map: dict[str, float] = {}
+    for f in fields:
+        fk = f.field_key
+        if fk and fk not in field_conf_map:
+            field_conf_map[fk] = f.confidence
+
+    writer_conf = field_conf_map.get("writer_block", 0.5)
+    date_conf = field_conf_map.get("document_date", 0.5)
+    ident_conf = field_conf_map.get("form_identifier", 0.5)
+
+    overall = (
+        checklist_conf * 0.60
+        + writer_conf * 0.20
+        + date_conf * 0.10
+        + ident_conf * 0.10
+    )
+    return round(max(0.0, min(1.0, overall)), 4)
+
+
 def _validate_missing_fields(
     fields: list[FieldValue],
     form_type: str,
@@ -314,6 +395,11 @@ def _validate_missing_fields(
         "inventory_sheet": ["unit_code", "report_date", "items"],
         "handover_doc": ["from_person", "to_person", "handover_date", "items"],
         "inspection_report": ["inspection_date", "inspector_name", "overall_result"],
+        # equipment_checklist: _validate_equipment_checklist()가 CHK-001~004로 별도 검증.
+        #   - CHK-001: checklist_items 길이 = 6
+        #   - CHK-002: item_number 순차
+        #   - CHK-003: result ∈ {O, X, ?}
+        #   - CHK-004: writer.name 존재
     }
 
     required = required_fields.get(form_type, [])
@@ -385,6 +471,7 @@ class P4Validator:
             if form_type == "equipment_checklist":
                 payload = vlm_result.assembled_json or vlm_result.raw_json
                 all_errors.extend(_validate_equipment_checklist(payload))
+                _normalize_rank_in_assembled(vlm_result)
 
         # error_id 재번호 부여
         for i, err in enumerate(all_errors):
@@ -419,10 +506,16 @@ class P4Validator:
                 confidence=round(adjusted_confidence, 4),
                 token_logprobs=f.token_logprobs,
                 is_flagged=adjusted_flagged,
+                region_id=f.region_id,
+                was_retried=f.was_retried,
             ))
 
         # ── 3. 전체 신뢰도 산출 ───
-        if adjusted_fields:
+        # assembled_json이 있는 서식(equipment_checklist 등)은 embedded confidence 기반 산출
+        assembled = getattr(vlm_result, "assembled_json", None)
+        if assembled and isinstance(assembled, dict):
+            overall = _compute_assembled_confidence(assembled, fields)
+        elif adjusted_fields:
             overall = sum(f.confidence for f in adjusted_fields) / len(adjusted_fields)
         else:
             overall = 0.0
@@ -463,6 +556,7 @@ class P4Validator:
             review_required=review_required,
             flagged_fields=flagged_fields,
             processing_path=processing_path,
+            assembled_json=getattr(vlm_result, "assembled_json", None),
         )
 
     @staticmethod
@@ -474,8 +568,8 @@ class P4Validator:
             ValidationErrorType.ARITHMETIC: PENALTY_ARITHMETIC,
             ValidationErrorType.CODE_FORMAT: PENALTY_CODE_FORMAT,
             ValidationErrorType.DATE_LOGIC: PENALTY_DATE_LOGIC,
-            ValidationErrorType.MISSING_FIELD: 0.20,
-            ValidationErrorType.FORMAT: 0.10,
+            ValidationErrorType.MISSING_FIELD: PENALTY_MISSING_FIELD,
+            ValidationErrorType.FORMAT: PENALTY_FORMAT,
         }
 
         for err in errors:

@@ -22,7 +22,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from src.vlm.template_augmentor import TemplateAugmentorStats
+    from src.vlm.skill_registry import SkillDispatchStats
 
 from src.interfaces.enums import (
     OutputFormat,
@@ -40,6 +44,7 @@ from src.interfaces.types import (
     ValidatedResult,
     VLMResult,
 )
+from src.vlm.logprobs_scorer import is_flagged as _is_flagged
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +114,7 @@ class PipelineResult:
     p3a_form_type: Optional[str] = None               # P3-A 서식 분류
     p3a_form_confidence: float = 0.0
     p3a_form_identifier: Optional[str] = None         # P3-A 서식 식별자 (예: "별지 제3-2호 서식")
-    template_augmentor_stats: Optional[Any] = None    # P2.5-A.5 TemplateAugmentorStats
+    template_augmentor_stats: "Optional[TemplateAugmentorStats]" = None    # P2.5-A.5 TemplateAugmentorStats
     p2_5b_instructions: Optional[dict] = None         # P2.5-B InstructionRouter (region_id → InstructionSpec)
     p2_5c_groups: Optional[dict] = None               # P2.5-C ResolutionRouter (pixel_budget → [CroppedRegion])
     p3b_trace: list = field(default_factory=list)     # P3-B 영역별 vLLM 호출 trace
@@ -120,7 +125,7 @@ class PipelineResult:
     # Skill Registry (other 경로)
     skill_results: list = field(default_factory=list)    # [SkillResult]
     skill_table_structures: list = field(default_factory=list)  # [TableStructure]
-    skill_stats: Optional[Any] = None                    # SkillDispatchStats
+    skill_stats: "Optional[SkillDispatchStats]" = None                    # SkillDispatchStats
 
     # 실행 시간
     timings: dict[str, float] = field(default_factory=dict)
@@ -189,7 +194,10 @@ class PipelineOrchestrator:
         """P3-A FormClassifier."""
         if "p3a" not in self._components:
             from src.vlm.form_classifier import FormClassifier, FormClassifierConfig
-            config = FormClassifierConfig(vllm_base_url=self.cfg.vllm_base_url)
+            config = FormClassifierConfig(
+                vllm_base_url=self.cfg.vllm_base_url,
+                monitor=self._get_health_monitor(),
+            )
             self._components["p3a"] = FormClassifier(config)
             logger.info("오케스트레이터: P3-A 초기화 완료")
         return self._components["p3a"]
@@ -230,7 +238,10 @@ class PipelineOrchestrator:
                 StructuredExtractor,
                 StructuredExtractorConfig,
             )
-            config = StructuredExtractorConfig(vllm_base_url=self.cfg.vllm_base_url)
+            config = StructuredExtractorConfig(
+                vllm_base_url=self.cfg.vllm_base_url,
+                monitor=self._get_health_monitor(),
+            )
             ocr_provider = self._get_ocr_hint_provider()
             self._components["p3b"] = StructuredExtractor(
                 config=config,
@@ -262,19 +273,12 @@ class PipelineOrchestrator:
             vlm = VLMClient(
                 base_url=self.cfg.vllm_base_url,
                 model_name="/models/gemma4/gemma-4-26b-a4b-it/",
+                monitor=self._get_health_monitor(),
             )
             self._components["skill_registry"] = SkillRegistry(vlm_client=vlm)
             logger.info("오케스트레이터: SkillRegistry 초기화 완료")
         return self._components["skill_registry"]
 
-    def _get_p3_legacy(self):
-        """기존 Gemma4Engine (fallback/호환용)."""
-        if "p3" not in self._components:
-            from src.vlm.gemma4_engine import Gemma4Engine, Gemma4EngineConfig
-            config = Gemma4EngineConfig(vllm_base_url=self.cfg.vllm_base_url)
-            self._components["p3"] = Gemma4Engine(config)
-            logger.info("오케스트레이터: P3 (legacy) 초기화 완료")
-        return self._components["p3"]
 
     def _get_p4(self):
         if "p4" not in self._components:
@@ -508,9 +512,8 @@ class PipelineOrchestrator:
             overall_status=_aggregate_pdf_status(page_outputs),
             processing_ms=(_t.monotonic() - start) * 1000,
             warnings=[w for p in pages for w in p.warnings],
+            page_results=page_results,
         )
-        # 런타임 디버깅용: PipelineResult 리스트를 doc_result에 부착
-        doc_result._page_results = page_results  # type: ignore[attr-defined]
 
         logger.info(
             "[PDF] %s: %d 페이지 처리 완료 (status=%s, %.0fms)",
@@ -725,15 +728,14 @@ class PipelineOrchestrator:
             review_queue_id = rq.enqueue(p4_out, reason=reason)
             result.warnings.append(f"[검토큐] 적재 완료: {review_queue_id}")
 
-        # ─── P5: 직렬화 ───
+        # ─── P5: 직렬화 (검토 필요 여부와 무관하게 항상 실행) ───
         json_out, xml_out, csv_rows = None, None, []
-        if not p4_out.review_required or True:  # 검토 필요해도 직렬화는 실행
-            serialized = self._run_step(
-                "P5", result,
-                lambda: self._get_p5().serialize(p4_out),
-            )
-            if serialized:
-                json_out, xml_out, csv_rows = serialized
+        serialized = self._run_step(
+            "P5", result,
+            lambda: self._get_p5().serialize(p4_out),
+        )
+        if serialized:
+            json_out, xml_out, csv_rows = serialized
 
         # ─── P6: DB 적재 ───
         from src.interfaces.enums import FormType as _FT
@@ -778,9 +780,6 @@ class PipelineOrchestrator:
     ) -> None:
         """VLM + Fallback 모두 불가 시 원본을 검토 큐에 적재."""
         try:
-            from src.postprocess.review_queue import ReviewQueue, ReviewQueueConfig
-            from src.interfaces.types import ValidatedResult
-
             # 빈 ValidatedResult 생성
             empty_validated = ValidatedResult(
                 doc_id=doc_input.doc_id,
@@ -843,7 +842,7 @@ def _skill_results_to_fields(skill_results: list) -> list[FieldValue]:
                 data_type=data_type,
                 confidence=sr.confidence,
                 token_logprobs=[],
-                is_flagged=sr.confidence < 0.60,
+                is_flagged=_is_flagged(sr.confidence, data_type),
                 region_id=sr.region_id,
             )
         )
@@ -879,4 +878,6 @@ def _aggregate_pdf_status(page_outputs: list) -> PipelineStatus:
         return PipelineStatus.SUCCESS
     if statuses == {PipelineStatus.FAILED}:
         return PipelineStatus.FAILED
+    if statuses == {PipelineStatus.OTHER_DOCUMENT}:
+        return PipelineStatus.OTHER_DOCUMENT
     return PipelineStatus.PARTIAL

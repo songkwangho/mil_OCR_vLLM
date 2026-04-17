@@ -10,8 +10,8 @@ pdf_adapter_design.md §6 구현.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
+import cv2
 import numpy as np
 
 from src.interfaces.types import PageImage
@@ -132,13 +132,17 @@ class PdfAdapter:
                         warnings.append(
                             f"원본 이미지 추정 DPI={estimated_dpi} (< {RENDER_DPI_MIN}) — P1 SR 대상"
                         )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("페이지 이미지 DPI 추정 실패 (무시): %s", e)
 
     def _render_page(self, page, dpi: int, cs, fitz) -> np.ndarray:
         zoom = dpi / 72.0
         matrix = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=matrix, colorspace=cs, alpha=False)
-        img = np.frombuffer(pix.samples, dtype=np.uint8)
-        img = img.reshape(pix.height, pix.width, 3)
+        n = pix.n
+        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, n)
+        if n == 1:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        elif n == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_RGBA2RGB)
         return img.copy()

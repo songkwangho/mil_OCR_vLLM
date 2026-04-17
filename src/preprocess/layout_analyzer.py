@@ -42,6 +42,7 @@ from src.interfaces.types import (
     PreprocessedImage,
     RawLayoutResult,
 )
+from src.preprocess.bbox_utils import compute_iou
 
 logger = logging.getLogger(__name__)
 
@@ -121,16 +122,6 @@ class _AnalyzerOutput:
 #  내부 유틸
 # ─────────────────────────────────────────────
 
-def _compute_iou(a: BoundingBox, b: BoundingBox) -> float:
-    """두 BoundingBox 간 IoU 계산."""
-    ix1 = max(a.x1, b.x1)
-    iy1 = max(a.y1, b.y1)
-    ix2 = min(a.x2, b.x2)
-    iy2 = min(a.y2, b.y2)
-    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-    union = a.area + b.area - inter
-    return inter / union if union > 0 else 0.0
-
 
 def _nms_regions(regions: list[LayoutRegion],
                  iou_threshold: float) -> list[LayoutRegion]:
@@ -144,7 +135,7 @@ def _nms_regions(regions: list[LayoutRegion],
     for region in sorted_regions:
         is_suppressed = False
         for kept in keep:
-            if _compute_iou(region.bbox, kept.bbox) > iou_threshold:
+            if compute_iou(region.bbox, kept.bbox) > iou_threshold:
                 is_suppressed = True
                 break
         if not is_suppressed:
@@ -909,14 +900,13 @@ class P2LayoutAnalyzer:
     ) -> list[int]:
         """V3 모델 예측 읽기 순서를 NMS 이후 인덱스로 리매핑.
 
-        area filter + NMS는 같은 LayoutRegion 객체의 서브셋을 반환하므로,
-        Python 객체 identity(id())로 pre → post 매핑이 가능합니다.
+        region_id 기반 매핑 — fusion path에서 LayoutRegion이 복제되어도 안정적.
         """
-        post_map = {id(r): i for i, r in enumerate(post_nms)}
+        post_map = {r.region_id: i for i, r in enumerate(post_nms)}
         remapped: list[int] = []
         for pre_idx in model_order:
             if pre_idx < len(pre_nms):
-                post_idx = post_map.get(id(pre_nms[pre_idx]))
+                post_idx = post_map.get(pre_nms[pre_idx].region_id)
                 if post_idx is not None:
                     remapped.append(post_idx)
         # NMS를 통과했으나 model order에 없는 영역(order=None) 추가
@@ -938,11 +928,13 @@ class P2LayoutAnalyzer:
         notes: list[str] = []
         warnings: list[str] = []
 
+        effective_mode = self._mode  # 호출별 모드 — self._mode는 초기 설정 유지
+
         image_rgb = preprocessed.image_array
         binary = preprocessed.binary_array
         h, w = image_rgb.shape[:2]
 
-        notes.append(f"Mode: {self._mode.value}, image: {w}x{h}, DPI: {preprocessed.dpi}")
+        notes.append(f"Mode: {effective_mode.value}, image: {w}x{h}, DPI: {preprocessed.dpi}")
 
         # ── Step 1: 영역 검출
         try:
@@ -953,12 +945,12 @@ class P2LayoutAnalyzer:
                           preprocessed.doc_id, e)
             fallback = _HeuristicAnalyzer(self.cfg)
             analyzer_output = fallback.analyze(image_rgb, binary, notes)
-            self._mode = AnalysisMode.HEURISTIC
+            effective_mode = AnalysisMode.HEURISTIC
 
         raw_regions = analyzer_output.regions
 
         # ── Step 1-1: 모델 결과가 비어있으면 heuristic fallback
-        if not raw_regions and self._mode == AnalysisMode.MODEL:
+        if not raw_regions and effective_mode == AnalysisMode.MODEL:
             warnings.append(
                 "MODEL_EMPTY_FALLBACK: 모델이 영역을 검출하지 못해 heuristic으로 전환"
             )
@@ -967,7 +959,7 @@ class P2LayoutAnalyzer:
             fallback = _HeuristicAnalyzer(self.cfg)
             analyzer_output = fallback.analyze(image_rgb, binary, notes)
             raw_regions = analyzer_output.regions
-            self._mode = AnalysisMode.HEURISTIC
+            effective_mode = AnalysisMode.HEURISTIC
 
         # ── Step 2: 최소 면적 필터링
         min_area = int(h * w * self.cfg.min_region_area_ratio)
@@ -984,14 +976,10 @@ class P2LayoutAnalyzer:
                 f"NMS: {len(filtered) - len(regions)} overlapping regions removed"
             )
 
-        # ── Step 4: region_id 재할당
-        for idx, region in enumerate(regions):
-            region.region_id = f"r_{idx + 1:04d}"
-
-        # ── Step 5: 읽기 순서 결정
+        # ── Step 4: 읽기 순서 결정 (region_id 재할당 전에 수행 — region_id 일치 필요)
         if (analyzer_output.model_reading_order is not None
                 and self.cfg.use_model_reading_order):
-            # V3 모델 예측 읽기 순서 (NMS 후 인덱스 리매핑)
+            # V3 모델 예측 읽기 순서 (NMS 후 인덱스 리매핑, region_id 기반)
             reading_order = self._remap_model_order(
                 analyzer_output.model_reading_order, raw_regions, regions
             )
@@ -1002,6 +990,10 @@ class P2LayoutAnalyzer:
                 regions, w, self.cfg.multi_column_gap_ratio
             )
             notes.append("Reading order: heuristic (multi-column aware)")
+
+        # ── Step 5: region_id 재할당 (읽기 순서 결정 후 수행)
+        for idx, region in enumerate(regions):
+            region.region_id = f"r_{idx + 1:04d}"
 
         # ── Step 6: 경고 생성
         if not regions:
@@ -1015,7 +1007,7 @@ class P2LayoutAnalyzer:
 
         logger.info(
             "[P2][%s] done mode=%s regions=%d tables=%d reading_order=%s",
-            preprocessed.doc_id, self._mode.value, len(regions), table_count,
+            preprocessed.doc_id, effective_mode.value, len(regions), table_count,
             reading_order,
         )
 
@@ -1025,6 +1017,6 @@ class P2LayoutAnalyzer:
             page_height=h,
             regions=regions,
             reading_order=reading_order,
-            analysis_mode=self._mode,
+            analysis_mode=effective_mode,
             warnings=warnings,
         )

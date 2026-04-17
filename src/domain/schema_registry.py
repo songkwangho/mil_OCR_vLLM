@@ -19,7 +19,6 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
-_DEFAULT_VERSION = "v1"
 
 # form_type 별칭 → schema_id
 _SCHEMA_ALIASES: dict[str, str] = {

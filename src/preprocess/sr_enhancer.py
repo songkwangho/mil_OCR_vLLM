@@ -38,7 +38,7 @@ class SRResult:
     image: np.ndarray                        # 최종 SR 이미지 (BGR)
     sr_a_image: Optional[np.ndarray] = None  # Real-ESRGAN 출력
     sr_a_applied: bool = False
-    notes: list = None
+    notes: list[str] | None = None
 
     def __post_init__(self):
         if self.notes is None:

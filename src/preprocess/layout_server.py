@@ -21,6 +21,7 @@ import logging
 import os
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import cv2
@@ -40,6 +41,10 @@ DEFAULT_MODEL_DIR = os.environ.get(
     "LAYOUT_MODEL_DIR",
     f"/models/t2_layout/{DEFAULT_MODEL_NAME}",
 )
+
+_LAYOUT_MODEL_DIR_BASE = os.environ.get("LAYOUT_MODEL_DIR_BASE", "/models/t2_layout")
+_MODEL_V3_DIR = f"{_LAYOUT_MODEL_DIR_BASE}/PP-DocLayoutV3"
+_MODEL_PLUS_L_DIR = f"{_LAYOUT_MODEL_DIR_BASE}/PP-DocLayout_plus-L"
 
 # ─────────────────────────────────────────────
 #  Pydantic 스키마
@@ -111,17 +116,17 @@ _manager = _LayoutModelManager()
 #  FastAPI 앱
 # ─────────────────────────────────────────────
 
-app = FastAPI(title="mil_OCR_v2 Layout Service", version="1.0.0")
-
-
-@app.on_event("startup")
-async def _startup():
-    """서버 시작 시 기본 모델 프리로드."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     try:
         _manager.get_engine(DEFAULT_MODEL_NAME, DEFAULT_DEVICE, DEFAULT_MODEL_DIR)
         logger.info("기본 모델 프리로드 완료: %s", DEFAULT_MODEL_NAME)
     except Exception as e:
         logger.error("기본 모델 프리로드 실패: %s", e)
+    yield
+
+
+app = FastAPI(title="mil_OCR_v2 Layout Service", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -282,8 +287,8 @@ async def analyze(req: AnalyzeRequest):
 
         if req.fusion_mode:
             # ── 융합 모드: V3(구조) + plus-L(텍스트) ──
-            v3_dir = f"/models/t2_layout/PP-DocLayoutV3"
-            plusl_dir = f"/models/t2_layout/PP-DocLayout_plus-L"
+            v3_dir = _MODEL_V3_DIR
+            plusl_dir = _MODEL_PLUS_L_DIR
 
             try:
                 v3_engine = _manager.get_engine("PP-DocLayoutV3", DEFAULT_DEVICE, v3_dir)

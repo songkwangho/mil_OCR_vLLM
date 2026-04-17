@@ -28,6 +28,7 @@ import yaml
 from src.interfaces.enums import FormType, RegionType
 from src.interfaces.types import InstructionSpec, LayoutRegion, LayoutResult
 from src.domain.schema_registry import SchemaRegistry
+from src.vlm.budget_config import PIXEL_BUDGETS as _DEFAULT_PIXEL_BUDGETS, FALLBACK_PIXEL_BUDGET as _FALLBACK_PIXEL_BUDGET
 
 logger = logging.getLogger(__name__)
 
@@ -118,29 +119,6 @@ _OCR_HINT_TEMPLATE = (
     "위 내용을 참고하여 보다 정확하게 추출하세요. "
     "단, OCR 결과가 명백히 틀린 경우에는 이미지를 보고 직접 판단하세요."
 )
-
-# ─────────────────────────────────────────────
-#  region_type → 기본 pixel_budget 매핑
-# ─────────────────────────────────────────────
-
-_DEFAULT_PIXEL_BUDGETS: dict[str, int] = {
-    # 설계 업데이트 (2026-04-10): PIPELINE.md §2-4 기준
-    # - table: 1120 유지 (셀 경계·미세 글씨)
-    # - seal: 560 유지 (원형 배치 텍스트)
-    # - text: 280 → 560 상향 (소형 폰트·수기 대응)
-    # - handwritten_field: v2 RegionType에 없음 (VLM이 내용으로 판별) →
-    #   실측 상 수기 영역은 text로 반환되므로 text 상향으로 간접 대응
-    "table": 1120,
-    "seal": 560,
-    "text": 560,
-    "formula": 280,
-    "chart": 280,
-    "figure": 140,
-    "header": 140,
-    "footer": 140,
-}
-
-_FALLBACK_PIXEL_BUDGET = 560
 
 
 class InstructionRouter:
@@ -251,7 +229,7 @@ class InstructionRouter:
                 f"{example.get('response', '')}"
             )
 
-        # 5) system_prompt
+        # 6) system_prompt
         if form_type_value:
             system_prompt = _SYSTEM_PROMPTS.get(
                 form_type_value, _DEFAULT_SYSTEM_PROMPT
@@ -259,25 +237,25 @@ class InstructionRouter:
         else:
             system_prompt = _DEFAULT_SYSTEM_PROMPT
 
-        # 6) json_schema (SchemaRegistry)
+        # 7) json_schema (SchemaRegistry)
         full_schema: Optional[dict] = None
         if form_type_value:
             # unknown → _fallback, 그 외 → form_type
             schema_id = "_fallback" if form_type_value == "unknown" else form_type_value
             full_schema = self._schema_registry.load(schema_id)
 
-        # 6-1) field_key 기반 sub-schema 분해 (x-assembly-rules 있는 서식만)
+        # 7-1) field_key 기반 sub-schema 분해 (x-assembly-rules 있는 서식만)
         region_field_key = getattr(region, "field_key", None)
         if region_field_key and full_schema and full_schema.get("x-assembly-rules"):
             json_schema = self._extract_sub_schema(region_field_key, full_schema)
-            # field_key 전용 짧은 instruction — full-schema 1-shot 예시는 오히려 혼란을 줌
+            # field_key 전용 짧은 instruction — full-shot 예시는 오히려 혼란을 줌
             user_instruction = _build_field_key_instruction(
                 region_field_key, json_schema
             )
         else:
             json_schema = full_schema
 
-        # 7) pixel_budget
+        # 8) pixel_budget
         pixel_budget = _DEFAULT_PIXEL_BUDGETS.get(
             region_type_value, _FALLBACK_PIXEL_BUDGET
         )

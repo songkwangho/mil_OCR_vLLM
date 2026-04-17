@@ -532,8 +532,8 @@ def _handle_pdf_result(pdf_result, doc_id: str, run_dir: Path):
     doc_dir = run_dir / doc_id
     doc_dir.mkdir(parents=True, exist_ok=True)
 
-    # 페이지별 PipelineResult 저장 (런타임 부착 필드)
-    page_results = getattr(pdf_result, "_page_results", None) or []
+    # 페이지별 PipelineResult 저장
+    page_results = pdf_result.page_results or []
     for page_result in page_results:
         page_id = page_result.doc_id  # "{원본}_p{N:02d}"
         page_num_str = page_id.rsplit("_p", 1)[-1] if "_p" in page_id else f"{len(page_results):02d}"

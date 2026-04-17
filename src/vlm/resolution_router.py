@@ -33,30 +33,20 @@ from src.interfaces.types import (
     LayoutResult,
     PreprocessedImage,
 )
+from src.vlm.budget_config import PIXEL_BUDGETS as DEFAULT_PIXEL_BUDGETS
 
 logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────
-#  기본 pixel_budget 매핑
+#  기본 pixel_budget 매핑 — budget_config.py에서 import
 # ─────────────────────────────────────────────
-
-DEFAULT_PIXEL_BUDGETS: dict[str, int] = {
-    # 설계 업데이트 (2026-04-10): PIPELINE.md §2-4 기준
-    # text 280 → 560 상향 (소형 폰트·수기 대응)
-    "table":    1120,   # 셀 경계·미세 글씨 → 최고 해상도
-    "seal":      560,   # 원형 배치 텍스트
-    "text":      560,   # 일반 텍스트 — 상향 (소형 폰트 대응)
-    "formula":   280,
-    "chart":     280,
-    "figure":    140,
-    "header":    140,   # 저해상도로 충분
-    "footer":    140,
-}
+# DEFAULT_PIXEL_BUDGETS는 위 import 참조 (src.vlm.budget_config.PIXEL_BUDGETS)
 
 
-# 영역 타입별 패딩 비율 (bbox 대비) — 공백 패딩이 아닌 원본 이미지 맥락 포함
-# AI_INFERENCE.md §4-5: handwritten_field 0.15 (양식 레이블·경계선 포함)
+# 경로별 크롭 패딩 비율 (bbox 대비) — military 경로 전용.
+# other 경로용은 skill_registry.CROP_PADDING_RATIO에 따로 정의되어 있다
+# (TemplateAugmentor가 정확한 bbox를 제공하므로 military는 더 짧은 패딩을 사용).
 DEFAULT_CROP_PADDING_RATIO: dict[str, float] = {
     "table":             0.02,   # 2% — 열/행 헤더만 포함 (상·하단 인접 영역 오염 방지)
     "handwritten_field": 0.15,   # 15% — 양식 레이블·경계선

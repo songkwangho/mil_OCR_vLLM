@@ -77,11 +77,11 @@ class LayoutHTTPClient:
             )
             resp.raise_for_status()
         except httpx.ConnectError as e:
-            raise RuntimeError(f"Layout 서비스 연결 실패 ({self.base_url}): {e}")
+            raise RuntimeError(f"Layout 서비스 연결 실패 ({self.base_url}): {e}") from e
         except httpx.TimeoutException as e:
-            raise RuntimeError(f"Layout 서비스 타임아웃 ({self.timeout}s): {e}")
+            raise RuntimeError(f"Layout 서비스 타임아웃 ({self.timeout}s): {e}") from e
         except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"Layout 서비스 오류 (HTTP {e.response.status_code}): {e}")
+            raise RuntimeError(f"Layout 서비스 오류 (HTTP {e.response.status_code}): {e}") from e
 
         data = resp.json()
         detections = data.get("detections", [])

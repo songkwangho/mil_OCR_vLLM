@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Optional
 
 from src.interfaces.types import SkillResult, SkillTask
 from src.preprocess.seal_preprocessor import SealPreprocessor
+from src.vlm.skills._parsing import _loads_relaxed
 from src.vlm.vlm_client import VLMClient, encode_image_base64
 
 logger = logging.getLogger(__name__)
@@ -109,41 +109,6 @@ class SealReader:
             warnings=warnings,
         )
 
-
-_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL)
-
-
-def _loads_relaxed(raw: str) -> Optional[dict]:
-    """raw → dict. 순수 JSON, 코드펜스, 중괄호 블록 추출 3단계 폴백."""
-    try:
-        obj = json.loads(raw)
-        return obj if isinstance(obj, dict) else None
-    except json.JSONDecodeError:
-        pass
-    m = _FENCE_RE.search(raw)
-    if m:
-        try:
-            obj = json.loads(m.group(1).strip())
-            if isinstance(obj, dict):
-                return obj
-        except json.JSONDecodeError:
-            pass
-    start = raw.find("{")
-    if start >= 0:
-        depth = 0
-        for i in range(start, len(raw)):
-            if raw[i] == "{":
-                depth += 1
-            elif raw[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        obj = json.loads(raw[start : i + 1])
-                        if isinstance(obj, dict):
-                            return obj
-                    except json.JSONDecodeError:
-                        break
-    return None
 
 
 def _parse_seal_json(raw: str) -> tuple[str, float]:

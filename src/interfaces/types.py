@@ -7,12 +7,13 @@ v1 → v2 변경 요약:
   유지: BoundingBox, DocumentInput, PreprocessedImage, LayoutRegion
   축소 이관: LayoutAnalysisResult → LayoutResult (reading_order 강화)
   제거: FormClassificationResult, TextLine, HandwritingRecognitionResult,
-        TableCell, MergedCellRange, TableStructure, FieldGroup,
+        MergedCellRange, FieldGroup,
         StructureRecognitionResult, DomainCodeRecognitionResult,
         CorrectedLine, CorrectedDocument, ValidationReport,
         FieldScore, ScoredDocument, ExtractedField, ExtractedDocument
   신규: FieldValue, RecognizedTable, DomainCode(v2), VLMResult,
-        ValidatedResult, ReviewQueueItem, ReviewQueueStats, PipelineOutput(v2)
+        ValidatedResult, ReviewQueueItem, ReviewQueueStats, PipelineOutput(v2),
+        TableCell, TableStructure (S5 Skill 용도로 재도입)
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ import numpy as np
 
 from .enums import (
     AnalysisMode,
-    BrightnessBand,
     CodeType,
     DpiResolutionBand,
     FileExt,
@@ -403,6 +403,7 @@ class ValidatedResult:
     review_required: bool
     flagged_fields: list[str]         # 임계값 미달 field_key 목록
     processing_path: ProcessingPath = ProcessingPath.VLM
+    assembled_json: Optional[dict] = None  # Assembler 조립 결과 — P5가 진실의 원천으로 사용
 
 
 # ═══════════════════════════════════════════════
@@ -456,6 +457,7 @@ class PdfDocumentResult:
     overall_status: "PipelineStatus"
     processing_ms: float = 0.0
     warnings: list[str] = field(default_factory=list)
+    page_results: list[Any] = field(default_factory=list)  # PipelineResult 리스트 (디버깅/저장용)
 
 
 # ═══════════════════════════════════════════════

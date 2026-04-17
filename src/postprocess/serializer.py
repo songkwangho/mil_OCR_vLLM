@@ -35,12 +35,17 @@ class P5SerializerConfig:
 
 
 def _serialize_json(result: ValidatedResult, indent: int = 2) -> str:
-    """ValidatedResult → JSON 문자열."""
+    """ValidatedResult → JSON 문자열.
+
+    assembled_json이 있는 서식(x-assembly-rules 적용)은 최상위에 포함한다.
+    fields[]는 region 단위 blob 원본으로 유지 — 추적성 + 디버깅용.
+    """
     data = {
         "doc_id": result.doc_id,
         "overall_confidence": result.overall_confidence,
         "review_required": result.review_required,
         "processing_path": result.processing_path.value,
+        "assembled_json": getattr(result, "assembled_json", None),
         "fields": [
             {
                 "field_key": f.field_key,
@@ -102,6 +107,8 @@ def _serialize_xml(result: ValidatedResult, root_tag: str = "document") -> str:
     return '<?xml version="1.0" encoding="utf-8"?>\n' + xml_body
 
 
+# lxml은 Dockerfile.pipeline에 포함됨 — 이 fallback은
+# 테스트 환경(lxml 미설치)용 방어 코드이며 제거하지 않음.
 def _serialize_xml_fallback(result: ValidatedResult, root_tag: str) -> str:
     """lxml 미설치 시 간이 XML."""
     lines = ['<?xml version="1.0" encoding="utf-8"?>']

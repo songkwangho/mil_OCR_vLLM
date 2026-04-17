@@ -36,7 +36,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from src.interfaces.enums import FileExt, PipelineStatus, SourceType
-from src.interfaces.types import DocumentInput
+from src.interfaces.types import DocumentInput, PdfDocumentResult, PipelineOutput
 from src.pipeline.orchestrator import PipelineConfig, PipelineOrchestrator, PipelineResult
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,11 @@ class RunResponse(BaseModel):
     timings: dict[str, float] = {}
     errors: list[str] = []
     warnings: list[str] = []
+    total_pages: int = 1
+    pages: list["RunResponse"] = []
+
+
+RunResponse.model_rebuild()
 
 
 # ─────────────────────────────────────────────
@@ -125,8 +130,32 @@ def _get_pipeline() -> PipelineOrchestrator:
     return _pipeline
 
 
-def _result_to_response(result: PipelineResult) -> RunResponse:
-    """PipelineResult → RunResponse 변환."""
+def _result_to_response(result: "PipelineResult | PdfDocumentResult") -> RunResponse:
+    """PipelineResult 또는 PdfDocumentResult → RunResponse 변환."""
+    if isinstance(result, PdfDocumentResult):
+        first_path = "none"
+        if result.pages:
+            first_path = result.pages[0].processing_path.value
+
+        page_responses = [_page_output_to_response(p) for p in result.pages]
+
+        return RunResponse(
+            doc_id=result.doc_id,
+            status=result.overall_status.value,
+            processing_path=first_path,
+            form_type=None,
+            form_confidence=0.0,
+            fields=[],
+            table_count=0,
+            total_ms=round(result.processing_ms, 1),
+            timings={},
+            errors=[],
+            warnings=result.warnings,
+            total_pages=result.total_pages,
+            pages=page_responses,
+        )
+
+    # PipelineResult (단일 이미지)
     fields = []
     if result.p3_result:
         for f in result.p3_result.fields:
@@ -150,6 +179,28 @@ def _result_to_response(result: PipelineResult) -> RunResponse:
         timings={k: round(v, 1) for k, v in result.timings.items()},
         errors=result.errors,
         warnings=result.warnings,
+        total_pages=1,
+        pages=[],
+    )
+
+
+def _page_output_to_response(p: PipelineOutput) -> RunResponse:
+    """PipelineOutput (PDF 단일 페이지) → RunResponse 변환."""
+    form_type_str = p.form_type.value if p.form_type is not None else None
+    return RunResponse(
+        doc_id=p.doc_id,
+        status=p.status.value,
+        processing_path=p.processing_path.value,
+        form_type=form_type_str,
+        form_confidence=0.0,
+        fields=[],
+        table_count=0,
+        total_ms=round(p.processing_ms, 1),
+        timings={},
+        errors=[],
+        warnings=[],
+        total_pages=1,
+        pages=[],
     )
 
 
@@ -199,7 +250,7 @@ def run_pipeline(req: RunRequest):
     )
 
     pipeline = _get_pipeline()
-    result = pipeline.run(doc_input)
+    result = pipeline.process(doc_input)
 
     return _result_to_response(result)
 
@@ -236,7 +287,7 @@ async def run_pipeline_upload(
     )
 
     pipeline = _get_pipeline()
-    result = pipeline.run(doc_input)
+    result = pipeline.process(doc_input)
 
     return _result_to_response(result)
 

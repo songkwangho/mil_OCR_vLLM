@@ -58,6 +58,15 @@ RUN pip install --no-cache-dir \
         pandas>=2.2.0 \
         sqlalchemy>=2.0.0
 
+# ─── PaddleOCR (OCR-augmented 힌트) + PDF 어댑터 ──────
+# 폐쇄망 대응: paddleocr는 초기화 시 ~/.paddlex/official_models/에 모델 자동 다운로드를
+# 시도하므로 사전에 models/ocr_hint/ 아래에 배치된 가중치를 복사해 둔다.
+RUN pip install --no-cache-dir \
+        paddleocr>=3.0.0 \
+        pymupdf>=1.24.0
+
+COPY models/ocr_hint/ /root/.paddlex/official_models/
+
 # ─── 작업 디렉토리 ──────────────────────────
 WORKDIR /workspace
 COPY src/ /workspace/src/

@@ -1,0 +1,314 @@
+{
+  "run_idx": 1,
+  "doc_id": "전역지원서_2",
+  "status": "review",
+  "processing_path": "vlm",
+  "total_ms": 25080.1,
+  "timings": {
+    "P1": 5158.7,
+    "P2": 253.0,
+    "P2.5A": 0.4,
+    "P3A": 1194.1,
+    "P2.5A5": 3.6,
+    "P2.5B": 9.1,
+    "P2.5C": 8.6,
+    "P3B": 18410.7,
+    "P4": 8.6,
+    "P5": 10.1,
+    "P6": 23.2
+  },
+  "errors": [],
+  "warnings": [
+    "[P1] IMAGE_TOO_BRIGHT: mean=231.3",
+    "[P1] LOW_RESOLUTION_BAND: quality score penalized x0.85",
+    "[P3B] [P1] IMAGE_TOO_BRIGHT: mean=231.3",
+    "[P3B] [P1] LOW_RESOLUTION_BAND: quality score penalized x0.85",
+    "[검토큐] 적재 완료: RQ-20260416-전역지원서_2"
+  ],
+  "p1": {
+    "dpi": 144,
+    "quality_score": 0.765,
+    "sr_applied": true
+  },
+  "p2": {
+    "region_count": 5,
+    "region_types": [
+      "header",
+      "table",
+      "text",
+      "text",
+      "text"
+    ]
+  },
+  "p3a": {
+    "form_type": "unknown",
+    "form_confidence": 0.9
+  },
+  "p3b": {
+    "form_type": "unknown",
+    "field_count": 25,
+    "table_count": 1,
+    "retry_count": 4,
+    "fields": [
+      {
+        "field_key": "document_title",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0002",
+        "was_retried": true
+      },
+      {
+        "field_key": "date",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0002",
+        "was_retried": true
+      },
+      {
+        "field_key": "author",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0002",
+        "was_retried": true
+      },
+      {
+        "field_key": "unit_code",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0002",
+        "was_retried": true
+      },
+      {
+        "field_key": "fields",
+        "raw_value": "[{\"key\": \"안내 문구\", \"value\": \"당기 업무 보고서에 반영 요청사항을 반영하여 작성하여, 단기 업무 보고서에 반영된 내용을 바탕으로 본인의 실적을 보고하여(업무 및 수기 기록 X) 제안하기 위해 통보함. 반영 문구에서 서술한 내용을 바탕으로 실적을 기입합니다.\"}]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0002",
+        "was_retried": true
+      },
+      {
+        "field_key": "table_data",
+        "raw_value": "[]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0002",
+        "was_retried": true
+      },
+      {
+        "field_key": "corrected_text",
+        "raw_value": "당기 업무 보고서에 반영 요청사항을 반영하여 작성하여, 단기 업무 보고서에 반영된 내용을 바탕으로 본인의 실적을 보고하여(업무 및 수기 기록 X) 제안하기 위해 통보함. 반영 문구에서 서술한 내용을 바탕으로 실적을 기입합니다.",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0002",
+        "was_retried": true
+      },
+      {
+        "field_key": "document_info",
+        "raw_value": "{\"title\": null, \"date\": \"2017. 04. 11\", \"author\": null, \"unit_code\": null}",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0003",
+        "was_retried": true
+      },
+      {
+        "field_key": "fields",
+        "raw_value": "{\"date_field\": \"2017. 04. 11\"}",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0003",
+        "was_retried": true
+      },
+      {
+        "field_key": "tables",
+        "raw_value": "[]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0003",
+        "was_retried": true
+      },
+      {
+        "field_key": "handwritten_notes",
+        "raw_value": "[{\"text\": \"2017. 04. 11\", \"confidence\": \"low\"}]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0003",
+        "was_retried": true
+      },
+      {
+        "field_key": "document_title",
+        "raw_value": "미확인 (군수 관련 서식 추정)",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "date",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "author",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "unit_code",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "fields",
+        "raw_value": "[{\"key\": \"미확인\", \"value\": \"미확인\"}]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "table_data",
+        "raw_value": "[]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "handwritten_content",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "ocr_correction",
+        "raw_value": "{\"original_detected\": \"미확인 텍스트\", \"corrected_text\": \"해당 이미지는 텍스트의 가독성이 극도로 낮아 정확한 문장 복원이 불가능합니다.\"}",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "document_title",
+        "raw_value": "전이지원서",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0004",
+        "was_retried": true
+      },
+      {
+        "field_key": "date",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0004",
+        "was_retried": true
+      },
+      {
+        "field_key": "author",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0004",
+        "was_retried": true
+      },
+      {
+        "field_key": "unit_code",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0004",
+        "was_retried": true
+      },
+      {
+        "field_key": "fields",
+        "raw_value": "{}",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0004",
+        "was_retried": true
+      },
+      {
+        "field_key": "table_data",
+        "raw_value": "[]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0004",
+        "was_retried": true
+      }
+    ],
+    "assembled_json": null
+  },
+  "p4": {
+    "overall_confidence": 0.0,
+    "review_required": true,
+    "flagged_fields": [
+      "author",
+      "author",
+      "author",
+      "corrected_text",
+      "date",
+      "date",
+      "date",
+      "document_info",
+      "document_title",
+      "document_title",
+      "document_title",
+      "fields",
+      "fields",
+      "fields",
+      "fields",
+      "handwritten_content",
+      "handwritten_notes",
+      "ocr_correction",
+      "table_data",
+      "table_data",
+      "table_data",
+      "tables",
+      "unit_code",
+      "unit_code",
+      "unit_code"
+    ],
+    "error_count": 0
+  },
+  "wall_ms": 25326.4
+}

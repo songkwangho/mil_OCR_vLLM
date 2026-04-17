@@ -15,7 +15,7 @@ military 경로 전용.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -319,17 +319,3 @@ def _is_small_contained(pp: BoundingBox, tpl: BoundingBox) -> bool:
     return pp_area < 0.6 * tpl_area
 
 
-def _iou(a: BoundingBox, b: BoundingBox) -> float:
-    inter_x1 = max(a.x1, b.x1)
-    inter_y1 = max(a.y1, b.y1)
-    inter_x2 = min(a.x2, b.x2)
-    inter_y2 = min(a.y2, b.y2)
-    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
-        return 0.0
-    inter = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-    area_a = (a.x2 - a.x1) * (a.y2 - a.y1)
-    area_b = (b.x2 - b.x1) * (b.y2 - b.y1)
-    union = area_a + area_b - inter
-    if union <= 0:
-        return 0.0
-    return inter / union

@@ -31,6 +31,7 @@ from src.interfaces.types import (
     LayoutResult,
     RawLayoutResult,
 )
+from src.preprocess.bbox_utils import compute_iou
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +63,6 @@ class LayoutPostProcessorConfig:
 # ─────────────────────────────────────────────
 #  유틸
 # ─────────────────────────────────────────────
-
-def _compute_iou(a: BoundingBox, b: BoundingBox) -> float:
-    """두 BoundingBox 간 IoU."""
-    ix1 = max(a.x1, b.x1)
-    iy1 = max(a.y1, b.y1)
-    ix2 = min(a.x2, b.x2)
-    iy2 = min(a.y2, b.y2)
-    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-    union = a.area + b.area - inter
-    return inter / union if union > 0 else 0.0
 
 
 # ─────────────────────────────────────────────
@@ -190,7 +181,7 @@ class LayoutPostProcessor:
             # 현재 region과 이전에 남긴 region들 간 IoU 검사
             suppress = False
             for kept_r in kept:
-                iou = _compute_iou(region.bbox, kept_r.bbox)
+                iou = compute_iou(region.bbox, kept_r.bbox)
 
                 # seal 영역은 더 엄격한 기준
                 threshold = self.cfg.seal_iou_threshold if (
@@ -263,7 +254,7 @@ class LayoutPostProcessor:
                     region_type=RegionType.TEXT,
                     bbox=new_bbox,
                     confidence=max(prev.confidence, curr.confidence),
-                    polygon=None,  # 병합 시 polygon 무효
+                    polygon=None,  # 병합 후 polygon은 소실 — 현재 downstream 소비자 없음. P2.5-B/C가 polygon을 참조하면 재검토 필요.
                 )
                 result_text[-1] = merged_region
                 merged_map[curr.region_id] = prev.region_id

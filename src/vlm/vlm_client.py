@@ -18,10 +18,13 @@ import base64
 import json
 import logging
 import re
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import cv2
 import numpy as np
+
+if TYPE_CHECKING:
+    from src.pipeline.health_monitor import VLMHealthMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +68,15 @@ def extract_field_logprobs(
     """vLLM logprobs 응답에서 필드별 토큰 logprob을 추출.
 
     JSON 출력의 각 필드값에 해당하는 토큰들의 logprob을 매핑합니다.
+
+    TODO(Phase 2 — CLAUDE.md "P4 신뢰도 재산출" 로드맵):
+        현재 구현은 JSON 토큰 스트림에서 각 필드값의 시작/끝 위치를 추적하지 않는
+        조악한 근사다:
+          - array/object 필드: 전체 토큰 logprobs를 그대로 할당 → 필드 간 신뢰도 구분 불가
+          - scalar 필드: `logprobs[:est_tokens]`으로 앞부분만 잘라 사용 → 위치 오정렬
+        결과적으로 필드별 신뢰도가 유사 값으로 수렴하여 overall_confidence에 수평선이
+        생김 (전역지원서_2 variance 측정 20% 결정론 점수의 한 원인). 위치 추적을
+        도입한 정식 구현은 Phase 2에서 진행.
 
     Args:
         response_logprobs: vLLM 응답의 logprobs 리스트.
@@ -168,6 +180,7 @@ class VLMClient:
         temperature: float = 0.0,
         top_logprobs: int = 5,
         timeout: float = 120.0,
+        monitor: "Optional[VLMHealthMonitor]" = None,
     ):
         """VLMClient 초기화.
 
@@ -178,6 +191,7 @@ class VLMClient:
             temperature: 샘플링 온도. 0.0이면 결정론적 출력.
             top_logprobs: logprobs 활성화 시 상위 후보 토큰 수.
             timeout: API 요청 타임아웃(초).
+            monitor: VLMHealthMonitor 인스턴스. 호출 실패 시 record_failure()를 호출.
         """
         self.base_url = base_url
         self.model_name = model_name
@@ -185,6 +199,7 @@ class VLMClient:
         self.temperature = temperature
         self.top_logprobs = top_logprobs
         self.timeout = timeout
+        self.monitor = monitor
 
         # OpenAI 클라이언트 (지연 초기화)
         self._client = None
@@ -284,6 +299,8 @@ class VLMClient:
             # 타임아웃, 연결 오류 등 graceful 처리
             error_type = type(e).__name__
             logger.error("[VLMClient] API 호출 실패 (%s): %s", error_type, e)
+            if self.monitor is not None:
+                self.monitor.record_failure(f"vlm_call:{error_type}")
             return {
                 "content": "",
                 "logprobs": None,

@@ -28,6 +28,7 @@ from src.interfaces.types import (
     SkillResult,
     SkillTask,
 )
+from src.vlm.budget_config import DISPATCH_ORDER, PIXEL_BUDGETS as PIXEL_BUDGET
 from src.vlm.skills.seal_reader import SealReader
 from src.vlm.skills.signature_detector import SignatureDetector
 from src.vlm.skills.table_extractor import TableExtractor
@@ -52,20 +53,11 @@ SKILL_ROUTING: dict[str, str] = {
     # figure/formula/chart는 스킵 (텍스트 없음)
 }
 
-# PIPELINE.md §2-5
-PIXEL_BUDGET: dict[str, int] = {
-    "text":              560,
-    "header":            140,
-    "footer":            140,
-    "handwritten_field": 1120,
-    "seal":              560,
-    "table":             1120,
-    "signature":         140,
-    "figure":            140,
-    "formula":           280,
-    "chart":             280,
-}
+# PIXEL_BUDGET, DISPATCH_ORDER는 budget_config.py에서 import (위 참조)
 
+# 경로별 크롭 패딩 비율 (bbox 대비) — other 경로 전용 (Skill Registry).
+# military 경로용은 resolution_router.DEFAULT_CROP_PADDING_RATIO에 정의되어 있다
+# (other 경로는 raw layout bbox를 받으므로 military보다 더 넓은 패딩이 필요).
 CROP_PADDING_RATIO: dict[str, float] = {
     "text":              0.05,
     "header":            0.05,
@@ -76,8 +68,6 @@ CROP_PADDING_RATIO: dict[str, float] = {
     "signature":         0.10,
     "default":           0.05,
 }
-
-DISPATCH_ORDER: list[int] = [140, 560, 1120]
 
 
 # ─────────────────────────────────────────────

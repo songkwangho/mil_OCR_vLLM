@@ -1,0 +1,391 @@
+{
+  "run_count": 3,
+  "doc_id": "전역지원서_2",
+  "timing": {
+    "total_ms": {
+      "values": [
+        25080.1,
+        10589.4,
+        10968.2
+      ],
+      "mean": 15545.9,
+      "std": 8259.031395,
+      "min": 10589.4,
+      "max": 25080.1
+    }
+  },
+  "processing_path": {
+    "values": [
+      "vlm",
+      "vlm",
+      "vlm"
+    ],
+    "consistent": true
+  },
+  "p3a_form_type": {
+    "values": [
+      "unknown",
+      "supply_request",
+      "supply_request"
+    ],
+    "consistent": false
+  },
+  "p4": {
+    "overall_confidence": {
+      "values": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "mean": 0.0,
+      "std": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "range": 0.0
+    },
+    "review_required": {
+      "values": [
+        true,
+        true,
+        true
+      ],
+      "consistent": true
+    }
+  },
+  "fields": {
+    "total_fields": 15,
+    "consistent_count": 3,
+    "unstable_count": 12,
+    "unstable": [
+      {
+        "field_key": "corrected_text",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "당기 업무 보고서에 반영 요청사항을 반영하여 작성하여, 단기 업무 보고서에 반영된 내용을 바탕으로 본인의 실적을 보고하여(업무 및 수기 기록 X) 제안하기 위해 통보함. 반영 문구에서 서술한 내용을 바탕으로 실적을 기입합니다."
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "document_info",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "{\"title\": null, \"date\": \"2017. 04. 11\", \"author\": null, \"unit_code\": null}"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "document_title",
+        "appeared_in_runs": 3,
+        "unique_value_count": 3,
+        "unique_values": [
+          "None",
+          "미확인 (군수 관련 서식 추정)",
+          "전이지원서"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "fields",
+        "appeared_in_runs": 4,
+        "unique_value_count": 4,
+        "unique_values": [
+          "[{\"key\": \"미확인\", \"value\": \"미확인\"}]",
+          "[{\"key\": \"안내 문구\", \"value\": \"당기 업무 보고서에 반영 요청사항을 반영하여 작성하여, 단기 업무 보고서에 반영된 내용을 바탕으로 본인의 실적을 보고하여(업무 및 수기 기록 X) 제안하기 위해 통보함. 반영 문구에서 서술한 내용을 바탕으로 실적을 기입합니다.\"}]",
+          "{\"date_field\": \"2017. 04. 11\"}",
+          "{}"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "handwritten_content",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "None"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "handwritten_notes",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "[{\"text\": \"2017. 04. 11\", \"confidence\": \"low\"}]"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "header_text",
+        "appeared_in_runs": 2,
+        "unique_value_count": 1,
+        "unique_values": [
+          "전이지원서"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "items",
+        "appeared_in_runs": 7,
+        "unique_value_count": 1,
+        "unique_values": [
+          "[]"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "ocr_correction",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "{\"original_detected\": \"미확인 텍스트\", \"corrected_text\": \"해당 이미지는 텍스트의 가독성이 극도로 낮아 정확한 문장 복원이 불가능합니다.\"}"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "request_date",
+        "appeared_in_runs": 7,
+        "unique_value_count": 3,
+        "unique_values": [
+          "2017-04-11",
+          "None",
+          "[?]"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "tables",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "[]"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "unit_code",
+        "appeared_in_runs": 10,
+        "unique_value_count": 2,
+        "unique_values": [
+          "None",
+          "[?]"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      }
+    ],
+    "all": [
+      {
+        "field_key": "author",
+        "appeared_in_runs": 3,
+        "unique_value_count": 1,
+        "unique_values": [
+          "None"
+        ],
+        "consistent": true,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "corrected_text",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "당기 업무 보고서에 반영 요청사항을 반영하여 작성하여, 단기 업무 보고서에 반영된 내용을 바탕으로 본인의 실적을 보고하여(업무 및 수기 기록 X) 제안하기 위해 통보함. 반영 문구에서 서술한 내용을 바탕으로 실적을 기입합니다."
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "date",
+        "appeared_in_runs": 3,
+        "unique_value_count": 1,
+        "unique_values": [
+          "None"
+        ],
+        "consistent": true,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "document_info",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "{\"title\": null, \"date\": \"2017. 04. 11\", \"author\": null, \"unit_code\": null}"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "document_title",
+        "appeared_in_runs": 3,
+        "unique_value_count": 3,
+        "unique_values": [
+          "None",
+          "미확인 (군수 관련 서식 추정)",
+          "전이지원서"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "fields",
+        "appeared_in_runs": 4,
+        "unique_value_count": 4,
+        "unique_values": [
+          "[{\"key\": \"미확인\", \"value\": \"미확인\"}]",
+          "[{\"key\": \"안내 문구\", \"value\": \"당기 업무 보고서에 반영 요청사항을 반영하여 작성하여, 단기 업무 보고서에 반영된 내용을 바탕으로 본인의 실적을 보고하여(업무 및 수기 기록 X) 제안하기 위해 통보함. 반영 문구에서 서술한 내용을 바탕으로 실적을 기입합니다.\"}]",
+          "{\"date_field\": \"2017. 04. 11\"}",
+          "{}"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "handwritten_content",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "None"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "handwritten_notes",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "[{\"text\": \"2017. 04. 11\", \"confidence\": \"low\"}]"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "header_text",
+        "appeared_in_runs": 2,
+        "unique_value_count": 1,
+        "unique_values": [
+          "전이지원서"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "items",
+        "appeared_in_runs": 7,
+        "unique_value_count": 1,
+        "unique_values": [
+          "[]"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "ocr_correction",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "{\"original_detected\": \"미확인 텍스트\", \"corrected_text\": \"해당 이미지는 텍스트의 가독성이 극도로 낮아 정확한 문장 복원이 불가능합니다.\"}"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "request_date",
+        "appeared_in_runs": 7,
+        "unique_value_count": 3,
+        "unique_values": [
+          "2017-04-11",
+          "None",
+          "[?]"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "table_data",
+        "appeared_in_runs": 3,
+        "unique_value_count": 1,
+        "unique_values": [
+          "[]"
+        ],
+        "consistent": true,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "tables",
+        "appeared_in_runs": 1,
+        "unique_value_count": 1,
+        "unique_values": [
+          "[]"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      },
+      {
+        "field_key": "unit_code",
+        "appeared_in_runs": 10,
+        "unique_value_count": 2,
+        "unique_values": [
+          "None",
+          "[?]"
+        ],
+        "consistent": false,
+        "logprob_mean": 0.0,
+        "logprob_std": 0.0
+      }
+    ]
+  },
+  "assembled_json": {
+    "total_leaves": 0,
+    "consistent_count": 0,
+    "unstable_count": 0,
+    "unstable": []
+  },
+  "summary": {
+    "determinism_score": 0.2,
+    "processing_path_consistent": true,
+    "form_type_consistent": false,
+    "review_decision_consistent": true,
+    "field_consistency_rate": 0.2,
+    "conf_range": 0.0
+  }
+}

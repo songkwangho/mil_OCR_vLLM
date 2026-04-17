@@ -1,0 +1,194 @@
+{
+  "run_idx": 3,
+  "doc_id": "전역지원서_2",
+  "status": "review",
+  "processing_path": "vlm",
+  "total_ms": 10968.2,
+  "timings": {
+    "P1": 151.6,
+    "P2": 188.1,
+    "P2.5A": 0.3,
+    "P3A": 281.5,
+    "P2.5A5": 0.0,
+    "P2.5B": 0.1,
+    "P2.5C": 7.8,
+    "P3B": 10331.8,
+    "P4": 0.2,
+    "P5": 0.7,
+    "P6": 6.1
+  },
+  "errors": [],
+  "warnings": [
+    "[P1] IMAGE_TOO_BRIGHT: mean=231.3",
+    "[P1] LOW_RESOLUTION_BAND: quality score penalized x0.85",
+    "[P3B] [P1] IMAGE_TOO_BRIGHT: mean=231.3",
+    "[P3B] [P1] LOW_RESOLUTION_BAND: quality score penalized x0.85",
+    "[검토큐] 적재 완료: None"
+  ],
+  "p1": {
+    "dpi": 144,
+    "quality_score": 0.765,
+    "sr_applied": true
+  },
+  "p2": {
+    "region_count": 5,
+    "region_types": [
+      "header",
+      "table",
+      "text",
+      "text",
+      "text"
+    ]
+  },
+  "p3a": {
+    "form_type": "supply_request",
+    "form_confidence": 0.9
+  },
+  "p3b": {
+    "form_type": "supply_request",
+    "field_count": 13,
+    "table_count": 1,
+    "retry_count": 4,
+    "fields": [
+      {
+        "field_key": "unit_code",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0002",
+        "was_retried": true
+      },
+      {
+        "field_key": "request_date",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0002",
+        "was_retried": true
+      },
+      {
+        "field_key": "items",
+        "raw_value": "[]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0002",
+        "was_retried": true
+      },
+      {
+        "field_key": "unit_code",
+        "raw_value": "[?]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0003",
+        "was_retried": true
+      },
+      {
+        "field_key": "request_date",
+        "raw_value": "[?]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0003",
+        "was_retried": true
+      },
+      {
+        "field_key": "items",
+        "raw_value": "[]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0003",
+        "was_retried": true
+      },
+      {
+        "field_key": "unit_code",
+        "raw_value": "[?]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "request_date",
+        "raw_value": "[?]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "items",
+        "raw_value": "[]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0005",
+        "was_retried": true
+      },
+      {
+        "field_key": "header_text",
+        "raw_value": "전이지원서",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0004",
+        "was_retried": true
+      },
+      {
+        "field_key": "unit_code",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0004",
+        "was_retried": true
+      },
+      {
+        "field_key": "request_date",
+        "raw_value": "None",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0004",
+        "was_retried": true
+      },
+      {
+        "field_key": "items",
+        "raw_value": "[]",
+        "normalized_value": null,
+        "confidence": 0.0,
+        "logprob": 0.0,
+        "region_id": "r_0004",
+        "was_retried": true
+      }
+    ],
+    "assembled_json": null
+  },
+  "p4": {
+    "overall_confidence": 0.0,
+    "review_required": true,
+    "flagged_fields": [
+      "header_text",
+      "items",
+      "items",
+      "items",
+      "items",
+      "request_date",
+      "request_date",
+      "request_date",
+      "request_date",
+      "unit_code",
+      "unit_code",
+      "unit_code",
+      "unit_code"
+    ],
+    "error_count": 0
+  },
+  "wall_ms": 11044.5
+}

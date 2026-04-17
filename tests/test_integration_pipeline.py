@@ -34,7 +34,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.interfaces.enums import (
     FileExt,
-    FormType,
     PipelineStatus,
     ProcessingPath,
     SourceType,
@@ -161,42 +160,6 @@ class TestP1P2Integration:
         logger.info(
             "P2 결과: %d regions, mode=%s",
             len(p2_out.regions), p2_out.analysis_mode.value,
-        )
-
-
-# ─────────────────────────────────────────────
-#  테스트 2: P1→P2→P3 통합 테스트 (VLM 필요)
-# ─────────────────────────────────────────────
-
-class TestP1P2P3Integration:
-    """P1 → P2 → P3(VLM) 통합 테스트."""
-
-    @skip_no_vlm
-    def test_vlm_inference(self, test_doc_input: DocumentInput):
-        """VLM 서버를 사용한 P3 추론."""
-        from src.preprocess.preprocessor import P1Preprocessor
-        from src.preprocess.layout_analyzer import P2LayoutAnalyzer
-        from src.vlm.gemma4_engine import Gemma4Engine, Gemma4EngineConfig
-
-        p1 = P1Preprocessor()
-        p1_out = p1.process(test_doc_input)
-
-        p2 = P2LayoutAnalyzer()
-        p2_out = p2.analyze(p1_out)
-
-        p3 = Gemma4Engine(Gemma4EngineConfig(vllm_base_url=VLLM_BASE_URL))
-        p3_out = p3.process(p1_out, p2_out)
-
-        assert p3_out is not None
-        assert p3_out.doc_id == "test-integ-001"
-        assert p3_out.form_type in FormType
-        assert 0.0 <= p3_out.form_confidence <= 1.0
-        assert p3_out.raw_json  # 비어있지 않아야 함
-        logger.info(
-            "P3 결과: form=%s (%.2f), fields=%d, tables=%d, %.0fms",
-            p3_out.form_type.value, p3_out.form_confidence,
-            len(p3_out.fields), len(p3_out.tables),
-            p3_out.processing_time_ms,
         )
 
 

@@ -166,6 +166,7 @@ PP-DocLayout Fine-tuning과 상호 보완:
 - [ ] **T8/T9/T10 통합 테스트 확장** — 인장/결재란 2패스/서명 탐지 시나리오 결과 축적.
 - [ ] **vLLM 변동성 측정** — 동일 문서 N=3 반복으로 기준치 수립 (전역지원서_2 이전 +99% 케이스).
 - [ ] **P4 신뢰도 재산출 (assembled_json 대응)** — field_key blob 단일 FieldValue로 저장되면서 토큰 단위 logprobs 평균이 의미 없어짐. assembled_json 트리 단위로 sub-field 신뢰도 분해·집계 필요. (현재 전비품 확인서에서 overall_confidence=0.13 관찰)
+  - 하위 과제: `vlm_client.extract_field_logprobs` 위치 추적 미구현으로 필드별 신뢰도가 유사 값으로 수렴하는 문제 포함 (variance 측정 20% 결정론 점수의 한 원인).
 - [ ] **도메인 사전 기반 필드 교정** — 인식 모호성이 잦은 폐쇄집합 필드(계급·부대코드 등)에 대한 이중 방어.
   - **1차: 스키마 enum 강제** — `equipment_checklist.json` `writer.rank` 등에 한국군 직급 enum 추가 → xgrammar가 디코딩 단계에서 차단.
   - **2차: 후처리 정규화 사전** — `rank_normalizer.py` 등 소형 모듈로 Levenshtein 최근접 매칭, 거리 > 2 이면 검토 큐 플래그.
@@ -253,8 +254,6 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | — | 스키마 레지스트리 | `src/domain/schema_registry.py` | ✅ v1/ 스캔 + `get()` 별칭 (`other→official_document`) |
 | — | JSON Schemas v1 | `src/domain/schemas/v1/*.json` | ✅ 9종 (6 military 포함 `equipment_checklist` + `_fallback`/`_general`/`official_document`). `x-assembly-rules`/`x-checklist-item-schema` 지원 |
 | — | Docker 구성 | `docker-compose.yml` + `docker/Dockerfile.*` | ✅ vLLM 0.19.0 호환 (`--structured-outputs-config`) |
-
-> **Legacy 유지**: `instruction_builder.py` (InstructionRouter 래퍼), `gemma4_engine.py` (하위 호환용)
 
 ---
 
