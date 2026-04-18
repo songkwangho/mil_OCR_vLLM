@@ -864,14 +864,57 @@ class SignatureDetector:
 
 **파일**: `src/vlm/skills/aggregator.py`
 
+other 경로의 마지막 단계. S2~S6가 이미 추출한 텍스트/구조 결과를 프롬프트
+컨텍스트로 주입하고, VLM이 `official_document.json` 스키마에 맞춰 재구성한다.
+개별 영역 이미지를 다시 보지 않으므로 `pixel_budget=140`(전체 페이지 저해상도)
+수준으로 유지한다.
+
 ```python
 class StructuredAggregator:
-    """S2~S6 결과를 official_document.json Schema에 맞춰 최종 JSON 조립."""
+    """S2~S6 결과를 official_document.json Schema에 맞춰 최종 JSON 조립.
 
-    def run(self, skill_results, table_structure, form_type) -> VLMResult:
-        # guided_json: official_document.json
-        # low_confidence_fields: confidence < 임계값인 필드 목록
+    이미지 재호출 없이 S2~S6 텍스트 결과를 프롬프트에 주입하여
+    VLM이 official_document.json 스키마로 집계하도록 한다. other 경로 전용.
+    """
+    PIXEL_BUDGET = 140  # 전체 페이지 저해상도 (문서 구조 파악용)
+    SCHEMA_ID = "official_document"
+
+    def run(
+        self,
+        skill_results: list[SkillResult],
+        table_structures: list[TableStructure],
+        page_image: np.ndarray,          # 전체 페이지 이미지 (140 토큰)
+        form_type: FormType,
+        doc_id: str,
+        form_confidence: float = 0.0,
+        warnings: Optional[list[str]] = None,
+    ) -> VLMResult:
+        # 1. S2~S6 결과 → 텍스트 컨텍스트로 직렬화
+        # 2. official_document.json 로드
+        # 3. vLLM 1회 호출 (저해상도 + context, guided_json)
+        # 4. assembled_json + region 단위 FieldValue를 포함한 VLMResult 반환
 ```
+
+`_build_context()` 직렬화 포맷 예시:
+
+```
+[HEADER] 국방부 (r_0001)
+[TEXT] 제 목: 의안 심사기간 지정의 건 (r_0010)
+[TEXT] 수신: 국회의장 (r_0011)
+[SEAL] detected=True, text="국방부장관인", confidence=0.95 (r_0022)
+[SIGNATURE] present=True, confidence=0.88 (r_0023)
+[TABLE approval] (r_0030)
+  row0: ['기안', '검토', '결재']
+  row1: ['기안=홍길동', '검토=이순신', '결재=김유신']
+```
+
+반환되는 `VLMResult`:
+  - `assembled_json`: official_document 스키마 구조 (S7 집계 결과)
+  - `fields[]`: region_id 단위 `FieldValue` (P4/검토 큐 추적용) + `aggregator_blob`
+  - `processing_path=ProcessingPath.SKILL_REGISTRY`, `schema_id="official_document"`
+
+VLM 호출이 실패하거나 JSON 파싱 실패 시 `assembled_json=None` + region 평탄화로
+폴백하여 파이프라인이 멈추지 않도록 한다 (기존 동작과 동일).
 
 ---
 
@@ -902,22 +945,29 @@ def _process_military_document(self, layout, preprocessed, doc_id,
     return self._get_p3b().extract(groups, doc_id, form_type, ...)
 ```
 
-### 5-2. other 경로 (Skill Registry)
+### 5-2. other 경로 (Skill Registry + S7 집계)
 
 ```python
 def _process_other_document(self, layout, preprocessed, doc_id, ...):
     registry = self._get_skill_registry()
     stats = SkillDispatchStats()
 
+    # S5 2패스 + S2~S6 디스패치
     cell_results, structures = registry.dispatch_tables(layout, preprocessed, stats)
     non_table_tasks = registry.build_tasks(layout, preprocessed)
     general_results = registry.dispatch(non_table_tasks, stats=stats)
+    skill_results = general_results + cell_results
 
-    return VLMResult(
+    # S7: official_document 스키마로 최종 집계 (이미지 재호출 없음)
+    aggregator = self._get_structured_aggregator()
+    return aggregator.run(
+        skill_results=skill_results,
+        table_structures=structures,
+        page_image=preprocessed.image_array,
         form_type=FormType.OTHER,
-        processing_path=ProcessingPath.SKILL_REGISTRY,
-        fields=_skill_results_to_fields(general_results + cell_results),
-        ...
+        doc_id=doc_id,
+        form_confidence=form_confidence,
+        warnings=result.warnings,
     )
 ```
 

@@ -400,6 +400,11 @@ class ValidatedResult:
     판정 기준:
       통과: overall_confidence ≥ 임계값 AND CRITICAL 오류 없음
       실패: CRITICAL 오류 존재 OR flagged_fields 존재 → review_required=True
+
+    sub_confidences: assembled_json이 있는 서식(x-assembly-rules military / other-S7)
+      에서 트리 순회로 추출한 (path, field_type, confidence) 튜플 리스트.
+      overall_confidence가 sub-field 단위로 어떻게 구성되는지 투명하게 노출.
+      P4/result.json에 저장하나 P6 DB 적재 대상 아님.
     """
 
     doc_id: str
@@ -411,6 +416,8 @@ class ValidatedResult:
     flagged_fields: list[str]         # 임계값 미달 field_key 목록
     processing_path: ProcessingPath = ProcessingPath.VLM
     assembled_json: Optional[dict] = None  # Assembler 조립 결과 — P5가 진실의 원천으로 사용
+    sub_confidences: list[tuple[str, str, float]] = field(default_factory=list)
+    # (path, field_type, confidence) — assembled_json 트리 기반 산출 로그
 
 
 # ═══════════════════════════════════════════════

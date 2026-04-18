@@ -24,7 +24,12 @@
       "Bash(python3 -c ':*)",
       "Bash(wc -l /home/team_gh/mil_OCR_v2/CLAUDE.md /home/team_gh/mil_OCR_v2/docs/*.md)",
       "Bash(/home/team_gh/toy_dev/miniforge3/envs/dl/bin/python -c ':*)",
-      "Bash(python -m pytest tests/test_seal_preprocessor.py tests/test_skills_unit.py -v)"
+      "Bash(python -m pytest tests/test_seal_preprocessor.py tests/test_skills_unit.py -v)",
+      "Bash(python3 -c ' *)",
+      "Bash(docker inspect *)",
+      "Bash(xargs -I{} echo \"  metrics.json 생성 수: {}\")",
+      "Bash(xargs -I{} echo \"  pipeline_outputs/latest -> {}\")",
+      "Bash(xargs -I{} echo \"  eval_results/latest -> {}\")"
     ]
   }
 }

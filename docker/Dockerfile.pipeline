@@ -15,6 +15,14 @@
 #
 #  참고: P2 PP-DocLayout 추론은 별도 layout 컨테이너(PaddlePaddle CUDA 12.6)에서 수행.
 #        Pipeline은 HTTP로 layout 서비스를 호출합니다.
+#
+#  ═══ 타이밍 측정 규약 (통합 테스트/벤치마크 IMPORTANT) ═══
+#  - 문서별 timing은 반드시 warm-start 기준으로 기록한다.
+#  - 실행 전 `PipelineOrchestrator.warmup(run_dummy_inference=True)` 호출 필수.
+#    → Real-ESRGAN 가중치 로드, vLLM 멀티모달 프로세서 캐시 등
+#      inference-time lazy 로딩 비용을 첫 문서 timing에서 분리.
+#  - run_pipeline_with_outputs.py는 자동 warmup 수행, warmup_timings.json 별도 저장.
+#  - 상세: docs/TESTING.md §4 "타이밍 측정 규약 — 모델 로딩 분리"
 # ═══════════════════════════════════════════════════════════
 
 FROM paddlepaddle/paddle:3.2.0-gpu-cuda12.6-cudnn9.5
@@ -71,6 +79,10 @@ COPY models/ocr_hint/ /root/.paddlex/official_models/
 WORKDIR /workspace
 COPY src/ /workspace/src/
 COPY configs/ /workspace/configs/
+# 통합 테스트 규약(측정 규약 §4)을 컨테이너 내부에서도 참조 가능하도록 포함
+COPY docs/TESTING.md /workspace/docs/TESTING.md
+
+LABEL mil_ocr_v2.timing_convention="warm-start only; call PipelineOrchestrator.warmup(run_dummy_inference=True) before measurement. See /workspace/docs/TESTING.md §4."
 
 ENV PYTHONPATH=/workspace
 ENV PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from src.vlm.skill_registry import SkillDispatchStats
 
 from src.interfaces.enums import (
+    FormType,
     OutputFormat,
     PipelineStatus,
     ProcessingPath,
@@ -36,7 +37,6 @@ from src.interfaces.enums import (
 )
 from src.interfaces.types import (
     DocumentInput,
-    FieldValue,
     LayoutResult,
     PipelineOutput,
     PreprocessedImage,
@@ -44,8 +44,6 @@ from src.interfaces.types import (
     ValidatedResult,
     VLMResult,
 )
-from src.vlm.logprobs_scorer import is_flagged as _is_flagged
-
 logger = logging.getLogger(__name__)
 
 
@@ -310,6 +308,24 @@ class PipelineOrchestrator:
             logger.info("오케스트레이터: SkillRegistry 초기화 완료")
         return self._components["skill_registry"]
 
+    def _get_schema_registry(self):
+        """SchemaRegistry — S7 / 기타 경로 공유."""
+        if "schema_registry" not in self._components:
+            from src.domain.schema_registry import SchemaRegistry
+            self._components["schema_registry"] = SchemaRegistry()
+        return self._components["schema_registry"]
+
+    def _get_structured_aggregator(self):
+        """S7 StructuredAggregator (other 경로 최종 집계)."""
+        if "s7" not in self._components:
+            from src.vlm.skills.aggregator import StructuredAggregator
+            self._components["s7"] = StructuredAggregator(
+                vlm_client=self._get_shared_vlm_client(),
+                schema_registry=self._get_schema_registry(),
+            )
+            logger.info("오케스트레이터: S7 StructuredAggregator 초기화 완료")
+        return self._components["s7"]
+
 
     def _get_p4(self):
         if "p4" not in self._components:
@@ -398,8 +414,11 @@ class PipelineOrchestrator:
         form_confidence: float,
         result: PipelineResult,
     ) -> VLMResult:
-        """PIPELINE.md §5 other 경로 — S5 패스1 → 일반 태스크 + 셀 태스크 배치 디스패치."""
-        from src.interfaces.enums import FormType, ProcessingPath
+        """PIPELINE.md §5 other 경로 — S5 패스1 → S2~S6 디스패치 → S7 집계.
+
+        S7 StructuredAggregator가 S2~S6 결과를 official_document.json 스키마로
+        집계한다 (이미지 재호출 없음, 텍스트 컨텍스트 주입).
+        """
         from src.vlm.skill_registry import SkillDispatchStats
 
         registry = self._get_skill_registry()
@@ -419,29 +438,141 @@ class PipelineOrchestrator:
         result.skill_table_structures = structures
         result.skill_stats = stats
 
-        # 3) VLMResult 형태로 집계 (P4 이후 단계에 동일 인터페이스 제공)
-        fields = _skill_results_to_fields(skill_results)
-        overall = (
-            sum(f.confidence for f in fields) / len(fields)
-            if fields else 0.0
-        )
-        vlm_result = VLMResult(
-            doc_id=doc_id,
+        # 3) S7 집계 — official_document 스키마로 통합.
+        #    aggregator가 반환하는 VLMResult.warnings는 S7 자체 메시지만 담으며,
+        #    _run_step이 "[SkillRegistry]" 접두사를 한 번만 붙여 result.warnings에 누적한다.
+        aggregator = self._get_structured_aggregator()
+        vlm_result = aggregator.run(
+            skill_results=skill_results,
+            table_structures=structures,
+            page_image=preprocessed.image_array,
             form_type=FormType.OTHER,
+            doc_id=doc_id,
             form_confidence=form_confidence,
-            schema_id="_general",
-            fields=fields,
-            tables=[],
-            domain_codes=[],
-            processing_time_ms=stats.total_ms,
-            processing_path=ProcessingPath.SKILL_REGISTRY,
         )
+
         logger.info(
-            "Skill Registry: %d 영역 처리 (표 %d, 일반 %d), avg_conf=%.3f, %.1fms",
+            "Skill Registry: %d 영역 처리 (표 %d, 일반 %d), S7 assembled=%s, %.1fms",
             len(skill_results), len(cell_results), len(general_results),
-            overall, stats.total_ms,
+            "OK" if vlm_result.assembled_json else "FAIL",
+            stats.total_ms,
         )
         return vlm_result
+
+    # ═══════════════════════════════════════
+    #  Warmup — lazy 컴포넌트 강제 초기화
+    # ═══════════════════════════════════════
+
+    def warmup(self, run_dummy_inference: bool = True) -> dict[str, float]:
+        """모든 lazy 컴포넌트를 강제 초기화하여 첫 문서 timing에서 모델 로딩 비용을 분리.
+
+        통합 테스트·벤치마크에서 반드시 호출해야 한다. 이 함수는 두 단계로 동작한다.
+          1) Cheap: 모든 lazy getter 호출 — Python 객체 생성, 설정 파싱만 수행.
+          2) Heavy (run_dummy_inference=True, 기본값):
+             P1 Real-ESRGAN 가중치 로드, vLLM 서버의 멀티모달 프로세서 캐시 등
+             *inference 시점*에 로드되는 리소스를 1x1~140px 더미 이미지로 예열.
+
+        비용: dummy inference 단계는 ~5~10초. 이후 첫 문서 처리 시간은 모델 로딩을
+        포함하지 않는다.
+
+        Returns:
+            {component_key: elapsed_ms} — 각 컴포넌트/단계 초기화 시간.
+        """
+        import time as _t
+
+        import numpy as _np
+
+        def _step(key: str, fn) -> float:
+            t0 = _t.time()
+            try:
+                fn()
+            except Exception as e:
+                logger.warning("[warmup] %s 초기화 실패: %s", key, e)
+            return round((_t.time() - t0) * 1000, 1)
+
+        timings: dict[str, float] = {}
+        # ── 1단계: lazy getter 호출 ──
+        timings["p1"] = _step("p1", self._get_p1)
+        timings["p2"] = _step("p2", self._get_p2)
+        timings["p2_5a"] = _step("p2_5a", self._get_p2_5a)
+        timings["p3a"] = _step("p3a", self._get_p3a)
+        timings["p2_5b"] = _step("p2_5b", self._get_p2_5b)
+        timings["p2_5c"] = _step("p2_5c", self._get_p2_5c)
+        timings["ocr_hint"] = _step("ocr_hint", self._get_ocr_hint_provider)
+        timings["vlm_client"] = _step("vlm_client", self._get_shared_vlm_client)
+        timings["s2_printed_text"] = _step("s2_printed_text", self._get_printed_text_reader)
+        timings["s3_handwriting"] = _step("s3_handwriting", self._get_handwriting_reader)
+        timings["p3b"] = _step("p3b", self._get_p3b)
+        timings["template_augmentor"] = _step("template_augmentor", self._get_template_augmentor)
+        timings["skill_registry"] = _step("skill_registry", self._get_skill_registry)
+        timings["schema_registry"] = _step("schema_registry", self._get_schema_registry)
+        timings["s7_aggregator"] = _step("s7_aggregator", self._get_structured_aggregator)
+        timings["p4"] = _step("p4", self._get_p4)
+        timings["p5"] = _step("p5", self._get_p5)
+        timings["p6"] = _step("p6", self._get_p6)
+        timings["health_monitor"] = _step("health_monitor", self._get_health_monitor)
+        timings["fallback_policy"] = _step("fallback_policy", self._get_fallback_policy)
+        if self.cfg.fallback_enabled:
+            timings["fallback_service"] = _step("fallback_service", self._get_fallback_service)
+        if self.cfg.review_queue_enabled:
+            timings["review_queue"] = _step("review_queue", self._get_review_queue)
+
+        # ── 2단계: dummy inference로 inference-time 모델 로딩 예열 ──
+        if run_dummy_inference:
+            timings["dummy_p1"] = _step("dummy_p1", self._warmup_p1_inference)
+            timings["dummy_vlm"] = _step("dummy_vlm", self._warmup_vlm_inference)
+
+        total = round(sum(timings.values()), 1)
+        logger.info(
+            "오케스트레이터: warmup 완료 — %d 컴포넌트 초기화, total=%.0fms",
+            len(timings), total,
+        )
+        timings["_total_ms"] = total
+        return timings
+
+    def _warmup_p1_inference(self) -> None:
+        """P1 Real-ESRGAN + SR 경로 예열 (저해상도 더미로 1회 호출)."""
+        import cv2
+        import numpy as _np
+
+        from src.interfaces.enums import FileExt, SourceType
+        from src.interfaces.types import DocumentInput
+
+        # 80dpi로 분류되도록 하는 작은 이미지 → LOW 경로 → Real-ESRGAN 트리거
+        dummy = _np.full((200, 200, 3), 255, dtype=_np.uint8)
+        ok, buf = cv2.imencode(".png", dummy)
+        if not ok:
+            return
+        doc_input = DocumentInput(
+            doc_id="__warmup__",
+            raw_bytes=buf.tobytes(),
+            file_ext=FileExt.PNG,
+            source_type=SourceType.SCAN,
+            dpi_hint=80,  # LOW band 강제
+        )
+        try:
+            self._get_p1().process(doc_input)
+        except Exception as e:
+            logger.warning("[warmup] P1 dummy inference 실패: %s", e)
+
+    def _warmup_vlm_inference(self) -> None:
+        """vLLM 서버 멀티모달 프로세서 예열 (140 토큰 더미 호출)."""
+        import numpy as _np
+
+        from src.vlm.vlm_client import encode_image_base64
+
+        dummy = _np.full((140, 140, 3), 255, dtype=_np.uint8)
+        try:
+            image_b64 = encode_image_base64(dummy, max_size=140)
+            client = self._get_shared_vlm_client()
+            client.call(
+                image_b64=image_b64,
+                instruction="warmup",
+                pixel_budget=140,
+                logprobs=False,
+            )
+        except Exception as e:
+            logger.warning("[warmup] VLM dummy inference 실패: %s", e)
 
     def _run_step(self, name: str, result: PipelineResult, fn) -> Any:
         """단일 단계 실행 + 시간 측정."""
@@ -846,38 +977,6 @@ class PipelineOrchestrator:
             len(result.errors), len(result.warnings),
         )
         return result
-
-
-# ─────────────────────────────────────────────
-#  Skill Registry → VLMResult 변환 유틸
-# ─────────────────────────────────────────────
-
-def _skill_results_to_fields(skill_results: list) -> list[FieldValue]:
-    """SkillResult 리스트 → FieldValue 리스트.
-
-    region_id를 field_key로 사용. content는 raw/corrected 동일.
-    data_type은 content_type 기반 추정.
-    """
-    fields: list[FieldValue] = []
-    for sr in skill_results:
-        data_type = "text"
-        if sr.content_type == "signature":
-            data_type = "flag"
-        elif sr.content_type == "seal":
-            data_type = "text"
-        fields.append(
-            FieldValue(
-                field_key=sr.region_id,
-                raw_value=sr.content,
-                corrected_value=sr.content,
-                data_type=data_type,
-                confidence=sr.confidence,
-                token_logprobs=[],
-                is_flagged=_is_flagged(sr.confidence, data_type),
-                region_id=sr.region_id,
-            )
-        )
-    return fields
 
 
 # ─────────────────────────────────────────────

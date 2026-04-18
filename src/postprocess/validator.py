@@ -25,7 +25,7 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from src.interfaces.enums import ProcessingPath, Severity, ValidationErrorType
 from src.interfaces.types import (
@@ -339,47 +339,136 @@ def _normalize_rank_in_assembled(vlm_result: VLMResult) -> None:
         vlm_result.warnings.append(f"[P4] rank '{raw_rank}' 정규화 실패 — 검토 필요")
 
 
-def _compute_assembled_confidence(
-    assembled: dict,
-    fields: list[FieldValue],
-) -> float:
-    """assembled_json 트리 기반 신뢰도 산출.
+# ─────────────────────────────────────────────
+#  sub-field 신뢰도 트리 순회 (assembled_json 공통)
+# ─────────────────────────────────────────────
 
-    checklist_items[i].result_confidence → VLM 자가 평가 직접 사용
-    writer/date/identifier → region FieldValue의 logprob 신뢰도 사용
-    가중 평균: checklist 60%, writer 20%, date 10%, identifier 10%
+# 필드 유형별 가중치 — 금액·코드가 문서 전체 신뢰도에 더 큰 영향.
+FIELD_WEIGHTS: dict[str, float] = {
+    "amount":      3.0,
+    "code":        2.5,
+    "date":        2.0,
+    "quantity":    2.0,
+    "text":        1.0,
+    "handwritten": 1.0,
+    "seal":        0.8,
+    "signature":   0.5,
+}
+
+# 메타/분석 키 — 신뢰도 산출 대상에서 제외.
+_TRAVERSAL_SKIP_KEYS: frozenset[str] = frozenset({
+    "analysis", "result_confidence", "aggregator_blob",
+    "low_confidence_fields", "overall_confidence",
+})
+
+
+def _traverse_assembled(
+    node: Any,
+    field_map: dict[str, "FieldValue"],
+    result: list[tuple[str, str, float]],
+    path: str = "",
+) -> None:
+    """assembled_json 트리 재귀 순회 — 리프 노드별 (path, type, confidence) 추출.
+
+    - dict에 `result`/`result_confidence` 형제 키가 있으면 VLM 자가 평가값 사용
+      (equipment_checklist.checklist_items[N] 전용 패턴).
+    - 일반 리프는 path → field_key 매핑 후 field_map lookup. 없으면 폴백 0.5.
+    - None/빈 문자열/bool 리프는 건너뜀 (누락 필드이므로 신뢰도 산출 무의미).
     """
-    # checklist_items — VLM이 반환한 result_confidence 직접 활용
-    items = assembled.get("checklist_items")
-    if isinstance(items, list) and items:
-        item_confs = []
-        for item in items:
-            if isinstance(item, dict):
-                rc = item.get("result_confidence")
-                if isinstance(rc, (int, float)):
-                    item_confs.append(float(rc))
-        checklist_conf = sum(item_confs) / len(item_confs) if item_confs else 0.0
+    if isinstance(node, dict):
+        # result_confidence 형제 키 우선 처리
+        if "result_confidence" in node and "result" in node:
+            try:
+                conf = float(node.get("result_confidence", 0.5))
+            except (TypeError, ValueError):
+                conf = 0.5
+            result.append((path, "handwritten", max(0.0, min(1.0, conf))))
+            return
+
+        for key, value in node.items():
+            if key in _TRAVERSAL_SKIP_KEYS:
+                continue
+            child_path = f"{path}.{key}" if path else key
+            _traverse_assembled(value, field_map, result, path=child_path)
+
+    elif isinstance(node, list):
+        for i, item in enumerate(node):
+            _traverse_assembled(item, field_map, result, path=f"{path}[{i}]")
+
     else:
-        checklist_conf = 0.0
+        # 리프 노드
+        if node is None or node == "" or isinstance(node, bool):
+            return
+        field_key = _path_to_field_key(path)
+        fv = field_map.get(field_key) if field_key else None
+        conf = fv.confidence if fv is not None else 0.5
+        field_type = _infer_field_type(path)
+        result.append((path, field_type, max(0.0, min(1.0, float(conf)))))
 
-    # writer/date/identifier — FieldValue에서 field_key로 매칭
-    field_conf_map: dict[str, float] = {}
-    for f in fields:
-        fk = f.field_key
-        if fk and fk not in field_conf_map:
-            field_conf_map[fk] = f.confidence
 
-    writer_conf = field_conf_map.get("writer_block", 0.5)
-    date_conf = field_conf_map.get("document_date", 0.5)
-    ident_conf = field_conf_map.get("form_identifier", 0.5)
+_CHECKLIST_ITEM_RE = re.compile(r"checklist_items\[(\d+)\]")
 
-    overall = (
-        checklist_conf * 0.60
-        + writer_conf * 0.20
-        + date_conf * 0.10
-        + ident_conf * 0.10
-    )
-    return round(max(0.0, min(1.0, overall)), 4)
+
+def _path_to_field_key(path: str) -> Optional[str]:
+    """JSON path → TemplateAugmentor field_key 변환.
+
+    military (equipment_checklist):
+      "checklist_items[2]"  → "result_item_3"
+      "writer.name"         → "writer_block"
+      "writer.rank"         → "writer_block"
+      "document_date"       → "document_date"
+
+    other 경로 (official_document):
+      field_key 체계가 없으므로 None 반환 → field_map miss → 폴백 0.5.
+    """
+    m = _CHECKLIST_ITEM_RE.match(path)
+    if m:
+        return f"result_item_{int(m.group(1)) + 1}"
+    if path.startswith("writer"):
+        return "writer_block"
+    # 평탄 키는 path 그대로 — fields[] 에 동일 field_key 있을 가능성 대비
+    if "." not in path and "[" not in path:
+        return path
+    return None
+
+
+def _infer_field_type(path: str) -> str:
+    """JSON path에서 필드 유형 추론 — FIELD_WEIGHTS 가중치용."""
+    p = path.lower()
+    if any(k in p for k in ("nsn", "k_nsn", "unit_code", "equipment_id")):
+        return "code"
+    if any(k in p for k in ("total", "price", "amount")):
+        return "amount"
+    if "date" in p:
+        return "date"
+    if any(k in p for k in ("quantity", "qty", "stock")):
+        return "quantity"
+    if "result" in p:
+        return "handwritten"
+    if "seal" in p or "stamp" in p:
+        return "seal"
+    if "signature" in p:
+        return "signature"
+    if "code" in p or "number" in p or "id" in p:
+        return "code"
+    return "text"
+
+
+def _calc_overall_from_sub(
+    sub_confidences: list[tuple[str, str, float]],
+) -> float:
+    """sub_confidences (path, type, conf) → 가중 평균 overall_confidence."""
+    if not sub_confidences:
+        return 0.0
+    total_w = 0.0
+    weighted = 0.0
+    for _, ft, c in sub_confidences:
+        w = FIELD_WEIGHTS.get(ft, 1.0)
+        total_w += w
+        weighted += w * c
+    if total_w == 0.0:
+        return 0.0
+    return round(max(0.0, min(1.0, weighted / total_w)), 4)
 
 
 def _validate_missing_fields(
@@ -511,10 +600,20 @@ class P4Validator:
             ))
 
         # ── 3. 전체 신뢰도 산출 ───
-        # assembled_json이 있는 서식(equipment_checklist 등)은 embedded confidence 기반 산출
+        # assembled_json이 있는 서식(x-assembly-rules military / other S7 공통)은
+        # 트리 순회 기반 sub-field 가중 평균을 사용. 없으면 기존 fields 평균.
         assembled = getattr(vlm_result, "assembled_json", None)
+        sub_confidences: list[tuple[str, str, float]] = []
         if assembled and isinstance(assembled, dict):
-            overall = _compute_assembled_confidence(assembled, fields)
+            adjusted_field_map = {
+                f.field_key: f for f in adjusted_fields if f.field_key
+            }
+            _traverse_assembled(
+                node=assembled,
+                field_map=adjusted_field_map,
+                result=sub_confidences,
+            )
+            overall = _calc_overall_from_sub(sub_confidences)
         elif adjusted_fields:
             overall = sum(f.confidence for f in adjusted_fields) / len(adjusted_fields)
         else:
@@ -541,10 +640,10 @@ class P4Validator:
 
         logger.info(
             "[P4][%s] 검증 완료: errors=%d (critical=%s), flagged=%d, "
-            "overall=%.4f, review=%s, path=%s",
+            "overall=%.4f (sub=%d), review=%s, path=%s",
             vlm_result.doc_id, len(all_errors), has_critical,
-            len(flagged_fields), overall, review_required,
-            processing_path.value,
+            len(flagged_fields), overall, len(sub_confidences),
+            review_required, processing_path.value,
         )
 
         return ValidatedResult(
@@ -557,6 +656,7 @@ class P4Validator:
             flagged_fields=flagged_fields,
             processing_path=processing_path,
             assembled_json=getattr(vlm_result, "assembled_json", None),
+            sub_confidences=sub_confidences,
         )
 
     @staticmethod

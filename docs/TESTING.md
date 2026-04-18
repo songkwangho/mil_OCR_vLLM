@@ -218,7 +218,43 @@ data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
 
 ---
 
-## 4. 단계별 타이밍 기록 (run_summary.json)
+## 4. 타이밍 측정 규약 — 모델 로딩 분리 (IMPORTANT)
+
+**원칙**: 문서별 timing은 **warm-start 기준**으로만 기록한다. 모델 로딩 시간은
+`warmup_timings.json`에 별도 분리한다.
+
+**이유**: PipelineOrchestrator는 lazy-loading 구조이며, 첫 문서 처리 시 다음이
+timing에 섞여 측정값을 오염시킨다.
+  - P1: Real-ESRGAN 가중치 로드 (+3~5초)
+  - P2: Layout HTTP 클라이언트 첫 ping
+  - P3-A / P3-B / S2~S7: vLLM 서버 멀티모달 프로세서 캐시 워밍 (+500~1000ms)
+
+**실행 전 반드시 호출**:
+
+```python
+pipeline = PipelineOrchestrator(cfg)
+
+# 1단계: lazy getter 초기화 (cheap)
+# 2단계: dummy image 로 Real-ESRGAN + vLLM 첫 호출 강제 (heavy, ~5~10초)
+warmup_timings = pipeline.warmup(run_dummy_inference=True)
+
+# 이후 문서 timing은 warm-start 기준
+for img in images:
+    result = pipeline.run(doc_input)
+```
+
+`scripts/run_pipeline_with_outputs.py`는 자동으로 warmup을 수행한다.
+
+**산출물**:
+  - `{run_dir}/warmup_timings.json` — 컴포넌트별 초기화 시간
+  - `{run_dir}/run_summary.json` — 문서별 warm-start timings (warmup 이후 측정)
+
+**예외**: `warmup()` 시점에도 로드되지 않는 리소스(예: 도메인 특수 모델)가 있다면
+해당 컴포넌트의 warmup 훅을 orchestrator에 추가해야 한다.
+
+---
+
+## 4-1. 단계별 타이밍 기록 (run_summary.json)
 
 ```json
 {

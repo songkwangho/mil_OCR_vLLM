@@ -397,6 +397,62 @@ def save_p3(out_dir: Path, result: PipelineResult):
             (d / "raw_vlm_response.txt").write_text(p3.raw_json, encoding="utf-8")
 
 
+def save_s7(out_dir: Path, result: PipelineResult):
+    """S7 StructuredAggregator 디버깅 산출물 저장 (other 경로 전용).
+
+    _build_context() 결과(프롬프트에 주입된 텍스트)와 집계된 JSON을 함께 보존.
+    """
+    p3 = result.p3_result
+    if p3 is None:
+        return
+    if result.processing_path.value != "skill_registry":
+        return
+
+    d = out_dir / "S7"
+    skill_results = getattr(result, "skill_results", []) or []
+    table_structures = getattr(result, "skill_table_structures", []) or []
+
+    # _build_context 재생성 — Aggregator 동작 재사용 (SchemaRegistry 스캔은 생략)
+    try:
+        from src.vlm.skills.aggregator import StructuredAggregator
+        agg = StructuredAggregator.__new__(StructuredAggregator)
+        context = agg._build_context(skill_results, table_structures)
+    except Exception as e:
+        context = f"(context 재생성 실패: {e})"
+
+    skill_lines = []
+    for sr in skill_results:
+        skill_lines.append({
+            "region_id": sr.region_id,
+            "skill_name": sr.skill_name,
+            "content_type": sr.content_type,
+            "content": sr.content,
+            "confidence": round(sr.confidence, 4),
+            "warnings": sr.warnings,
+        })
+
+    table_lines = []
+    for t in table_structures:
+        table_lines.append({
+            "region_id": t.region_id,
+            "table_type": t.table_type,
+            "structure_confidence": round(t.structure_confidence, 4),
+            "cell_count": len(t.cells),
+        })
+
+    _save_json(d / "result.json", {
+        "doc_id": p3.doc_id,
+        "schema_id": p3.schema_id,
+        "processing_path": p3.processing_path.value if hasattr(p3.processing_path, "value") else str(p3.processing_path),
+        "context": context,
+        "skill_results": skill_lines,
+        "table_structures": table_lines,
+        "assembled_json": getattr(p3, "assembled_json", None),
+        "raw_json": p3.raw_json,
+        "warnings": p3.warnings,
+    })
+
+
 def save_p4(out_dir: Path, result: PipelineResult):
     """P4 결과 저장: result.json"""
     p4 = result.p4_result
@@ -416,6 +472,15 @@ def save_p4(out_dir: Path, result: PipelineResult):
             "message": e.message,
         })
 
+    sub_confidences_data = [
+        {
+            "path": path,
+            "type": ft,
+            "confidence": round(float(conf), 4),
+        }
+        for (path, ft, conf) in getattr(p4, "sub_confidences", []) or []
+    ]
+
     _save_json(d / "result.json", {
         "doc_id": p4.doc_id,
         "overall_confidence": round(p4.overall_confidence, 4),
@@ -424,6 +489,8 @@ def save_p4(out_dir: Path, result: PipelineResult):
         "validation_error_count": len(p4.validation_errors),
         "validation_errors": errors_data,
         "processing_path": p4.processing_path.value if hasattr(p4.processing_path, 'value') else str(p4.processing_path),
+        "sub_confidence_count": len(sub_confidences_data),
+        "sub_confidences": sub_confidences_data,
     })
 
 
@@ -545,6 +612,7 @@ def _handle_pdf_result(pdf_result, doc_id: str, run_dir: Path):
         save_p2_5b(page_dir, page_result)
         save_p2_5c(page_dir, page_result)
         save_p3(page_dir, page_result)
+        save_s7(page_dir, page_result)
         save_p4(page_dir, page_result)
         save_p5(page_dir, page_result)
         save_p6(page_dir, page_result)
@@ -643,6 +711,7 @@ def run_single(pipeline: PipelineOrchestrator, image_path: Path, run_dir: Path):
     save_p2_5b(doc_dir, result)
     save_p2_5c(doc_dir, result)
     save_p3(doc_dir, result)
+    save_s7(doc_dir, result)
     save_p4(doc_dir, result)
     save_p5(doc_dir, result)
     save_p6(doc_dir, result)
@@ -780,6 +849,16 @@ def main():
 
     pipeline = PipelineOrchestrator(cfg)
 
+    # ── Warmup ──
+    # 모든 lazy 컴포넌트를 강제 초기화해 첫 문서 timing에서 모델 로딩 비용을 분리한다.
+    # 통합 테스트/벤치마크 타이밍 규약 — docs/TESTING.md §"측정 규약" 참조.
+    logger.info("=" * 60)
+    logger.info("Warmup: lazy 컴포넌트 초기화 (모델 로딩 시간 분리)")
+    logger.info("=" * 60)
+    warmup_timings = pipeline.warmup()
+    logger.info("Warmup 완료: total=%.0fms", warmup_timings.get("_total_ms", 0.0))
+    _save_json(run_dir / "warmup_timings.json", warmup_timings)
+
     # 실행
     results = []
     for img_path in images:
@@ -790,6 +869,11 @@ def main():
     total_summary = {
         "timestamp": timestamp,
         "document_count": len(results),
+        "timing_convention": (
+            "warmup 이후 측정 — 각 문서의 timings는 warm-start 기준 "
+            "(모델 로딩 시간은 warmup_timings.json에 별도 기록)"
+        ),
+        "warmup_total_ms": warmup_timings.get("_total_ms", 0.0),
         "documents": [],
     }
     for r in results:

@@ -1,0 +1,23 @@
+[
+  {
+    "trial": "20260418_142612",
+    "verdict": "NEUTRAL",
+    "sample_count": 4,
+    "evaluated_at": "2026-04-18T14:27:29",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260418_142612"
+  },
+  {
+    "trial": "20260418_125150",
+    "verdict": "IMPROVED",
+    "sample_count": 4,
+    "evaluated_at": "2026-04-18T14:05:39",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260418_125150"
+  },
+  {
+    "trial": "20260417_180951",
+    "verdict": "NEUTRAL",
+    "sample_count": 4,
+    "evaluated_at": "2026-04-18T14:05:33",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260417_180951"
+  }
+]

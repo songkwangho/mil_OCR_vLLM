@@ -161,7 +161,7 @@ PP-DocLayout Fine-tuning과 상호 보완:
 ### Phase 1 잔여 — 남은 핵심 작업
 
 - [x] **S2 PrintedTextReader / S3 HandwritingReader 정식 구현** — 공통 도메인 서비스로 격상. StructuredExtractor(military)와 SkillRegistry(other)가 Orchestrator DI로 단일 인스턴스 공유. S3는 신뢰도<0.70 시 프롬프트 변형 재시도. 한국어 수기 인식률 실측(10~20장)은 후속.
-- [ ] **S7 StructuredAggregator 구현** — 현재 Skill 결과를 region_id 단위 FieldValue로 평탄화. official_document 스키마에 맞춘 최종 집계가 필요.
+- [x] **S7 StructuredAggregator 구현** — `src/vlm/skills/aggregator.py`. S2~S6 결과를 `[HEADER]/[TEXT]/[SEAL]/[SIGNATURE]/[TABLE]` 블록으로 직렬화해 VLM에 컨텍스트로 주입하고, `official_document.json` 스키마로 guided_json 1회 호출(pixel_budget=140). 결과는 `VLMResult.assembled_json` + region 단위 `FieldValue`로 반환. 호출 실패 시 region 평탄화로 폴백.
 - [ ] **OCR-augmented 힌트** — `ocr_hint_provider.py`는 구현됐으나 PaddleOCR 가중치의 오프라인 배치(`~/.paddlex/official_models/`)와 `Dockerfile.pipeline` COPY 반영 필요.
 - [ ] **1-shot 예시 자산화** — `configs/instruction_examples/*.yaml` 서식별 예시 작성.
 - [ ] **검출률 측정** — `scripts/evaluate_layout_detection.py --n 50` (PP-DocLayoutV3 기준치 확보).
@@ -246,7 +246,7 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | — | S4 SealReader | `src/vlm/skills/seal_reader.py` | ✅ |
 | — | S5 TableExtractor | `src/vlm/skills/table_extractor.py` | ✅ pass1/pass2 |
 | — | S6 SignatureDetector | `src/vlm/skills/signature_detector.py` | ✅ |
-| — | S7 StructuredAggregator | `src/vlm/skills/aggregator.py` | 🔴 미구현 (region_id 단위 평탄화로 임시 대체) |
+| — | S7 StructuredAggregator | `src/vlm/skills/aggregator.py` | ✅ S2~S6 결과 컨텍스트 주입 → official_document.json guided_json 집계 (VLM 실패 시 region 평탄화 폴백) |
 | — | VLM 공용 클라이언트 | `src/vlm/vlm_client.py` | ✅ |
 | P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ✅ 경로별 임계값 + region_id/was_retried 보존 |
 | — | 계급 정규화 | `src/postprocess/rank_normalizer.py` | ✅ 한국군 계급 Levenshtein 최근접 매칭 |
