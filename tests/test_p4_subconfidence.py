@@ -163,18 +163,24 @@ class TestTraverseAssembled:
         assert paths == ["d"]
 
     def test_skip_meta_keys(self):
-        """analysis/result_confidence/aggregator_blob/low_confidence_fields/overall_confidence는 스킵."""
+        """analysis/result_confidence/aggregator_blob/low_confidence_fields/overall_confidence/fixed_content 스킵."""
         assembled = {
             "analysis": "meta",
             "aggregator_blob": "blob",
             "low_confidence_fields": ["a", "b"],
             "overall_confidence": 0.9,
+            "fixed_content": {
+                "form_title": "인쇄 고정 제목",
+                "checklist_item_1_text": "점검항목 1",
+            },
             "document_date": "2026-04-17",
         }
         sub: list = []
         _traverse_assembled(assembled, {}, sub)
         paths = [p for p, _, _ in sub]
         assert paths == ["document_date"]
+        # fixed_content 하위 경로는 신뢰도 산출 대상에 포함되지 않아야 함
+        assert not any("fixed_content" in p for p in paths)
 
 
 # ─────────────────────────────────────────────

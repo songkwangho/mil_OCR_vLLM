@@ -505,12 +505,15 @@ class TemplateAugmentor:
         form_type: FormType,
         form_identifier: Optional[str] = None,
         stats: Optional[TemplateAugmentorStats] = None,
-    ) -> LayoutResult:
+    ) -> tuple[LayoutResult, dict]:
         """위 정책 박스에 따라 LayoutResult를 재구성.
 
-        반환된 LayoutResult.regions 순서:
-          ① 템플릿 field마다 region (field_key 부여, source="template" or "template_matched")
-          ② 흡수되지 않은 PP-DocLayout 동적 region (field_key=None — 인장·서명·표 등)
+        반환값: (augmented_layout, fixed_values)
+          - augmented_layout.regions 순서:
+            ① 템플릿 field마다 region (field_key 부여, source="template" or "template_matched")
+            ② 흡수되지 않은 PP-DocLayout 동적 region (field_key=None — 인장·서명·표 등)
+          - fixed_values: {field_key → 인쇄 고정 텍스트 value} — fixed_text 섹션 기반.
+            Assembler가 x-assembly-rules에 따라 assembled_json에 삽입. VLM 추론 대상 아님.
 
         본문 구현은 src/vlm/template_augmentor.py 참조.
         """
@@ -562,6 +565,21 @@ class TemplateAugmentor:
         self._cache[cache_key] = fields
         return fields
 ```
+
+**fixed_text 처리 (v4 — 인쇄 고정 텍스트 분리)**
+
+모든 서식이 동일한 파이프라인을 타되 YAML 하네스로만 차이를 두는 설계 원칙에 따라, 인쇄 고정 텍스트는 VLM 추론에서 제외하고 Assembler가 값을 직접 삽입합니다.
+
+- 템플릿 YAML의 `fixed_text` 섹션에 `field_key` / `bbox` (선택) / `value`를 정의.
+- augment()가 bbox 있는 fixed_text는 겹치는(IoU>0.5, `field_key=None`인) PP region을 제거. `field_key`가 부여된 region은 보호.
+- augment() 반환값의 두 번째 요소 `fixed_values: dict[field_key, str]`를 StructuredExtractor → Assembler로 전달.
+- Assembler는 x-assembly-rules에 매핑된 field_key만 처리하며, VLM 결과가 이미 있는 path는 덮어쓰지 않음 (VLM 추출 우선).
+- `_traverse_assembled`는 `fixed_content` 서브트리를 `_TRAVERSAL_SKIP_KEYS`로 처리하여 신뢰도 산출에서 제외 (판독 신뢰도 개념 무관).
+
+**효과**:
+- VLM 호출 영역 감소 → 토큰 비용 절감 + 오인식 제거
+- assembled_json 완전성 향상 (인쇄 고정값 누락 방지)
+- overall_confidence 노이즈 제거 (fixed_content 폴백 0.5 제외)
 
 **템플릿 YAML 형식** (`configs/form_templates/supply_request.yaml`):
 

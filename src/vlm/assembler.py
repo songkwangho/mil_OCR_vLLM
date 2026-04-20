@@ -34,6 +34,7 @@ class Assembler:
         fields: list[FieldValue],
         schema: dict,
         region_field_key_map: Optional[dict[str, str]] = None,
+        fixed_values: Optional[dict[str, Any]] = None,
         warnings: Optional[list[str]] = None,
     ) -> Optional[dict]:
         """field_key별 FieldValue를 schema 전체 구조로 조립.
@@ -43,6 +44,8 @@ class Assembler:
             schema:               x-assembly-rules가 포함된 full schema dict
             region_field_key_map: {region_id → field_key} 매핑
                                   None이면 FieldValue.field_key만 사용
+            fixed_values:         TemplateAugmentor가 생성한 {field_key → 인쇄 고정값} dict.
+                                  VLM 추출이 없거나 실패한 field_key에 한해 삽입 (VLM 결과 우선).
             warnings:             경고 수집 리스트
 
         Returns:
@@ -50,6 +53,8 @@ class Assembler:
         """
         if warnings is None:
             warnings = []
+        if fixed_values is None:
+            fixed_values = {}
 
         assembly_rules: dict = schema.get("x-assembly-rules", {})
         if not assembly_rules:
@@ -78,6 +83,23 @@ class Assembler:
             fv = field_map.get(field_key)
             value = self._extract_value(fv, field_key, warnings)
             self._set_path(result, path, value)
+
+        # fixed_text 주입 — VLM 추출이 없었던 field_key에 한해 인쇄 고정값 삽입.
+        # x-assembly-rules에 매핑된 field_key만 대상이며, VLM 결과가 이미 있으면 유지.
+        fixed_injected = 0
+        for field_key, value in fixed_values.items():
+            if field_key not in assembly_rules:
+                continue
+            path = assembly_rules[field_key]
+            if self._path_exists(result, path):
+                continue
+            self._set_path(result, path, value)
+            fixed_injected += 1
+        if fixed_injected:
+            logger.info(
+                "[Assembler] fixed_text 주입: %d개 (VLM 미추출 field_key에 한함)",
+                fixed_injected,
+            )
 
         # checklist_items 완전성 보장 — 누락 항목 기본값 채움, list로 변환
         if "checklist_items" in result and isinstance(result["checklist_items"], dict):
@@ -169,3 +191,24 @@ class Assembler:
                 current[part] = {}
             current = current[part]
         current[parts[-1]] = value
+
+    def _path_exists(self, target: dict, path: str) -> bool:
+        """JSON path에 이미 non-None 값이 있는지 확인."""
+        parts = path.split(".")
+        current: Any = target
+        for part in parts:
+            if isinstance(current, dict):
+                if part not in current:
+                    return False
+                current = current[part]
+            elif isinstance(current, list):
+                try:
+                    idx = int(part)
+                except (TypeError, ValueError):
+                    return False
+                if idx < 0 or idx >= len(current):
+                    return False
+                current = current[idx]
+            else:
+                return False
+        return current is not None

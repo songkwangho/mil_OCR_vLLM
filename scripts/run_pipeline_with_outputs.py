@@ -203,6 +203,8 @@ def save_p2_5a(out_dir: Path, result: PipelineResult):
                 "form_identifier_matched": tpl_stats.form_identifier_matched,
                 "template_loaded": tpl_stats.template_loaded,
                 "skipped_reason": tpl_stats.skipped_reason,
+                "fixed_text_count": getattr(tpl_stats, "fixed_text_count", 0),
+                "fixed_text_removed_count": getattr(tpl_stats, "fixed_text_removed_count", 0),
             }
             if tpl_stats is not None else None
         ),

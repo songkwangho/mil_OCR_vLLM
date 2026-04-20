@@ -1,0 +1,16 @@
+{
+  "doc_id": "test-integ-001",
+  "overall_confidence": 0.0,
+  "review_required": true,
+  "fields": [
+    {
+      "field_key": "s2_r_0002",
+      "corrected_value": "",
+      "confidence": 0.0,
+      "is_flagged": true
+    }
+  ],
+  "json_output": "{\n  \"doc_id\": \"test-integ-001\",\n  \"overall_confidence\": 0.0,\n  \"review_required\": true,\n  \"processing_path\": \"vlm\",\n  \"assembled_json\": null,\n  \"fields\": [\n    {\n      \"field_key\": \"s2_r_0002\",\n      \"raw_value\": \"\",\n      \"corrected_value\": \"\",\n      \"data_type\": \"text\",\n      \"confidence\": 0.0,\n      \"is_flagged\": true\n    }\n  ],\n  \"tables\": [\n    {\n      \"region_id\": \"r_0001\",\n      \"html\": \"\",\n      \"cells\": [],\n      \"confidence\": 0.5\n    }\n  ],\n  \"validation_errors\": []\n}",
+  "fallback_reason": "db_unavailable",
+  "saved_at": "2026-04-17T17:49:23.652556"
+}

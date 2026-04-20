@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "bid_application",
+  "x-mil-ocr-version": "1.0.0",
+  "x-mil-ocr-effective-date": "2024-01-01",
+  "x-mil-ocr-deprecated": false,
+  "title": "입찰참가신청서",
+  "description": "별지 제13호 서식 — 군수품조달관리규정(방위사업청) 입찰참가신청서 서식(국내/국제)",
+
+  "x-assembly-rules": {
+    "doc_number":              "doc_number",
+    "applicant_block":         "applicant",
+    "bid_info_block":          "bid_info",
+    "agent_block":             "agent",
+    "agent_seal":              "agent.seal_present",
+    "submission_block":        "submission",
+    "seal_verification_block": "seal_verification",
+    "form_identifier":         "form_identifier",
+    "body_text":               "fixed_content.body_text",
+    "seal_note":               "fixed_content.seal_note",
+    "form_title":              "fixed_content.form_title"
+  },
+
+  "type": "object",
+  "properties": {
+    "analysis": {
+      "type": "string",
+      "description": "이미지 품질, 수기 판독 난이도, 특이사항을 30~50 토큰으로 간략히 기술"
+    },
+    "doc_number": {
+      "type": "string",
+      "description": "제 호 — 문서 번호 수기 기입란"
+    },
+    "applicant": {
+      "type": "object",
+      "description": "신청인 정보",
+      "properties": {
+        "company_name":          {"type": "string", "description": "상호 또는 법인명칭"},
+        "corporate_reg_number":  {"type": "string", "description": "법인등록번호. 형식: NNNNN-NNNNNNN"},
+        "representative":        {"type": "string", "description": "대표자 성명"},
+        "representative_dob":    {"type": "string", "description": "대표자 생년월일. 예: 1976년 1월 03일"},
+        "address":               {"type": "string", "description": "주소"},
+        "phone":                 {"type": "string", "description": "전화번호"},
+        "business_location":     {"type": "string", "description": "사업장소재지"},
+        "business_reg_number":   {"type": "string", "description": "사업자등록번호. 형식: NNN-NN-NNNNN"}
+      },
+      "required": ["company_name", "representative", "business_reg_number"]
+    },
+    "bid_info": {
+      "type": "object",
+      "description": "입찰개요",
+      "properties": {
+        "announcement_number":   {"type": "string", "description": "입찰공고(지명)번호"},
+        "bid_date":              {"type": "string", "description": "입찰일자"},
+        "bid_name":              {"type": "string", "description": "입찰건명"},
+        "item_code":             {"type": "string", "description": "품목코드"},
+        "industry_class_number": {"type": "string", "description": "해당산업분류번호"},
+        "acquisition_date":      {"type": "string", "description": "취득일"},
+        "issuing_office":        {"type": "string", "description": "발행관서"}
+      },
+      "required": ["announcement_number", "bid_date", "bid_name"]
+    },
+    "agent": {
+      "type": "object",
+      "description": "대리인 및 사용인감 정보",
+      "properties": {
+        "name":         {"type": "string",  "description": "대리인 성명"},
+        "dob":          {"type": "string",  "description": "대리인 생년월일"},
+        "seal_present": {"type": "boolean", "description": "사용인감 날인 존재 여부"}
+      }
+    },
+    "submission": {
+      "type": "object",
+      "description": "신청 정보",
+      "properties": {
+        "submission_date": {"type": "string", "description": "신청일자. 예: 2024년 05월 15일"},
+        "submitter_name":  {"type": "string", "description": "신청인 대표자 성명"}
+      },
+      "required": ["submission_date", "submitter_name"]
+    },
+    "seal_verification": {
+      "type": "object",
+      "description": "인감증명확인",
+      "properties": {
+        "issuing_office":    {"type": "string",  "description": "발급관서"},
+        "issue_number":      {"type": "string",  "description": "발급번호"},
+        "issue_date":        {"type": "string",  "description": "발급일자"},
+        "verifier":          {"type": "string",  "description": "화인자"},
+        "signature_present": {"type": "boolean", "description": "서명/날인 존재 여부"}
+      }
+    },
+    "form_identifier": {
+      "type": "string",
+      "description": "서식 식별자. 예: '별지 제13호 서식'"
+    },
+    "fixed_content": {
+      "type": "object",
+      "description": "서식 인쇄 고정 텍스트 — TemplateAugmentor fixed_text가 Assembler를 통해 주입. VLM 추론 대상 아님.",
+      "properties": {
+        "body_text":  {"type": "string", "description": "입찰참가 법적 고지 본문"},
+        "seal_note":  {"type": "string", "description": "인감증명서 안내 문구"},
+        "form_title": {"type": "string", "description": "서식 제목"}
+      }
+    }
+  },
+  "required": ["analysis", "applicant", "bid_info", "submission"]
+}

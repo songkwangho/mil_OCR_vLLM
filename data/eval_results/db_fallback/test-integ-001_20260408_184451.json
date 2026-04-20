@@ -1,0 +1,9 @@
+{
+  "doc_id": "test-integ-001",
+  "overall_confidence": 0.0,
+  "review_required": true,
+  "fields": [],
+  "json_output": "{\n  \"doc_id\": \"test-integ-001\",\n  \"overall_confidence\": 0.0,\n  \"review_required\": true,\n  \"processing_path\": \"vlm\",\n  \"fields\": [],\n  \"tables\": [],\n  \"validation_errors\": []\n}",
+  "fallback_reason": "db_unavailable",
+  "saved_at": "2026-04-08T18:44:51.697972"
+}

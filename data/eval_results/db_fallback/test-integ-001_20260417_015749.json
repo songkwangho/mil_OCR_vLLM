@@ -1,0 +1,52 @@
+{
+  "doc_id": "test-integ-001",
+  "overall_confidence": 0.0,
+  "review_required": true,
+  "fields": [
+    {
+      "field_key": "document_title",
+      "corrected_value": "None",
+      "confidence": 0.0,
+      "is_flagged": true
+    },
+    {
+      "field_key": "date",
+      "corrected_value": "None",
+      "confidence": 0.0,
+      "is_flagged": true
+    },
+    {
+      "field_key": "author",
+      "corrected_value": "None",
+      "confidence": 0.0,
+      "is_flagged": true
+    },
+    {
+      "field_key": "unit_code",
+      "corrected_value": "None",
+      "confidence": 0.0,
+      "is_flagged": true
+    },
+    {
+      "field_key": "key_value_pairs",
+      "corrected_value": "{}",
+      "confidence": 0.0,
+      "is_flagged": true
+    },
+    {
+      "field_key": "table_data",
+      "corrected_value": "[]",
+      "confidence": 0.0,
+      "is_flagged": true
+    },
+    {
+      "field_key": "handwritten_notes",
+      "corrected_value": "[]",
+      "confidence": 0.0,
+      "is_flagged": true
+    }
+  ],
+  "json_output": "{\n  \"doc_id\": \"test-integ-001\",\n  \"overall_confidence\": 0.0,\n  \"review_required\": true,\n  \"processing_path\": \"vlm\",\n  \"assembled_json\": null,\n  \"fields\": [\n    {\n      \"field_key\": \"document_title\",\n      \"raw_value\": \"None\",\n      \"corrected_value\": \"None\",\n      \"data_type\": \"text\",\n      \"confidence\": 0.0,\n      \"is_flagged\": true\n    },\n    {\n      \"field_key\": \"date\",\n      \"raw_value\": \"None\",\n      \"corrected_value\": \"None\",\n      \"data_type\": \"text\",\n      \"confidence\": 0.0,\n      \"is_flagged\": true\n    },\n    {\n      \"field_key\": \"author\",\n      \"raw_value\": \"None\",\n      \"corrected_value\": \"None\",\n      \"data_type\": \"text\",\n      \"confidence\": 0.0,\n      \"is_flagged\": true\n    },\n    {\n      \"field_key\": \"unit_code\",\n      \"raw_value\": \"None\",\n      \"corrected_value\": \"None\",\n      \"data_type\": \"text\",\n      \"confidence\": 0.0,\n      \"is_flagged\": true\n    },\n    {\n      \"field_key\": \"key_value_pairs\",\n      \"raw_value\": \"{}\",\n      \"corrected_value\": \"{}\",\n      \"data_type\": \"text\",\n      \"confidence\": 0.0,\n      \"is_flagged\": true\n    },\n    {\n      \"field_key\": \"table_data\",\n      \"raw_value\": \"[]\",\n      \"corrected_value\": \"[]\",\n      \"data_type\": \"text\",\n      \"confidence\": 0.0,\n      \"is_flagged\": true\n    },\n    {\n      \"field_key\": \"handwritten_notes\",\n      \"raw_value\": \"[]\",\n      \"corrected_value\": \"[]\",\n      \"data_type\": \"text\",\n      \"confidence\": 0.0,\n      \"is_flagged\": true\n    }\n  ],\n  \"tables\": [\n    {\n      \"region_id\": \"r_0001\",\n      \"html\": \"```json\\n{\\n  \\\"analysis\\\": \\\"이미지는 텍스트가 전혀 없는 검은색 막대와 격자무늬로만 구성된 추상적인 표 템플릿입니다. 실제 데이터나 문자가 존재하지 않아 추출할 수 있는 정보가 없습니다.\\\",\\n  \\\"document_info\\\": {\\n    \\\"title\\\": null,\\n    \\\"date\\\": null,\\n    \\\"author\\\": null,\\n    \\\"unit_code\\\": null\\n  },\\n  \\\"key_value_pairs\\\": {},\\n  \\\"table_data\\\": [\\n    {\\n      \\\"row_1\\\": {\\n        \\\"col_1\\\": \\\"[Black Bar]\\\",\\n        \\\"col_2\\\": \\\"\\\",\\n        \\\"col_3\\\": \\\"\\\",\\n        \\\"col_4\\\": \\\"\\\",\\n        \\\"col_5\\\": \\\"\\\"\\n      }\\n    },\\n    {\\n      \\\"row_2\\\": {\\n        \\\"col_1\\\": \\\"[Black Bar]\\\",\\n        \\\"col_2\\\": \\\"\\\",\\n        \\\"col_3\\\": \\\"\\\",\\n        \\\"col_4\\\": \\\"\\\",\\n        \\\"col_5\\\": \\\"\\\"\\n      }\\n    },\\n    {\\n      \\\"row_3\\\": {\\n        \\\"col_1\\\": \\\"[Black Bar]\\\",\\n        \\\"col_2\\\": \\\"\\\",\\n        \\\"col_3\\\": \\\"\\\",\\n        \\\"col_4\\\": \\\"\\\",\\n        \\\"col_5\\\": \\\"\\\"\\n      }\\n    },\\n    {\\n      \\\"row_4\\\": {\\n        \\\"col_1\\\": \\\"[Black Bar]\\\",\\n        \\\"col_2\\\": \\\"\\\",\\n        \\\"col_3\\\": \\\"\\\",\\n        \\\"col_4\\\": \\\"\\\",\\n        \\\"col_5\\\": \\\"\\\"\\n      }\\n    },\\n    {\\n      \\\"row_5\\\": {\\n        \\\"col_1\\\": \\\"[Black Bar]\\\",\\n        \\\"col_2\\\": \\\"\\\",\\n        \\\"col_3\\\": \\\"\\\",\\n        \\\"col_4\\\": \\\"\\\",\\n        \\\"col_5\\\": \\\"\\\"\\n      }\\n    },\\n    {\\n      \\\"row_6\\\": {\\n        \\\"col_1\\\": \\\"[Black Bar]\\\",\\n        \\\"col_2\\\": \\\"\\\",\\n        \\\"col_3\\\": \\\"\\\",\\n        \\\"col_4\\\": \\\"\\\",\\n        \\\"col_5\\\": \\\"\\\"\\n      }\\n    },\\n    {\\n      \\\"row_7\\\": {\\n        \\\"col_1\\\": \\\"[Black Bar]\\\",\\n        \\\"col_2\\\": \\\"\\\",\\n        \\\"col_3\\\": \\\"\\\",\\n        \\\"col_4\\\": \\\"\\\",\\n        \\\"col_5\\\": \\\"\\\"\\n      }\\n    }\\n  ],\\n  \\\"html_table\\\": \\\"<table>\\\\n  <tbody>\\\\n    <tr><td>[Black Bar]</td><td></td><td></td><td></td><td></td></tr>\\\\n    <tr><td>[Black Bar]</td><td></td><td></td><td></td><td></td></tr>\\\\n    <tr><td>[Black Bar]</td><td></td><td></td><td></td><td></td></tr>\\\\n    <tr><td>[Black Bar]</td><td></td><td></td><td></td><td></td></tr>\\\\n    <tr><td>[Black Bar]</td><td></td><td></td><td></td><td></td></tr>\\\\n    <tr><td>[Black Bar]</td><td></td><td></td><td></td><td></td></tr>\\\\n    <tr><td>[Black Bar]</td><td></td><td></td><td></td><td></td></tr>\\\\n  </tbody>\\\\n</table>\\\"\\n}\\n```\",\n      \"cells\": [\n        {\n          \"row\": 0,\n          \"col\": 0,\n          \"text\": \"[Black Bar]\"\n        },\n        {\n          \"row\": 0,\n          \"col\": 1,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 0,\n          \"col\": 2,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 0,\n          \"col\": 3,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 0,\n          \"col\": 4,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 1,\n          \"col\": 0,\n          \"text\": \"[Black Bar]\"\n        },\n        {\n          \"row\": 1,\n          \"col\": 1,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 1,\n          \"col\": 2,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 1,\n          \"col\": 3,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 1,\n          \"col\": 4,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 2,\n          \"col\": 0,\n          \"text\": \"[Black Bar]\"\n        },\n        {\n          \"row\": 2,\n          \"col\": 1,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 2,\n          \"col\": 2,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 2,\n          \"col\": 3,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 2,\n          \"col\": 4,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 3,\n          \"col\": 0,\n          \"text\": \"[Black Bar]\"\n        },\n        {\n          \"row\": 3,\n          \"col\": 1,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 3,\n          \"col\": 2,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 3,\n          \"col\": 3,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 3,\n          \"col\": 4,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 4,\n          \"col\": 0,\n          \"text\": \"[Black Bar]\"\n        },\n        {\n          \"row\": 4,\n          \"col\": 1,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 4,\n          \"col\": 2,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 4,\n          \"col\": 3,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 4,\n          \"col\": 4,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 5,\n          \"col\": 0,\n          \"text\": \"[Black Bar]\"\n        },\n        {\n          \"row\": 5,\n          \"col\": 1,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 5,\n          \"col\": 2,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 5,\n          \"col\": 3,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 5,\n          \"col\": 4,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 6,\n          \"col\": 0,\n          \"text\": \"[Black Bar]\"\n        },\n        {\n          \"row\": 6,\n          \"col\": 1,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 6,\n          \"col\": 2,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 6,\n          \"col\": 3,\n          \"text\": \"\"\n        },\n        {\n          \"row\": 6,\n          \"col\": 4,\n          \"text\": \"\"\n        }\n      ],\n      \"confidence\": 0.0829\n    }\n  ],\n  \"validation_errors\": []\n}",
+  "fallback_reason": "db_unavailable",
+  "saved_at": "2026-04-17T01:57:49.628494"
+}

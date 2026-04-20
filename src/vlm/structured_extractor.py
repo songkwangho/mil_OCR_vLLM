@@ -262,6 +262,7 @@ class StructuredExtractor:
         schema: Optional[dict] = None,
         warnings: Optional[list[str]] = None,
         trace: Optional[list[dict]] = None,
+        fixed_values: Optional[dict] = None,
     ) -> VLMResult:
         """pixel_budget별 배치 그룹 → VLMResult.
 
@@ -395,6 +396,7 @@ class StructuredExtractor:
                 fields=all_fields,
                 schema=schema,
                 region_field_key_map=region_field_key_map,
+                fixed_values=fixed_values or {},
                 warnings=warnings,
             )
             if assembled_json:

@@ -29,7 +29,8 @@
       "Bash(docker inspect *)",
       "Bash(xargs -I{} echo \"  metrics.json 생성 수: {}\")",
       "Bash(xargs -I{} echo \"  pipeline_outputs/latest -> {}\")",
-      "Bash(xargs -I{} echo \"  eval_results/latest -> {}\")"
+      "Bash(xargs -I{} echo \"  eval_results/latest -> {}\")",
+      "Bash(export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8)"
     ]
   }
 }

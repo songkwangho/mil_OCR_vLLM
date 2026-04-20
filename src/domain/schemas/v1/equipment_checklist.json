@@ -16,7 +16,14 @@
     "result_item_5":   "checklist_items.4",
     "result_item_6":   "checklist_items.5",
     "writer_block":    "writer",
-    "form_identifier": "form_identifier"
+    "form_identifier": "form_identifier",
+    "form_title":              "fixed_content.form_title",
+    "checklist_item_1_text":   "fixed_content.checklist_item_1_text",
+    "checklist_item_2_text":   "fixed_content.checklist_item_2_text",
+    "checklist_item_3_text":   "fixed_content.checklist_item_3_text",
+    "checklist_item_4_text":   "fixed_content.checklist_item_4_text",
+    "checklist_item_5_text":   "fixed_content.checklist_item_5_text",
+    "checklist_item_6_text":   "fixed_content.checklist_item_6_text"
   },
 
   "x-checklist-item-schema": {
@@ -100,6 +107,19 @@
     "form_identifier": {
       "type": "string",
       "description": "서식 식별자. 예: '별지 제3-2호 서식'"
+    },
+    "fixed_content": {
+      "type": "object",
+      "description": "서식 인쇄 고정 텍스트 — TemplateAugmentor fixed_text가 Assembler를 통해 주입. VLM 추론 대상 아님.",
+      "properties": {
+        "form_title":            {"type": "string"},
+        "checklist_item_1_text": {"type": "string"},
+        "checklist_item_2_text": {"type": "string"},
+        "checklist_item_3_text": {"type": "string"},
+        "checklist_item_4_text": {"type": "string"},
+        "checklist_item_5_text": {"type": "string"},
+        "checklist_item_6_text": {"type": "string"}
+      }
     }
   },
   "required": ["analysis", "document_date", "checklist_items", "writer"]

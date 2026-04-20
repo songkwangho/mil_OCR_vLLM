@@ -142,7 +142,7 @@ PP-DocLayout Fine-tuning과 상호 보완:
 - **Crop-then-Infer**: LayoutPostProcessor 정제 → 영역별 크롭(48px 배수) → Gemma4
 - **PdfAdapter**: PDF 입력은 fitz로 페이지별 RGB 렌더링(기본 300dpi) → 페이지마다 단일 이미지로 P1~P6 통과 → `PdfDocumentResult` 집계
 - **FormClassifier 선행**: 저해상도 분류 → form_type + form_identifier → 경로 분기
-- **TemplateAugmentor (v3)**: 템플릿 우선 병합 + field_key 부여. PP region 포함도 ≥0.7 면 흡수, ≥0.9 역포함은 컨테이너로 보존, `seal/signature/figure/table` 보호. 단일 매칭이면 PP bbox 재사용, 다중 매칭이면 템플릿 bbox로 통합.
+- **TemplateAugmentor (v4)**: 템플릿 우선 병합 + field_key 부여. PP region 포함도 ≥0.7 면 흡수, ≥0.9 역포함은 컨테이너로 보존, `seal/signature/figure/table` 보호. 단일 매칭이면 PP bbox 재사용, 다중 매칭이면 템플릿 bbox로 통합. **fixed_text 섹션 지원**: 인쇄 고정 텍스트는 VLM 추론 대상에서 제외하고 Assembler가 assembled_json에 직접 삽입 (IoU>0.5 PP region 제거, field_key 있는 region 보호).
 - **Sub-schema 분해 + Assembler**: `x-assembly-rules` 정의된 스키마는 region별로 sub-schema(예: `result_item_3` → `item_number: const=3`)만 VLM에 전달 → 결과를 region_id로 역참조해 full schema dict로 조립(`VLMResult.assembled_json`)
 - **CROP_PADDING_MAX_PX**: 비율 패딩에 절대 상한(예: table=30px) → 큰 bbox에서 인접 영역 오염 방지
 - **military InstructionRouter**: region_type + form_type → 도메인 맥락 + 1-shot. field_key가 있으면 full-shot 대신 sub-schema 전용 짧은 instruction 사용
@@ -232,7 +232,7 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | — | SealPreprocessor | `src/preprocess/seal_preprocessor.py` | ✅ 극좌표 언래핑 + 허프 실패 폴백 |
 | — | PdfAdapter | `src/input/pdf_adapter.py` | ✅ fitz 기반 PDF→PageImage, 멀티페이지 |
 | P3-A | FormClassifier | `src/vlm/form_classifier.py` | ✅ military/other 분기 + form_identifier (guided_json) |
-| P2.5-A.5 | TemplateAugmentor | `src/vlm/template_augmentor.py` | ✅ v3: 포함도 기반 다중 PP 흡수, field_key 부여 |
+| P2.5-A.5 | TemplateAugmentor | `src/vlm/template_augmentor.py` | ✅ v4: 포함도 기반 다중 PP 흡수 + field_key 부여 + fixed_text 처리 (반환값 `(layout, fixed_values)`) |
 | P2.5-B | InstructionRouter | `src/vlm/instruction_router.py` | ✅ 1-shot + OCR 힌트 + sub-schema 분해(`_extract_sub_schema`) |
 | P2.5-C | ResolutionRouter | `src/vlm/resolution_router.py` | ✅ 48px 정렬 + DISPATCH_ORDER + 패딩 절대 상한 |
 | P3-B | StructuredExtractor | `src/vlm/structured_extractor.py` | ✅ 저신뢰 재시도 + field_key blob 보존 + Assembler 호출 |
@@ -259,7 +259,7 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | — | VLM 헬스 모니터 | `src/pipeline/health_monitor.py` | ✅ `record_failure(reason)` public |
 | — | Layout 추론 서비스 | `src/preprocess/layout_server.py` | ✅ |
 | — | 스키마 레지스트리 | `src/domain/schema_registry.py` | ✅ v1/ 스캔 + `get()` 별칭 (`other→official_document`) |
-| — | JSON Schemas v1 | `src/domain/schemas/v1/*.json` | ✅ 9종 (6 military 포함 `equipment_checklist` + `_fallback`/`_general`/`official_document`). `x-assembly-rules`/`x-checklist-item-schema` 지원 |
+| — | JSON Schemas v1 | `src/domain/schemas/v1/*.json` | ✅ 10종 (7 military 포함 `equipment_checklist`/`bid_application` + `_fallback`/`_general`/`official_document`). `x-assembly-rules`/`x-checklist-item-schema` 지원 |
 | — | Docker 구성 | `docker-compose.yml` + `docker/Dockerfile.*` | ✅ vLLM 0.19.0 호환 (`--structured-outputs-config`) |
 
 ---
@@ -320,6 +320,7 @@ mil_OCR_v2/
 │           ├── handover_doc.json
 │           ├── inspection_report.json
 │           ├── equipment_checklist.json (x-assembly-rules)
+│           ├── bid_application.json    (x-assembly-rules, 별지 제13호)
 │           ├── _fallback.json
 │           ├── _general.json
 │           └── official_document.json
@@ -351,7 +352,8 @@ mil_OCR_v2/
 │       ├── inventory_sheet.yaml
 │       ├── handover_doc.yaml
 │       ├── inspection_report.yaml
-│       └── equipment_checklist.yaml
+│       ├── equipment_checklist.yaml
+│       └── bid_application.yaml       ← 신규 (별지 제13호)
 └── tests/
     ├── test_integration_pipeline.py  (기본 E2E)
     ├── test_T2_T3_fusion.py          (Layout Fusion)

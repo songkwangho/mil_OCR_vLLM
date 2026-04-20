@@ -119,6 +119,7 @@ class FormType(str, Enum):
     HANDOVER_DOC = "handover_doc"
     INSPECTION_REPORT = "inspection_report"
     EQUIPMENT_CHECKLIST = "equipment_checklist"
+    BID_APPLICATION = "bid_application"
     UNKNOWN = "unknown"
     OTHER = "other"
 

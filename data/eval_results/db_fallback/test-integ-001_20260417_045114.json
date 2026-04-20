@@ -1,0 +1,9 @@
+{
+  "doc_id": "test-integ-001",
+  "overall_confidence": 0.0,
+  "review_required": true,
+  "fields": [],
+  "json_output": "{\n  \"doc_id\": \"test-integ-001\",\n  \"overall_confidence\": 0.0,\n  \"review_required\": true,\n  \"processing_path\": \"vlm\",\n  \"assembled_json\": null,\n  \"fields\": [],\n  \"tables\": [\n    {\n      \"region_id\": \"r_0001\",\n      \"html\": \"\",\n      \"cells\": [],\n      \"confidence\": 0.5\n    }\n  ],\n  \"validation_errors\": []\n}",
+  "fallback_reason": "db_unavailable",
+  "saved_at": "2026-04-17T04:51:14.874565"
+}

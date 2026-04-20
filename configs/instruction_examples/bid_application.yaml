@@ -1,0 +1,19 @@
+# 1-shot 예시 — 입찰참가신청서 (별지 제13호 서식)
+# 방위사업청 군수품조달관리규정 / 국내·국제 공통 서식.
+form_type: bid_application
+region_type: handwritten_field
+example_description: "입찰참가신청서 신청인 섹션 수기 기입란"
+example_response: |
+  {
+    "analysis": "수기 필체 보통, 법인등록번호·사업자등록번호 형식 확인됨, 일부 글자 흐릿하나 판독 가능",
+    "applicant": {
+      "company_name": "(주) 인패닝",
+      "corporate_reg_number": "11011-2745676",
+      "representative": "박 준형",
+      "representative_dob": "1976년 1월 03일",
+      "address": "서울 동대문구 가능대로 123, 15층",
+      "phone": "02-123-4567",
+      "business_location": "서울서",
+      "business_reg_number": "137-63-12345"
+    }
+  }

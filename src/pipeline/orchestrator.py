@@ -794,7 +794,8 @@ class PipelineOrchestrator:
                         schema_id = "_fallback"
 
                     # P2.5-A.5: TemplateAugmentor — 서식 템플릿으로 PP-DocLayout 누락 보완
-                    aug_layout = self._run_step(
+                    # 반환: (augmented_layout, fixed_values)
+                    aug_result = self._run_step(
                         "P2.5A5", result,
                         lambda: self._get_template_augmentor().augment(
                             layout=p2_out,
@@ -803,9 +804,12 @@ class PipelineOrchestrator:
                             stats=self._new_augmentor_stats(result),
                         ),
                     )
-                    if aug_layout is not None:
-                        p2_out = aug_layout
-                        result.p2_result = aug_layout
+                    fixed_values: dict = {}
+                    if aug_result is not None:
+                        aug_layout, fixed_values = aug_result
+                        if aug_layout is not None:
+                            p2_out = aug_layout
+                            result.p2_result = aug_layout
 
                     # P2.5-B: InstructionRouter
                     instructions = self._run_step(
@@ -823,7 +827,7 @@ class PipelineOrchestrator:
                         result.p2_5c_groups = groups
 
                         if groups:
-                            # P3-B: StructuredExtractor (trace 수집)
+                            # P3-B: StructuredExtractor (trace + fixed_values 전달)
                             p3_out = self._run_step(
                                 "P3B", result,
                                 lambda: self._get_p3b().extract(
@@ -835,6 +839,7 @@ class PipelineOrchestrator:
                                     schema=schema,
                                     warnings=result.warnings,
                                     trace=result.p3b_trace,
+                                    fixed_values=fixed_values,
                                 ),
                             )
                             result.p3_result = p3_out

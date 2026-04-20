@@ -300,6 +300,97 @@ def _validate_equipment_checklist(data_or_raw) -> list[ValidationError]:
     return errors
 
 
+def _validate_bid_application(data_or_raw) -> list[ValidationError]:
+    """BID-001~004 — 입찰참가신청서 (별지 제13호 서식) 전용 룰.
+
+    Accept either an assembled dict (preferred) or a raw JSON string (fallback).
+
+    BID-001: applicant.business_reg_number 형식 NNN-NN-NNNNN (신뢰도 -0.15)
+    BID-002: applicant.corporate_reg_number 형식 NNNNN-NNNNNNN (신뢰도 -0.15, 있을 때만)
+    BID-003: submission.submission_date 비어있지 않음 (severity=MEDIUM)
+    BID-004: submission.submitter_name 비어있지 않음 (severity=MEDIUM)
+    """
+    errors: list[ValidationError] = []
+    if data_or_raw is None:
+        return errors
+    if isinstance(data_or_raw, dict):
+        data = data_or_raw
+    else:
+        if not data_or_raw:
+            return errors
+        try:
+            data = json.loads(data_or_raw)
+        except Exception:
+            return errors
+        if not isinstance(data, dict):
+            return errors
+
+    applicant = data.get("applicant") or {}
+    submission = data.get("submission") or {}
+    if not isinstance(applicant, dict):
+        applicant = {}
+    if not isinstance(submission, dict):
+        submission = {}
+
+    # BID-001: 사업자등록번호 형식 NNN-NN-NNNNN
+    biz_reg_pattern = re.compile(r"^\d{3}-\d{2}-\d{5}$")
+    biz_reg = applicant.get("business_reg_number")
+    if isinstance(biz_reg, str) and biz_reg.strip():
+        if not biz_reg_pattern.match(biz_reg.strip()):
+            errors.append(ValidationError(
+                error_id="bid_001",
+                error_type=ValidationErrorType.CODE_FORMAT,
+                severity=Severity.HIGH,
+                field_ref="applicant.business_reg_number",
+                expected="NNN-NN-NNNNN",
+                actual=str(biz_reg),
+                message=f"BID-001: 사업자등록번호 형식 불일치: {biz_reg}",
+            ))
+
+    # BID-002: 법인등록번호 형식 NNNNN-NNNNNNN (있을 때만)
+    corp_reg_pattern = re.compile(r"^\d{5}-\d{7}$")
+    corp_reg = applicant.get("corporate_reg_number")
+    if isinstance(corp_reg, str) and corp_reg.strip():
+        if not corp_reg_pattern.match(corp_reg.strip()):
+            errors.append(ValidationError(
+                error_id="bid_002",
+                error_type=ValidationErrorType.CODE_FORMAT,
+                severity=Severity.HIGH,
+                field_ref="applicant.corporate_reg_number",
+                expected="NNNNN-NNNNNNN",
+                actual=str(corp_reg),
+                message=f"BID-002: 법인등록번호 형식 불일치: {corp_reg}",
+            ))
+
+    # BID-003: submission_date 존재
+    sub_date = submission.get("submission_date")
+    if not (isinstance(sub_date, str) and sub_date.strip()):
+        errors.append(ValidationError(
+            error_id="bid_003",
+            error_type=ValidationErrorType.MISSING_FIELD,
+            severity=Severity.MEDIUM,
+            field_ref="submission.submission_date",
+            expected="non-empty string",
+            actual=str(sub_date),
+            message="BID-003: submission.submission_date가 비어있음",
+        ))
+
+    # BID-004: submitter_name 비어있지 않음
+    sub_name = submission.get("submitter_name")
+    if not (isinstance(sub_name, str) and sub_name.strip()):
+        errors.append(ValidationError(
+            error_id="bid_004",
+            error_type=ValidationErrorType.MISSING_FIELD,
+            severity=Severity.MEDIUM,
+            field_ref="submission.submitter_name",
+            expected="non-empty string",
+            actual=str(sub_name),
+            message="BID-004: submission.submitter_name이 비어있음",
+        ))
+
+    return errors
+
+
 def _normalize_rank_in_assembled(vlm_result: VLMResult) -> None:
     """assembled_json의 writer.rank 정규화 + fields[writer_block] blob 동기화.
 
@@ -356,9 +447,15 @@ FIELD_WEIGHTS: dict[str, float] = {
 }
 
 # 메타/분석 키 — 신뢰도 산출 대상에서 제외.
+#  - analysis / overall_confidence / low_confidence_fields: VLM 자가 평가 메타
+#  - result_confidence: checklist_items 자체 루프에서 별도 처리
+#  - aggregator_blob: S7 디버깅용 blob
+#  - fixed_content: TemplateAugmentor가 주입한 인쇄 고정 텍스트 — VLM 추출이 아니므로
+#                   신뢰도 산출 대상에서 제외 (판독 신뢰도 개념 무관)
 _TRAVERSAL_SKIP_KEYS: frozenset[str] = frozenset({
     "analysis", "result_confidence", "aggregator_blob",
     "low_confidence_fields", "overall_confidence",
+    "fixed_content",
 })
 
 
@@ -561,6 +658,9 @@ class P4Validator:
                 payload = vlm_result.assembled_json or vlm_result.raw_json
                 all_errors.extend(_validate_equipment_checklist(payload))
                 _normalize_rank_in_assembled(vlm_result)
+            elif form_type == "bid_application":
+                payload = vlm_result.assembled_json or vlm_result.raw_json
+                all_errors.extend(_validate_bid_application(payload))
 
         # error_id 재번호 부여
         for i, err in enumerate(all_errors):

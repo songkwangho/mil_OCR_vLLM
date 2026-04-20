@@ -20,6 +20,7 @@ FORM_TYPE_LABELS: dict[FormType, str] = {
     FormType.HANDOVER_DOC: "인수인계서",
     FormType.INSPECTION_REPORT: "검사보고서",
     FormType.EQUIPMENT_CHECKLIST: "전비품 확인서 작성 점검표",
+    FormType.BID_APPLICATION: "입찰참가신청서",
     FormType.UNKNOWN: "군수 서식 유형 불명",
 }
 

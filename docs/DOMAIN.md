@@ -16,6 +16,7 @@
 | `handover_doc` | 인수인계서 | military | 조건부 | |
 | `inspection_report` | 검사보고서 | military | 조건부 | |
 | `equipment_checklist` | 전비품 확인서 작성 점검표 | military | 조건부 | O/X 점검결과 6항목 추출 |
+| `bid_application` | 입찰참가신청서 | military | 조건부 | 별지 제13호 서식(국내/국제), 방위사업청 조달 |
 | `unknown` | 군수 서식 유형 불명 | military | 조건부 | `_fallback.json` 사용 |
 | `other` | 군수 서식 아님 | other → Skill Registry | **없음** | 범용 OCR, 군수 룰 미적용 |
 
@@ -118,6 +119,42 @@ P5 직렬화 → P6 DB 적재
 - `"X"` — 해당없음 / 부적합 (X자 수기 표시)
 - `"?"` — 판독불가 (검토 큐 적재 대상)
 
+### 2-6. 입찰참가신청서 (bid_application)
+
+**서식 식별자**: 별지 제13호 서식 — 군수품조달관리규정(방위사업청) / 국내·국제 공통.
+
+| 필드명 | 데이터 타입 | 설명 | 검증 룰 |
+|--------|-----------|------|---------|
+| `doc_number` | text | 제 호 — 문서번호 수기 기입란 | — |
+| `applicant.company_name` | text | 상호 또는 법인명칭 | 필수 |
+| `applicant.corporate_reg_number` | code | 법인등록번호 | NNNNN-NNNNNNN (BID-002) |
+| `applicant.representative` | text | 대표자 성명 | 필수 |
+| `applicant.representative_dob` | text | 대표자 생년월일 | — |
+| `applicant.address` | text | 주소 | — |
+| `applicant.phone` | text | 전화번호 | — |
+| `applicant.business_location` | text | 사업장소재지 | — |
+| `applicant.business_reg_number` | code | 사업자등록번호 | NNN-NN-NNNNN (BID-001, 필수) |
+| `bid_info.announcement_number` | text | 입찰공고(지명)번호 | 필수 |
+| `bid_info.bid_date` | date | 입찰일자 | 필수 |
+| `bid_info.bid_name` | text | 입찰건명 | 필수 |
+| `bid_info.item_code` | text | 품목코드 | — |
+| `bid_info.industry_class_number` | text | 해당산업분류번호 | — |
+| `bid_info.acquisition_date` | date | 취득일 | — |
+| `bid_info.issuing_office` | text | 발행관서 | — |
+| `agent.name` | text | 대리인 성명 | — |
+| `agent.dob` | text | 대리인 생년월일 | — |
+| `agent.seal_present` | boolean | 사용인감 날인 존재 여부 | — |
+| `submission.submission_date` | date | 신청일자 | 필수 (BID-003) |
+| `submission.submitter_name` | text | 신청인 대표자 성명 | 필수 (BID-004) |
+| `seal_verification.issuing_office` | text | 인감증명 발급관서 | — |
+| `seal_verification.issue_number` | code | 발급번호 | — |
+| `seal_verification.issue_date` | date | 발급일자 | — |
+| `seal_verification.verifier` | text | 화인자 | — |
+| `seal_verification.signature_present` | boolean | 서명/날인 존재 여부 | — |
+| `form_identifier` | text | 서식 식별자 | 예: "별지 제13호 서식" |
+
+**블록 단위 sub-schema 분해**: TemplateAugmentor가 신청인·입찰개요·대리인·신청·인감증명확인을 블록 field_key로 부여하여 VLM이 블록 단위 구조화 JSON을 반환, Assembler가 x-assembly-rules로 재조립.
+
 ---
 
 ## 3. 코드 체계
@@ -147,7 +184,8 @@ src/domain/schemas/
 │   ├── inventory_sheet.json
 │   ├── handover_doc.json
 │   ├── inspection_report.json
-│   ├── equipment_checklist.json ← 전비품 확인서 작성 점검표 (신규)
+│   ├── equipment_checklist.json ← 전비품 확인서 작성 점검표
+│   ├── bid_application.json     ← 입찰참가신청서 (별지 제13호 서식)
 │   ├── _fallback.json           ← unknown (군수 서식 유형 불명)
 │   ├── _general.json            ← other 범용 (기존 단순 key-value)
 │   └── official_document.json   ← other 공문서 전용
@@ -334,7 +372,8 @@ configs/instruction_examples/
 ├── inventory_sheet.yaml
 ├── handover_doc.yaml
 ├── inspection_report.yaml
-├── equipment_checklist.yaml   ← 신규
+├── equipment_checklist.yaml
+├── bid_application.yaml       ← 신규 (별지 제13호 서식)
 └── _fallback.yaml
 ```
 
@@ -372,6 +411,10 @@ example_response: |
 | CHK-002 | equipment_checklist | `item_number` 값이 1~6 순서대로 존재 | severity=HIGH, 신뢰도 -0.10 |
 | CHK-003 | equipment_checklist | `result` 값이 "O" / "X" / "?" 중 하나 | severity=HIGH, 신뢰도 -0.15 |
 | CHK-004 | equipment_checklist | `writer.name` 비어있지 않음 | severity=MEDIUM |
+| BID-001 | bid_application | `applicant.business_reg_number` 형식 NNN-NN-NNNNN | severity=HIGH, 신뢰도 -0.15 |
+| BID-002 | bid_application | `applicant.corporate_reg_number` 형식 NNNNN-NNNNNNN | severity=HIGH, 신뢰도 -0.15 |
+| BID-003 | bid_application | `submission.submission_date` 비어있지 않음 | severity=MEDIUM |
+| BID-004 | bid_application | `submission.submitter_name` 비어있지 않음 | severity=MEDIUM |
 
 ### 6-2. other 경로 룰
 

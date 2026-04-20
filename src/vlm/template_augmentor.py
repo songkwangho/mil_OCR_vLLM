@@ -21,10 +21,14 @@ from typing import Any, Optional
 
 from src.interfaces.enums import AnalysisMode, FormType, RegionType
 from src.interfaces.types import BoundingBox, LayoutRegion, LayoutResult
+from src.preprocess.bbox_utils import compute_iou
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TEMPLATE_DIR = Path("configs/form_templates")
+
+# fixed_text bbox와 PP-DocLayout region의 IoU가 이 값을 넘으면 해당 region 제거
+FIXED_TEXT_IOU_THRESHOLD = 0.5
 
 # PP region의 {CONTAINMENT_THRESHOLD}% 이상이 템플릿 bbox 내부에 있으면 소비
 CONTAINMENT_THRESHOLD = 0.7
@@ -44,6 +48,8 @@ class TemplateAugmentorStats:
     form_identifier_matched: Optional[str] = None
     template_loaded: bool = False
     skipped_reason: Optional[str] = None
+    fixed_text_count: int = 0           # fixed_text로 주입된 field_key 수
+    fixed_text_removed_count: int = 0   # fixed_text bbox와 겹쳐 제거된 PP region 수
 
 
 class TemplateAugmentor:
@@ -59,23 +65,33 @@ class TemplateAugmentor:
         form_type: FormType,
         form_identifier: Optional[str] = None,
         stats: Optional[TemplateAugmentorStats] = None,
-    ) -> LayoutResult:
+    ) -> tuple[LayoutResult, dict]:
+        """form_type + form_identifier 기반 LayoutResult 재구성.
+
+        Returns:
+            (augmented_layout, fixed_values)
+              - augmented_layout: field_key 부여된 LayoutResult
+              - fixed_values: {field_key → 인쇄 고정 텍스트 value} dict.
+                              bbox가 있는 fixed_text는 겹치는 PP region도 함께 제거.
+                              Assembler가 x-assembly-rules에 따라 assembled_json에 삽입.
+        """
         stats = stats or TemplateAugmentorStats()
+        fixed_values: dict[str, str] = {}
 
         if not form_type.is_military():
             stats.skipped_reason = "not_military"
-            return layout
+            return layout, fixed_values
 
         template = self._load_template(form_type.value)
         if template is None:
             stats.skipped_reason = "template_not_found"
-            return layout
+            return layout, fixed_values
         stats.template_loaded = True
 
-        fields, version_label = _select_version(template, form_identifier)
-        if not fields:
+        fields, fixed_texts, version_label = _select_version(template, form_identifier)
+        if not fields and not fixed_texts:
             stats.skipped_reason = "no_fields_in_template"
-            return layout
+            return layout, fixed_values
 
         stats.version_selected = version_label
         stats.form_identifier_matched = form_identifier
@@ -166,19 +182,52 @@ class TemplateAugmentor:
             if i not in used_pp_indices:
                 new_regions.append(pp_region)
 
+        # Step 3: fixed_text — 인쇄 고정 텍스트 처리
+        #  ① bbox가 있는 fixed_text → 겹치는 PP region 제거 (IoU>0.5, field_key 없는 것만)
+        #  ② field_key → value 를 fixed_values dict로 반환 (Assembler가 assembled_json에 삽입)
+        fixed_text_removed_count = 0
+        for ft in fixed_texts:
+            field_key = ft.get("field_key")
+            if not field_key:
+                continue
+            value = ft.get("value", "")
+
+            bbox_spec = ft.get("bbox")
+            ft_bbox = _extract_bbox(bbox_spec, scale_x, scale_y) if bbox_spec else None
+
+            if ft_bbox is not None:
+                remaining: list[LayoutRegion] = []
+                for region in new_regions:
+                    # field_key 부여된 region은 템플릿 field이므로 보호
+                    if region.field_key is not None:
+                        remaining.append(region)
+                        continue
+                    if compute_iou(region.bbox, ft_bbox) > FIXED_TEXT_IOU_THRESHOLD:
+                        fixed_text_removed_count += 1
+                        continue
+                    remaining.append(region)
+                new_regions = remaining
+
+            fixed_values[field_key] = value
+
         new_order = list(range(len(new_regions)))
 
         stats.augmented_count = template_driven_count
         stats.pp_matched_count = pp_matched_count
+        stats.fixed_text_count = len(fixed_values)
+        stats.fixed_text_removed_count = fixed_text_removed_count
 
         logger.info(
             "[P2.5-A.5] TemplateAugmentor: form_type=%s version=%s "
-            "template_regions=%d (pp_matched=%d, template_bbox=%d) dynamic_pp=%d",
+            "template_regions=%d (pp_matched=%d, template_bbox=%d) dynamic_pp=%d "
+            "fixed_text=%d (removed_pp=%d)",
             form_type.value, version_label,
             template_driven_count,
             pp_matched_count,
             template_driven_count - pp_matched_count,
             len(new_regions) - template_driven_count,
+            len(fixed_values),
+            fixed_text_removed_count,
         )
 
         return LayoutResult(
@@ -192,7 +241,7 @@ class TemplateAugmentor:
             merged_count=layout.merged_count,
             augmented_count=template_driven_count,
             warnings=list(layout.warnings),
-        )
+        ), fixed_values
 
     def _load_template(self, form_type_value: str) -> Optional[dict]:
         if form_type_value in self._cache:
@@ -219,17 +268,31 @@ class TemplateAugmentor:
 
 
 def _select_version(template: dict, form_identifier: Optional[str]):
+    """선택된 버전의 (fields, fixed_texts, version_label) 반환.
+
+    versions 리스트 구조와 flat 구조를 모두 지원.
+    fixed_text 섹션은 양쪽 구조 모두에서 찾는다.
+    """
     versions = template.get("versions")
     if isinstance(versions, list) and versions:
         if form_identifier:
             for ver in versions:
                 if ver.get("form_identifier") == form_identifier:
-                    return list(ver.get("fields") or []), str(ver.get("version", ""))
+                    return (
+                        list(ver.get("fields") or []),
+                        list(ver.get("fixed_text") or []),
+                        str(ver.get("version", "")),
+                    )
         first = versions[0]
-        return list(first.get("fields") or []), str(first.get("version", ""))
+        return (
+            list(first.get("fields") or []),
+            list(first.get("fixed_text") or []),
+            str(first.get("version", "")),
+        )
     fields = template.get("fields") or []
+    fixed_texts = template.get("fixed_text") or []
     version_label = str(template.get("version", "1.0"))
-    return list(fields), version_label
+    return list(fields), list(fixed_texts), version_label
 
 
 def _extract_page_size(template: dict, version_label: Optional[str]) -> Optional[tuple[int, int]]:

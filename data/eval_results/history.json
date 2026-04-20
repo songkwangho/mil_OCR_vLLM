@@ -1,5 +1,26 @@
 [
   {
+    "trial": "20260420_085703",
+    "verdict": "IMPROVED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-20T08:58:44",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260420_085703"
+  },
+  {
+    "trial": "20260420_085242",
+    "verdict": "REGRESSED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-20T08:54:27",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260420_085242"
+  },
+  {
+    "trial": "20260420_034936",
+    "verdict": "MIXED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-20T03:51:22",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260420_034936"
+  },
+  {
     "trial": "20260418_142612",
     "verdict": "NEUTRAL",
     "sample_count": 4,

@@ -78,3 +78,41 @@ fields:
     region_type: handwritten_field
     bbox: {x1: 304, y1: 2748, x2: 2292, y2: 2872}
     description: "작성자 전체 수기란 (팀명·직급·성명·서명 포함)"
+
+# 인쇄 고정 텍스트 — VLM 추론 대상에서 제외하고 Assembler가 값을 직접 삽입.
+# 주의: 점검항목 텍스트 bbox의 x2는 O/X 결과란(result_item_N, x1=2036) 직전 2030으로 설정.
+fixed_text:
+  - field_key: form_title
+    bbox: {x1: 812, y1: 440, x2: 1676, y2: 532}
+    value: "전비품 확인서 작성 점검표"
+    description: "서식 제목 인쇄 고정"
+
+  - field_key: checklist_item_1_text
+    bbox: {x1: 408, y1: 892, x2: 2030, y2: 1188}
+    value: "1. 해당 물품이 해당 계약번호에 의하여 조달되는 것인지 여부"
+    description: "점검항목 1번 인쇄 텍스트"
+
+  - field_key: checklist_item_2_text
+    bbox: {x1: 408, y1: 1188, x2: 2030, y2: 1484}
+    value: "2. 계약업체의 명칭과 주소는 계약서상의 것과 동일한지 여부"
+    description: "점검항목 2번 인쇄 텍스트"
+
+  - field_key: checklist_item_3_text
+    bbox: {x1: 408, y1: 1488, x2: 2030, y2: 1788}
+    value: "3. (당초) 계약번호, 품명, 수량, 규격이 납품서와 동일한지 여부"
+    description: "점검항목 3번 인쇄 텍스트"
+
+  - field_key: checklist_item_4_text
+    bbox: {x1: 408, y1: 1800, x2: 2030, y2: 2088}
+    value: "4. 해당 품목이 「군수품관리법 시행령」에 의한 통제품목인지 여부"
+    description: "점검항목 4번 인쇄 텍스트"
+
+  - field_key: checklist_item_5_text
+    bbox: {x1: 408, y1: 2092, x2: 2030, y2: 2396}
+    value: "5. 방위사업청이 외국으로부터 수입하는 군수품인지 여부"
+    description: "점검항목 5번 인쇄 텍스트"
+
+  - field_key: checklist_item_6_text
+    bbox: {x1: 408, y1: 2400, x2: 2030, y2: 2696}
+    value: "6. 수입대행계약을 체결하지 않음에도 수입대행 방식으로 조달하는지 여부"
+    description: "점검항목 6번 인쇄 텍스트"
