@@ -1,0 +1,70 @@
+# Layer 2 — bid_application 전용 교차 검증 규칙
+# 기존 validator.py _validate_bid_application (BID-001~004) 이관 + 추가.
+
+rules:
+  - rule_id: bid_001
+    type: REGEX_MATCH
+    field: applicant.business_reg_number
+    pattern: '^\d{3}-\d{2}-\d{5}$'
+    error_type: code_format
+    severity: high
+    penalty: -0.15
+    message: "사업자등록번호 형식 불일치 (NNN-NN-NNNNN)"
+
+  - rule_id: bid_002
+    type: REGEX_MATCH
+    field: applicant.corporate_reg_number
+    pattern: '^\d{5}-\d{7}$'
+    error_type: code_format
+    severity: high
+    penalty: -0.15
+    message: "법인등록번호 형식 불일치 (NNNNN-NNNNNNN)"
+
+  - rule_id: bid_003
+    type: NOT_EMPTY
+    field: submission.submission_date
+    error_type: missing_field
+    severity: medium
+    penalty: -0.10
+    message: "신청일자 누락"
+
+  - rule_id: bid_004
+    type: NOT_EMPTY
+    field: submission.submitter_name
+    error_type: missing_field
+    severity: medium
+    penalty: -0.10
+    message: "신청인 성명 누락"
+
+  - rule_id: bid_date_001
+    type: DATE_ORDER
+    fields: [seal_verification.issue_date, submission.submission_date]
+    error_type: date_logic
+    severity: medium
+    penalty: -0.10
+    message: "인감증명 발급일이 신청일보다 이후임"
+
+  - rule_id: bid_date_002
+    type: DATE_ORDER
+    fields: [submission.submission_date, bid_info.bid_date]
+    error_type: date_logic
+    severity: medium
+    penalty: -0.10
+    message: "신청일이 입찰일보다 이후임"
+
+  - rule_id: bid_person_001
+    type: NAME_MATCH
+    fields: [applicant.representative, submission.submitter_name]
+    error_type: format
+    severity: low
+    penalty: -0.05
+    message: "대표자 성명과 신청인 성명 불일치"
+
+  - rule_id: bid_addr_001
+    type: ADDR_CONTAINS
+    field_value: applicant.address
+    field_contained: applicant.business_location
+    error_type: format
+    severity: low
+    penalty: -0.05
+    message: "사업장소재지가 주소에 포함되지 않음"

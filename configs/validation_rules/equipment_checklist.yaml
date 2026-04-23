@@ -1,0 +1,40 @@
+# Layer 2 — equipment_checklist 전용 교차 검증 규칙
+# 기존 validator.py _validate_equipment_checklist (CHK-001~004) 이관.
+
+rules:
+  - rule_id: chk_001
+    type: ARRAY_LENGTH
+    field: checklist_items
+    expected_length: 6
+    error_type: missing_field
+    severity: high
+    penalty: -0.20
+    message: "checklist_items 배열 길이 ≠ 6"
+
+  - rule_id: chk_002
+    type: ARRAY_SEQUENCE
+    field: checklist_items
+    key: item_number
+    expected_sequence: [1, 2, 3, 4, 5, 6]
+    error_type: format
+    severity: high
+    penalty: -0.10
+    message: "item_number 1~6 순서 불일치"
+
+  - rule_id: chk_003
+    type: ARRAY_ENUM
+    field: checklist_items
+    key: result
+    allowed_values: ["O", "X", "?"]
+    error_type: format
+    severity: high
+    penalty: -0.15
+    message: "result 값이 O/X/? 외 값 포함"
+
+  - rule_id: chk_004
+    type: NOT_EMPTY
+    field: writer.name
+    error_type: missing_field
+    severity: medium
+    penalty: -0.10
+    message: "작성자 성명 누락"

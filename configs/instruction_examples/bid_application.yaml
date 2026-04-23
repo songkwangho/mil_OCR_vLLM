@@ -1,19 +1,37 @@
 # 1-shot 예시 — 입찰참가신청서 (별지 제13호 서식)
-# 방위사업청 군수품조달관리규정 / 국내·국제 공통 서식.
+# 필드별 크롭 전환(2026-04-22)에 따라 scalar 응답 단위 예시로 단순화.
+# 실제 샘플과 의도적으로 다른 가상 데이터를 사용하여 평가 오염 방지.
 form_type: bid_application
-region_type: handwritten_field
-example_description: "입찰참가신청서 신청인 섹션 수기 기입란"
-example_response: |
-  {
-    "analysis": "수기 필체 보통, 법인등록번호·사업자등록번호 형식 확인됨, 일부 글자 흐릿하나 판독 가능",
-    "applicant": {
-      "company_name": "(주) 인패닝",
-      "corporate_reg_number": "11011-2745676",
-      "representative": "박 준형",
-      "representative_dob": "1976년 1월 03일",
-      "address": "서울 동대문구 가능대로 123, 15층",
-      "phone": "02-123-4567",
-      "business_location": "서울서",
-      "business_reg_number": "137-63-12345"
-    }
-  }
+
+common_rules: |
+  CRITICAL RULES:
+  1. Extract ONLY what is physically written in the image.
+  2. Do NOT infer, guess, or substitute with similar-sounding words.
+  3. If a character is unclear, mark it as [?].
+  4. Read every character independently.
+  Similar characters: 숫자 1/7, 6/0, 3/8 / 한글 받침 ㄱ/ㄴ/ㄹ/ㅅ
+
+examples:
+  - field_key: company_name
+    example_response: "(주) 한국방산기술"
+
+  - field_key: corporate_reg_number
+    example_response: "13456-7891234"
+
+  - field_key: address
+    example_response: "경기도 성남시 분당구 판교로 45, 8층"
+
+  - field_key: bid_name
+    example_response: "육군 장갑차 부품 정비 장비 도입 사업"
+
+  - field_key: acquisition_date
+    example_response: "2022년 06월 03일"
+
+  - field_key: agent_name
+    example_response: "최민준"
+
+  - field_key: seal_issuing_office
+    example_response: "경기도 성남시 분당구"
+
+  - field_key: seal_issue_number
+    example_response: "2023-SN-98765"

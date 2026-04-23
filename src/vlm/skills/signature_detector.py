@@ -8,6 +8,7 @@ PIPELINE.md §4-7 구현.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -85,6 +86,10 @@ class SignatureDetector:
             raw_response=raw,
             warnings=[] if raw else ["empty_response"],
         )
+
+    async def run_async(self, task: SkillTask) -> SkillResult:
+        """동기 `run()`을 스레드풀에서 실행 — 동일 결과, 이벤트 루프 비차단."""
+        return await asyncio.to_thread(self.run, task)
 
 
 def _parse_signature_json(raw: str) -> tuple[bool, float]:

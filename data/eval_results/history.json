@@ -1,5 +1,103 @@
 [
   {
+    "trial": "20260423_034913",
+    "verdict": "REGRESSED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-23T03:50:17",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260423_034913"
+  },
+  {
+    "trial": "20260423_034655",
+    "verdict": "IMPROVED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-23T03:47:58",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260423_034655"
+  },
+  {
+    "trial": "20260423_011040",
+    "verdict": "REGRESSED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-23T01:11:43",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260423_011040"
+  },
+  {
+    "trial": "20260423_010814",
+    "verdict": "NEUTRAL",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-23T01:09:20",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260423_010814"
+  },
+  {
+    "trial": "20260422_084816",
+    "verdict": "IMPROVED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-22T08:49:21",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260422_084816"
+  },
+  {
+    "trial": "20260422_084430",
+    "verdict": "NEUTRAL",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-22T08:45:37",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260422_084430"
+  },
+  {
+    "trial": "20260422_082427",
+    "verdict": "REGRESSED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-22T08:25:30",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260422_082427"
+  },
+  {
+    "trial": "20260422_060551",
+    "verdict": "REGRESSED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-22T06:06:52",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260422_060551"
+  },
+  {
+    "trial": "20260422_060142",
+    "verdict": "MIXED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-22T06:02:49",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260422_060142"
+  },
+  {
+    "trial": "20260422_045100",
+    "verdict": "MIXED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-22T04:52:55",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260422_045100"
+  },
+  {
+    "trial": "20260421_165628",
+    "verdict": "NEUTRAL",
+    "sample_count": 4,
+    "evaluated_at": "2026-04-21T16:57:05",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260421_165628"
+  },
+  {
+    "trial": "20260421_165249",
+    "verdict": "MIXED",
+    "sample_count": 4,
+    "evaluated_at": "2026-04-21T16:53:28",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260421_165249"
+  },
+  {
+    "trial": "20260420_111555",
+    "verdict": "MIXED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-20T11:17:26",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260420_111555"
+  },
+  {
+    "trial": "20260420_102811",
+    "verdict": "IMPROVED",
+    "sample_count": 5,
+    "evaluated_at": "2026-04-20T10:29:51",
+    "pipeline_output_dir": "/workspace/data/pipeline_outputs/20260420_102811"
+  },
+  {
     "trial": "20260420_085703",
     "verdict": "IMPROVED",
     "sample_count": 5,

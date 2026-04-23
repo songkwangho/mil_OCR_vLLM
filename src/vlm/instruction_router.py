@@ -120,6 +120,21 @@ _OCR_HINT_TEMPLATE = (
     "단, OCR 결과가 명백히 틀린 경우에는 이미지를 보고 직접 판단하세요."
 )
 
+# bid_application 서식 — 구체적 치환 사례를 박아 반-환각 유도.
+# common_rules (YAML)과 중복되지 않고 상호 보완: YAML은 광범위한 규칙 선언,
+# 아래 블록은 도로명·건명 치환·날짜 누락 등 실제 관찰된 오인식 유형 차단.
+BID_APPLICATION_ANTI_HALLUCINATION = (
+    "\n\n[Anti-Hallucination Warning]\n"
+    "CRITICAL: Extract ONLY what is physically written in the image.\n"
+    "- Do NOT substitute with similar-sounding place names "
+    "(e.g., do not replace 테헤란로 with 태릉로, 판교로 with 반교로).\n"
+    "- Do NOT infer company names, project names, or document titles from context.\n"
+    "- Do NOT omit any part of dates — year/month/day must ALL be included "
+    "(e.g., \"2023년 01월 10일\" not \"2023년 01월\").\n"
+    "- For unclear characters: use [?] instead of guessing.\n"
+    "- Read each character stroke independently."
+)
+
 
 class InstructionRouter:
     """form_type 인식 VLM instruction 라우터.
@@ -151,7 +166,12 @@ class InstructionRouter:
 
         # 1-shot 예시 로드 (prefix caching 효율을 위해 정적으로 캐시)
         self._examples_dir = self._resolve_path(examples_dir)
-        self._examples: dict[str, dict] = {}  # form_type → {description, response}
+        # form_type → {description, response} (legacy flat 1-shot)
+        self._examples: dict[str, dict] = {}
+        # form_type → {field_key → {description, response}} (신규 per-field_key)
+        self._field_key_examples: dict[str, dict[str, dict]] = {}
+        # form_type → common_rules 문자열 (신규 포맷 전용)
+        self._common_rules: dict[str, str] = {}
         self._load_examples()
 
     # ── form_type 인식 라우팅 API ──────────
@@ -249,8 +269,8 @@ class InstructionRouter:
         if region_field_key and full_schema and full_schema.get("x-assembly-rules"):
             json_schema = self._extract_sub_schema(region_field_key, full_schema)
             # field_key 전용 짧은 instruction — full-shot 예시는 오히려 혼란을 줌
-            user_instruction = _build_field_key_instruction(
-                region_field_key, json_schema
+            user_instruction = self._build_field_key_instruction(
+                region_field_key, json_schema, form_type=form_type,
             )
         else:
             json_schema = full_schema
@@ -279,7 +299,11 @@ class InstructionRouter:
         - result_item_N (1~6): x-checklist-item-schema (또는 checklist_items.items) +
           item_number const=N
         - writer_block: properties.writer
+        - agent_seal: seal_present boolean 단일 필드만 요청 (전체 agent object 전달 금지)
         - 그 외: x-assembly-rules 경로의 top-level properties 또는 properties[field_key]
+
+        path가 "parent.leaf" 형태로 단일 leaf를 가리키면 `parent` 전체가 아닌
+        해당 leaf 필드 schema만 담은 sub-schema를 생성해 VLM에 과한 맥락을 주지 않는다.
         """
         import copy
         import re
@@ -304,7 +328,23 @@ class InstructionRouter:
 
         path = assembly_rules.get(field_key)
         if path:
-            top_key = path.split(".")[0]
+            parts = path.split(".")
+            top_key = parts[0]
+            top_schema = properties.get(top_key)
+            # "parent.leaf" — leaf 필드만 가진 단일 속성 sub-schema 생성
+            if (
+                len(parts) >= 2
+                and isinstance(top_schema, dict)
+                and isinstance(top_schema.get("properties"), dict)
+            ):
+                leaf_key = parts[-1]
+                leaf_schema = top_schema["properties"].get(leaf_key)
+                if isinstance(leaf_schema, dict):
+                    return {
+                        "type": "object",
+                        "properties": {leaf_key: copy.deepcopy(leaf_schema)},
+                        "required": [leaf_key],
+                    }
             if top_key in properties:
                 return properties[top_key]
 
@@ -389,6 +429,10 @@ class InstructionRouter:
     def _load_examples(self) -> None:
         """configs/instruction_examples/*.yaml 1-shot 예시 로드.
 
+        두 가지 YAML 포맷을 모두 지원:
+          - Legacy flat: example_description + example_response (form_type 단일 예시)
+          - 신규 per-field_key: common_rules + examples: list[{field_key, ...}]
+
         prefix caching 최적화를 위해 정적으로 캐시합니다. 서식별 예시가
         system_prompt 이후 user_instruction에 포함되면 동일 유형 요청에서
         KV 블록이 재사용되어 TTFT가 3~10배 단축됩니다.
@@ -411,18 +455,48 @@ class InstructionRouter:
                     encoding="utf-8",
                 ) as f:
                     data = yaml.safe_load(f) or {}
-                self._examples[form_type] = {
-                    "description": data.get("example_description", ""),
-                    "response": data.get("example_response", ""),
-                }
+
+                # 신규 포맷 감지
+                examples_list = data.get("examples")
+                common_rules = data.get("common_rules")
+
+                if isinstance(examples_list, list) and examples_list:
+                    fk_map: dict[str, dict] = {}
+                    for entry in examples_list:
+                        if not isinstance(entry, dict):
+                            continue
+                        fk = entry.get("field_key")
+                        if not fk:
+                            continue
+                        fk_map[fk] = {
+                            "description": entry.get("example_description", ""),
+                            "response": entry.get("example_response", ""),
+                        }
+                    if fk_map:
+                        self._field_key_examples[form_type] = fk_map
+                    if isinstance(common_rules, str) and common_rules.strip():
+                        self._common_rules[form_type] = common_rules.strip()
+                    # legacy lookup 대비: 첫 예시를 default로도 등록
+                    first = next(iter(fk_map.values()), None)
+                    if first:
+                        self._examples[form_type] = first
+                else:
+                    # Legacy flat 포맷
+                    self._examples[form_type] = {
+                        "description": data.get("example_description", ""),
+                        "response": data.get("example_response", ""),
+                    }
             except Exception as e:
                 logger.warning(
                     "InstructionRouter: 예시 로드 실패 (%s): %s", filename, e
                 )
 
         logger.info(
-            "InstructionRouter: %d개 1-shot 예시 로드 완료 (%s)",
+            "InstructionRouter: %d개 1-shot 예시 로드 완료 — "
+            "field_key별 예시 %d form_type, common_rules %d form_type (%s)",
             len(self._examples),
+            len(self._field_key_examples),
+            len(self._common_rules),
             self._examples_dir,
         )
 
@@ -456,50 +530,84 @@ class InstructionRouter:
         )
 
 
-def _build_field_key_instruction(field_key: str, sub_schema: dict) -> str:
-    """field_key 전용 VLM 지시문.
+    def _build_field_key_instruction(
+        self,
+        field_key: str,
+        sub_schema: dict,
+        form_type: Optional[FormType] = None,
+    ) -> str:
+        """field_key 전용 VLM 지시문.
 
-    TemplateAugmentor가 부여한 field_key에 대해, full-schema 1-shot 없이
-    sub-schema만을 따르는 간결한 지시문을 생성.
-    """
-    import json as _json
-    import re
+        TemplateAugmentor가 부여한 field_key에 대해, full-schema 1-shot 없이
+        sub-schema만을 따르는 간결한 지시문을 생성한다.
 
-    m = re.match(r"result_item_(\d+)$", field_key)
-    if m:
-        n = int(m.group(1))
-        return (
-            f"이 크롭 이미지는 전비품 확인서 점검항목 {n}번의 점검결과 칸(O/X) 입니다.\n"
-            "수기로 표시된 기호만 판단하여 다음 JSON Schema에 맞춰 출력하세요.\n"
-            "result 값은 반드시 \"O\", \"X\", \"?\" 중 하나여야 합니다.\n"
-            f"item_number는 반드시 {n} 이어야 합니다.\n\n"
+        form_type 기반 추가 주입:
+          - common_rules (YAML): bid_application 등 신규 포맷 form에서 로드된 규칙
+          - field_key별 1-shot 예시 (YAML): 동일 field_key 엔트리 존재 시 부착
+          - form 특화 anti-hallucination 블록: 예) bid_application
+        """
+        import json as _json
+        import re
+
+        form_value = form_type.value if form_type else None
+
+        def _attach_extras(base: str) -> str:
+            extras = []
+            if form_value:
+                common = self._common_rules.get(form_value)
+                if common:
+                    extras.append(f"\n\n[Common Rules]\n{common}")
+                example = (self._field_key_examples
+                           .get(form_value, {})
+                           .get(field_key))
+                if example:
+                    desc = (example.get("description") or "").strip()
+                    resp = (example.get("response") or "").strip()
+                    parts = ["\n\n[예시]"]
+                    if desc:
+                        parts.append(desc)
+                    parts.append("예시 결과:")
+                    parts.append(resp)
+                    extras.append("\n".join(parts))
+            if form_type == FormType.BID_APPLICATION:
+                extras.append(BID_APPLICATION_ANTI_HALLUCINATION)
+            return base + "".join(extras)
+
+        m = re.match(r"result_item_(\d+)$", field_key)
+        if m:
+            n = int(m.group(1))
+            return _attach_extras(
+                f"이 크롭 이미지는 전비품 확인서 점검항목 {n}번의 점검결과 칸(O/X) 입니다.\n"
+                "수기로 표시된 기호만 판단하여 다음 JSON Schema에 맞춰 출력하세요.\n"
+                "result 값은 반드시 \"O\", \"X\", \"?\" 중 하나여야 합니다.\n"
+                f"item_number는 반드시 {n} 이어야 합니다.\n\n"
+                "[Schema]\n"
+                f"{_json.dumps(sub_schema, ensure_ascii=False, indent=2)}\n\n"
+                "추가 설명, 다른 필드, 코드 블록 표시 없이 JSON 객체 하나만 출력하세요."
+            )
+        if field_key == "writer_block":
+            return _attach_extras(
+                "이 크롭 이미지는 전비품 확인서 작성자 정보(팀명·직급·성명·서명)를 포함합니다.\n"
+                "다음 JSON Schema에 맞춰 필드를 추출하세요. 서명이 존재하면 signature_present=true 입니다.\n\n"
+                "[Schema]\n"
+                f"{_json.dumps(sub_schema, ensure_ascii=False, indent=2)}\n\n"
+                "다른 키를 추가하지 말고 schema 그대로 JSON만 출력하세요."
+            )
+        if field_key == "document_date":
+            return _attach_extras(
+                "이 크롭 이미지는 전비품 확인서 작성 일자(수기)입니다.\n"
+                "날짜 문자열만 JSON 문자열 리터럴로 출력하세요. 예: \"2026년 4월 15일\"\n"
+                "객체·배열·코드블록 없이 문자열 하나만 반환하세요."
+            )
+        if field_key == "form_identifier":
+            return _attach_extras(
+                "이 크롭 이미지는 서식 식별자 텍스트입니다. 예: \"별지 제3-2호 서식\"\n"
+                "문자열 리터럴만 JSON 형식으로 출력하세요."
+            )
+        return _attach_extras(
+            f"이 영역의 내용을 다음 JSON Schema에 맞춰 출력하세요.\n"
+            f"field_key: {field_key}\n\n"
             "[Schema]\n"
             f"{_json.dumps(sub_schema, ensure_ascii=False, indent=2)}\n\n"
-            "추가 설명, 다른 필드, 코드 블록 표시 없이 JSON 객체 하나만 출력하세요."
+            "스키마 외의 키를 추가하지 마세요."
         )
-    if field_key == "writer_block":
-        return (
-            "이 크롭 이미지는 전비품 확인서 작성자 정보(팀명·직급·성명·서명)를 포함합니다.\n"
-            "다음 JSON Schema에 맞춰 필드를 추출하세요. 서명이 존재하면 signature_present=true 입니다.\n\n"
-            "[Schema]\n"
-            f"{_json.dumps(sub_schema, ensure_ascii=False, indent=2)}\n\n"
-            "다른 키를 추가하지 말고 schema 그대로 JSON만 출력하세요."
-        )
-    if field_key == "document_date":
-        return (
-            "이 크롭 이미지는 전비품 확인서 작성 일자(수기)입니다.\n"
-            "날짜 문자열만 JSON 문자열 리터럴로 출력하세요. 예: \"2026년 4월 15일\"\n"
-            "객체·배열·코드블록 없이 문자열 하나만 반환하세요."
-        )
-    if field_key == "form_identifier":
-        return (
-            "이 크롭 이미지는 서식 식별자 텍스트입니다. 예: \"별지 제3-2호 서식\"\n"
-            "문자열 리터럴만 JSON 형식으로 출력하세요."
-        )
-    return (
-        f"이 영역의 내용을 다음 JSON Schema에 맞춰 출력하세요.\n"
-        f"field_key: {field_key}\n\n"
-        "[Schema]\n"
-        f"{_json.dumps(sub_schema, ensure_ascii=False, indent=2)}\n\n"
-        "스키마 외의 키를 추가하지 마세요."
-    )

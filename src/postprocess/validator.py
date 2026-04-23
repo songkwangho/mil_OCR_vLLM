@@ -27,7 +27,7 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
-from src.interfaces.enums import ProcessingPath, Severity, ValidationErrorType
+from src.interfaces.enums import FormType, ProcessingPath, Severity, ValidationErrorType
 from src.interfaces.types import (
     FieldValue,
     RecognizedTable,
@@ -35,6 +35,9 @@ from src.interfaces.types import (
     ValidatedResult,
     VLMResult,
 )
+from src.postprocess.cross_field_validator import CrossFieldValidator
+from src.postprocess.domain_dict_corrector import DomainDictCorrector
+from src.postprocess.field_pattern_validator import FieldPatternValidator
 from src.vlm.logprobs_scorer import (
     PENALTY_ARITHMETIC,
     PENALTY_CODE_FORMAT,
@@ -61,151 +64,36 @@ FALLBACK_MAX_OVERALL_CONFIDENCE = 0.70
 
 
 # ─────────────────────────────────────────────
-#  검증 규칙 실행
+#  검증 규칙 실행 — 하위호환 shim
+#
+#  Layer 1/2 엔진(FieldPatternValidator, CrossFieldValidator)이 실제 검증을 수행한다.
+#  과거 호출자(단위 테스트, 외부 스크립트 등)가 직접 참조해 온 `_validate_*` 함수들은
+#  엔진 API로 라우팅하는 thin wrapper로만 남긴다.
 # ─────────────────────────────────────────────
 
+# 공용 엔진 인스턴스 (프로세스 수명 동안 재사용)
+_FIELD_PATTERN_VALIDATOR = FieldPatternValidator()
+_CROSS_FIELD_VALIDATOR = CrossFieldValidator()
+_DOMAIN_DICT_CORRECTOR = DomainDictCorrector()
+
+
 def _validate_arithmetic(fields: list[FieldValue]) -> list[ValidationError]:
-    """산술 정합성 검증: 합계 == 수량 × 단가."""
-    errors: list[ValidationError] = []
-    field_map = {f.field_key: f for f in fields}
+    """(deprecated) Layer 1 + Layer 2 엔진이 산술 검증을 담당.
 
-    # items 배열 내부 검증 (JSON 배열은 items 필드에 직렬화)
-    items_field = field_map.get("items")
-    if items_field:
-        try:
-            items = json.loads(items_field.corrected_value)
-            if isinstance(items, list):
-                for i, item in enumerate(items):
-                    if not isinstance(item, dict):
-                        continue
-                    qty = item.get("quantity")
-                    price = item.get("unit_price")
-                    total = item.get("total")
-                    if qty is not None and price is not None and total is not None:
-                        try:
-                            expected = int(qty) * int(price)
-                            actual = int(total)
-                            if expected != actual:
-                                errors.append(ValidationError(
-                                    error_id=f"ve_{len(errors)+1:04d}",
-                                    error_type=ValidationErrorType.ARITHMETIC,
-                                    severity=Severity.CRITICAL,
-                                    field_ref=f"items[{i}].total",
-                                    expected=str(expected),
-                                    actual=str(actual),
-                                    message=f"합계 불일치: {qty} × {price} = {expected}, 실제 {actual}",
-                                ))
-                        except (ValueError, TypeError):
-                            pass
-        except Exception:
-            pass
-
-    # grand_total 검증
-    grand_total_field = field_map.get("grand_total")
-    if grand_total_field and items_field:
-        try:
-            items = json.loads(items_field.corrected_value)
-            if isinstance(items, list):
-                expected_total = sum(
-                    int(item.get("total", 0))
-                    for item in items
-                    if isinstance(item, dict) and item.get("total") is not None
-                )
-                try:
-                    actual_total = int(grand_total_field.corrected_value)
-                    if expected_total != actual_total:
-                        errors.append(ValidationError(
-                            error_id=f"ve_{len(errors)+1:04d}",
-                            error_type=ValidationErrorType.ARITHMETIC,
-                            severity=Severity.CRITICAL,
-                            field_ref="grand_total",
-                            expected=str(expected_total),
-                            actual=str(actual_total),
-                            message=f"총계 불일치: SUM(품목별 합계)={expected_total}, 실제 {actual_total}",
-                        ))
-                except (ValueError, TypeError):
-                    pass
-        except Exception:
-            pass
-
-    return errors
+    과거 호출자 호환용 shim — 엔진이 assembled_json 기반으로 처리하므로
+    fields[] 전용 호출에선 아무것도 반환하지 않는다.
+    """
+    return []
 
 
 def _validate_code_format(fields: list[FieldValue]) -> list[ValidationError]:
-    """코드 형식 검증: NSN, K-NSN, 부대코드 패턴."""
-    errors: list[ValidationError] = []
-    nsn_pattern = re.compile(r"^\d{4}-\d{2}-\d{3}-\d{4}$")
-    k_nsn_pattern = re.compile(r"^KN-\d{5}-\d{4}$")
-
-    for f in fields:
-        if f.data_type == "code" and f.field_key in ("nsn",):
-            if not nsn_pattern.match(f.corrected_value):
-                errors.append(ValidationError(
-                    error_id=f"ve_{len(errors)+1:04d}",
-                    error_type=ValidationErrorType.CODE_FORMAT,
-                    severity=Severity.HIGH,
-                    field_ref=f.field_key,
-                    expected="NNNN-NN-NNN-NNNN",
-                    actual=f.corrected_value,
-                    message=f"NSN 형식 불일치: {f.corrected_value}",
-                ))
-
-    # items 내부 NSN도 검증
-    items_field = next((f for f in fields if f.field_key == "items"), None)
-    if items_field:
-        try:
-            items = json.loads(items_field.corrected_value)
-            if isinstance(items, list):
-                for i, item in enumerate(items):
-                    if isinstance(item, dict) and "nsn" in item:
-                        nsn_val = str(item["nsn"])
-                        if nsn_val and not nsn_pattern.match(nsn_val):
-                            errors.append(ValidationError(
-                                error_id=f"ve_{len(errors)+1:04d}",
-                                error_type=ValidationErrorType.CODE_FORMAT,
-                                severity=Severity.HIGH,
-                                field_ref=f"items[{i}].nsn",
-                                expected="NNNN-NN-NNN-NNNN",
-                                actual=nsn_val,
-                                message=f"NSN 형식 불일치: {nsn_val}",
-                            ))
-        except Exception:
-            pass
-
-    return errors
+    """(deprecated) FieldPatternValidator(common.yaml)가 코드 형식을 검증."""
+    return []
 
 
 def _validate_date_logic(fields: list[FieldValue]) -> list[ValidationError]:
-    """날짜 정합성 검증: 청구일 <= 승인일, 정비일 >= 배치일."""
-    errors: list[ValidationError] = []
-    field_map = {f.field_key: f for f in fields}
-
-    date_pairs = [
-        ("request_date", "approval_date", "청구일 > 승인일"),
-        ("deployment_date", "maintenance_date", "배치일 > 정비일"),
-    ]
-
-    for earlier_key, later_key, msg_template in date_pairs:
-        earlier_f = field_map.get(earlier_key)
-        later_f = field_map.get(later_key)
-        if earlier_f and later_f:
-            try:
-                d1 = _parse_date(earlier_f.corrected_value)
-                d2 = _parse_date(later_f.corrected_value)
-                if d1 and d2 and d1 > d2:
-                    errors.append(ValidationError(
-                        error_id=f"ve_{len(errors)+1:04d}",
-                        error_type=ValidationErrorType.DATE_LOGIC,
-                        severity=Severity.HIGH,
-                        field_ref=f"{earlier_key},{later_key}",
-                        expected=f"{earlier_key} <= {later_key}",
-                        actual=f"{earlier_f.corrected_value} > {later_f.corrected_value}",
-                        message=msg_template,
-                    ))
-            except Exception:
-                pass
-
-    return errors
+    """(deprecated) CrossFieldValidator DATE_ORDER 규칙이 날짜 순서를 검증."""
+    return []
 
 
 def _parse_date(s: str) -> Optional[datetime]:
@@ -218,177 +106,42 @@ def _parse_date(s: str) -> Optional[datetime]:
     return None
 
 
-def _validate_equipment_checklist(data_or_raw) -> list[ValidationError]:
-    """CHK-001~004 — 전비품 확인서 점검표 전용 룰.
-
-    Accept either an assembled dict (preferred) or a raw JSON string (fallback).
-    """
-    errors: list[ValidationError] = []
+def _coerce_assembled(data_or_raw) -> Optional[dict]:
+    """dict 또는 JSON 문자열 → dict. 실패 시 None."""
     if data_or_raw is None:
-        return errors
+        return None
     if isinstance(data_or_raw, dict):
-        data = data_or_raw
-    else:
-        if not data_or_raw:
-            return errors
-        try:
-            data = json.loads(data_or_raw)
-        except Exception:
-            return errors
-        if not isinstance(data, dict):
-            return errors
+        return data_or_raw
+    if not data_or_raw:
+        return None
+    try:
+        data = json.loads(data_or_raw)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
 
-    items = data.get("checklist_items")
 
-    # CHK-001: checklist_items 배열 길이 = 6
-    if not isinstance(items, list) or len(items) != 6:
-        actual_len = len(items) if isinstance(items, list) else 0
-        errors.append(ValidationError(
-            error_id="chk_001",
-            error_type=ValidationErrorType.MISSING_FIELD,
-            severity=Severity.HIGH,
-            field_ref="checklist_items",
-            expected="length=6",
-            actual=f"length={actual_len}",
-            message="CHK-001: checklist_items 배열 길이가 6이 아님",
-        ))
-    else:
-        # CHK-002: item_number 1~6 순차
-        numbers = [it.get("item_number") if isinstance(it, dict) else None for it in items]
-        if numbers != [1, 2, 3, 4, 5, 6]:
-            errors.append(ValidationError(
-                error_id="chk_002",
-                error_type=ValidationErrorType.FORMAT,
-                severity=Severity.HIGH,
-                field_ref="checklist_items[*].item_number",
-                expected="[1,2,3,4,5,6]",
-                actual=str(numbers),
-                message="CHK-002: item_number가 1~6 순서대로 존재하지 않음",
-            ))
+def _validate_equipment_checklist(data_or_raw) -> list[ValidationError]:
+    """하위호환 shim → CrossFieldValidator(FormType.EQUIPMENT_CHECKLIST).
 
-        # CHK-003: result ∈ {O, X, ?}
-        invalid_results = [
-            (i, it.get("result") if isinstance(it, dict) else None)
-            for i, it in enumerate(items, 1)
-            if not (isinstance(it, dict) and it.get("result") in ("O", "X", "?"))
-        ]
-        for item_idx, bad in invalid_results:
-            errors.append(ValidationError(
-                error_id=f"chk_003_{item_idx}",
-                error_type=ValidationErrorType.FORMAT,
-                severity=Severity.HIGH,
-                field_ref=f"checklist_items[{item_idx-1}].result",
-                expected="O|X|?",
-                actual=str(bad),
-                message=f"CHK-003: 항목 {item_idx} 결과가 O/X/? 중 하나가 아님",
-            ))
-
-    # CHK-004: writer.name 비어있지 않음
-    writer = data.get("writer")
-    writer_name = writer.get("name") if isinstance(writer, dict) else None
-    if not (isinstance(writer_name, str) and writer_name.strip()):
-        errors.append(ValidationError(
-            error_id="chk_004",
-            error_type=ValidationErrorType.MISSING_FIELD,
-            severity=Severity.MEDIUM,
-            field_ref="writer.name",
-            expected="non-empty string",
-            actual=str(writer_name),
-            message="CHK-004: writer.name이 비어있음",
-        ))
-
-    return errors
+    과거에는 Python 하드코딩이었으나 configs/validation_rules/equipment_checklist.yaml
+    으로 이관. 이 함수는 외부 호출자(단위 테스트 등)를 위해 유지.
+    """
+    data = _coerce_assembled(data_or_raw)
+    if data is None:
+        return []
+    return _CROSS_FIELD_VALIDATOR.validate(data, FormType.EQUIPMENT_CHECKLIST)
 
 
 def _validate_bid_application(data_or_raw) -> list[ValidationError]:
-    """BID-001~004 — 입찰참가신청서 (별지 제13호 서식) 전용 룰.
+    """하위호환 shim → CrossFieldValidator(FormType.BID_APPLICATION).
 
-    Accept either an assembled dict (preferred) or a raw JSON string (fallback).
-
-    BID-001: applicant.business_reg_number 형식 NNN-NN-NNNNN (신뢰도 -0.15)
-    BID-002: applicant.corporate_reg_number 형식 NNNNN-NNNNNNN (신뢰도 -0.15, 있을 때만)
-    BID-003: submission.submission_date 비어있지 않음 (severity=MEDIUM)
-    BID-004: submission.submitter_name 비어있지 않음 (severity=MEDIUM)
+    configs/validation_rules/bid_application.yaml에서 규칙을 로드.
     """
-    errors: list[ValidationError] = []
-    if data_or_raw is None:
-        return errors
-    if isinstance(data_or_raw, dict):
-        data = data_or_raw
-    else:
-        if not data_or_raw:
-            return errors
-        try:
-            data = json.loads(data_or_raw)
-        except Exception:
-            return errors
-        if not isinstance(data, dict):
-            return errors
-
-    applicant = data.get("applicant") or {}
-    submission = data.get("submission") or {}
-    if not isinstance(applicant, dict):
-        applicant = {}
-    if not isinstance(submission, dict):
-        submission = {}
-
-    # BID-001: 사업자등록번호 형식 NNN-NN-NNNNN
-    biz_reg_pattern = re.compile(r"^\d{3}-\d{2}-\d{5}$")
-    biz_reg = applicant.get("business_reg_number")
-    if isinstance(biz_reg, str) and biz_reg.strip():
-        if not biz_reg_pattern.match(biz_reg.strip()):
-            errors.append(ValidationError(
-                error_id="bid_001",
-                error_type=ValidationErrorType.CODE_FORMAT,
-                severity=Severity.HIGH,
-                field_ref="applicant.business_reg_number",
-                expected="NNN-NN-NNNNN",
-                actual=str(biz_reg),
-                message=f"BID-001: 사업자등록번호 형식 불일치: {biz_reg}",
-            ))
-
-    # BID-002: 법인등록번호 형식 NNNNN-NNNNNNN (있을 때만)
-    corp_reg_pattern = re.compile(r"^\d{5}-\d{7}$")
-    corp_reg = applicant.get("corporate_reg_number")
-    if isinstance(corp_reg, str) and corp_reg.strip():
-        if not corp_reg_pattern.match(corp_reg.strip()):
-            errors.append(ValidationError(
-                error_id="bid_002",
-                error_type=ValidationErrorType.CODE_FORMAT,
-                severity=Severity.HIGH,
-                field_ref="applicant.corporate_reg_number",
-                expected="NNNNN-NNNNNNN",
-                actual=str(corp_reg),
-                message=f"BID-002: 법인등록번호 형식 불일치: {corp_reg}",
-            ))
-
-    # BID-003: submission_date 존재
-    sub_date = submission.get("submission_date")
-    if not (isinstance(sub_date, str) and sub_date.strip()):
-        errors.append(ValidationError(
-            error_id="bid_003",
-            error_type=ValidationErrorType.MISSING_FIELD,
-            severity=Severity.MEDIUM,
-            field_ref="submission.submission_date",
-            expected="non-empty string",
-            actual=str(sub_date),
-            message="BID-003: submission.submission_date가 비어있음",
-        ))
-
-    # BID-004: submitter_name 비어있지 않음
-    sub_name = submission.get("submitter_name")
-    if not (isinstance(sub_name, str) and sub_name.strip()):
-        errors.append(ValidationError(
-            error_id="bid_004",
-            error_type=ValidationErrorType.MISSING_FIELD,
-            severity=Severity.MEDIUM,
-            field_ref="submission.submitter_name",
-            expected="non-empty string",
-            actual=str(sub_name),
-            message="BID-004: submission.submitter_name이 비어있음",
-        ))
-
-    return errors
+    data = _coerce_assembled(data_or_raw)
+    if data is None:
+        return []
+    return _CROSS_FIELD_VALIDATOR.validate(data, FormType.BID_APPLICATION)
 
 
 def _normalize_rank_in_assembled(vlm_result: VLMResult) -> None:
@@ -572,38 +325,11 @@ def _validate_missing_fields(
     fields: list[FieldValue],
     form_type: str,
 ) -> list[ValidationError]:
-    """필수 필드 누락 검증."""
-    errors: list[ValidationError] = []
+    """(deprecated) CrossFieldValidator NOT_EMPTY 규칙이 필수 필드 검증 담당.
 
-    required_fields: dict[str, list[str]] = {
-        "supply_request": ["unit_code", "request_date", "items"],
-        "maintenance_record": ["equipment_id", "maintenance_date", "technician_name", "result"],
-        "inventory_sheet": ["unit_code", "report_date", "items"],
-        "handover_doc": ["from_person", "to_person", "handover_date", "items"],
-        "inspection_report": ["inspection_date", "inspector_name", "overall_result"],
-        # equipment_checklist: _validate_equipment_checklist()가 CHK-001~004로 별도 검증.
-        #   - CHK-001: checklist_items 길이 = 6
-        #   - CHK-002: item_number 순차
-        #   - CHK-003: result ∈ {O, X, ?}
-        #   - CHK-004: writer.name 존재
-    }
-
-    required = required_fields.get(form_type, [])
-    field_keys = {f.field_key for f in fields}
-
-    for key in required:
-        if key not in field_keys:
-            errors.append(ValidationError(
-                error_id=f"ve_{len(errors)+1:04d}",
-                error_type=ValidationErrorType.MISSING_FIELD,
-                severity=Severity.HIGH,
-                field_ref=key,
-                expected=key,
-                actual="(없음)",
-                message=f"필수 필드 누락: {key}",
-            ))
-
-    return errors
+    과거 호출자 호환용 shim — 엔진이 assembled_json 기반으로 처리.
+    """
+    return []
 
 
 # ─────────────────────────────────────────────
@@ -616,23 +342,44 @@ class P4Validator:
     VLM logprobs 신뢰도를 1차로 사용하고,
     룰 기반 교차검증에서 발견된 오류에 따라 신뢰도를 2차 보정합니다.
 
-    사용 예시:
-        validator = P4Validator()
-        validated = validator.validate(vlm_result)
-        if validated.review_required:
-            # 검토 큐 적재
+    ConsistencyReasoningLoop(일관성/컨텍스트 주입 재추론)은 생성 시 vlm_client가
+    주입된 경우에만 활성화되며, Layer 2 실패 또는 저신뢰 필드 발생 시 1회만
+    실행됩니다. region_map은 validate() 호출 시 전달받습니다.
     """
+
+    def __init__(
+        self,
+        vlm_client: Optional["VLMClient"] = None,  # type: ignore[name-defined]
+    ) -> None:
+        self._reasoning_loop = None
+        if vlm_client is not None:
+            try:
+                from src.postprocess.consistency_reasoning_loop import (
+                    ConsistencyReasoningLoop,
+                )
+                self._reasoning_loop = ConsistencyReasoningLoop(vlm_client)
+                logger.info("[P4Validator] ConsistencyReasoningLoop 활성화")
+            except Exception as e:
+                logger.warning(
+                    "[P4Validator] ConsistencyReasoningLoop 초기화 실패: %s", e,
+                )
 
     def validate(
         self,
         vlm_result: VLMResult,
         processing_path: ProcessingPath = ProcessingPath.VLM,
+        region_map: Optional[dict] = None,
+        schema: Optional[dict] = None,
+        fixed_values: Optional[dict] = None,
     ) -> ValidatedResult:
         """VLMResult → ValidatedResult.
 
         Args:
             vlm_result: P3 출력
             processing_path: 처리 경로 (VLM/FALLBACK)
+            region_map: {region_id → CroppedRegion} — 재추론에 필요.
+            schema: 재추론 후 assembled_json 재조립에 사용 (x-assembly-rules 스키마).
+            fixed_values: TemplateAugmentor가 넘긴 fixed_text 값 — 재조립 시 유지.
 
         Returns:
             ValidatedResult
@@ -641,8 +388,6 @@ class P4Validator:
             form_type == OTHER 인 경우 군수 도메인 룰 검증(산술/코드/날짜/필수 필드)을
             모두 건너뜁니다. 신뢰도 산출만 수행하고, review_required는 False로 고정.
         """
-        from src.interfaces.enums import FormType
-
         fields = list(vlm_result.fields)  # 복사본 (보정 반영용)
         form_type = vlm_result.form_type.value
         is_other = vlm_result.form_type == FormType.OTHER
@@ -650,17 +395,104 @@ class P4Validator:
         # ── 1. 룰 검증 실행 (other는 건너뜀) ───
         all_errors: list[ValidationError] = []
         if not is_other:
-            all_errors.extend(_validate_arithmetic(fields))
-            all_errors.extend(_validate_code_format(fields))
-            all_errors.extend(_validate_date_logic(fields))
-            all_errors.extend(_validate_missing_fields(fields, form_type))
+            # Layer 1 — common.yaml 기반 공통 패턴 검증 + 자동 정규화
+            fields, pattern_errors = _FIELD_PATTERN_VALIDATOR.validate_and_correct(fields)
+            all_errors.extend(pattern_errors)
+
+            # Layer 2 — form_type별 교차 검증 (assembled_json 기반)
+            assembled_for_rules = (
+                vlm_result.assembled_json
+                if isinstance(vlm_result.assembled_json, dict)
+                else _coerce_assembled(vlm_result.raw_json)
+            )
+            cross_errors: list[ValidationError] = []
+            if assembled_for_rules is not None:
+                cross_errors = _CROSS_FIELD_VALIDATOR.validate(
+                    assembled_for_rules, vlm_result.form_type,
+                )
+
+            # ── Layer 3: 도메인 사전 교정 (assembled_json이 있는 서식만) ───
+            # 별칭 정규화 + 폐쇄집합 최근접 매칭. 교정이 발생하면 cross_errors를
+            # 재계산해 재추론 트리거 판정을 정확히 한다.
+            if (
+                isinstance(assembled_for_rules, dict)
+                and isinstance(vlm_result.assembled_json, dict)
+            ):
+                corrected_json, dict_logs = _DOMAIN_DICT_CORRECTOR.correct(
+                    vlm_result.assembled_json,
+                )
+                if dict_logs:
+                    vlm_result.warnings.extend(dict_logs)
+                if corrected_json is not vlm_result.assembled_json:
+                    import dataclasses as _dc
+                    vlm_result = _dc.replace(
+                        vlm_result, assembled_json=corrected_json,
+                    )
+                    assembled_for_rules = corrected_json
+                    # Layer 2 재실행 — 교정된 값 기준으로 cross_errors 재산출
+                    cross_errors = _CROSS_FIELD_VALIDATOR.validate(
+                        assembled_for_rules, vlm_result.form_type,
+                    )
+
+            all_errors.extend(cross_errors)
+
+            # ── 1.5 일관성/컨텍스트 재추론 (1회) ───
+            if self._reasoning_loop is not None and region_map:
+                has_low_conf = any(f.confidence < 0.60 for f in fields)
+                if cross_errors or has_low_conf:
+                    logger.info(
+                        "[P4][%s] 재추론 루프 진입 (cross_errors=%d, low_conf=%s)",
+                        vlm_result.doc_id, len(cross_errors), has_low_conf,
+                    )
+                    # reasoning_loop는 VLMResult를 새로 반환. fields/assembled_json
+                    # 가 바뀔 수 있음 → Layer 1/2 재적용.
+                    import dataclasses as _dc
+                    staged = _dc.replace(vlm_result, fields=fields)
+                    updated = self._reasoning_loop.run(
+                        vlm_result=staged,
+                        validation_errors=cross_errors,
+                        region_map=region_map,
+                        assembled_json=staged.assembled_json,
+                        warnings=vlm_result.warnings,
+                    )
+                    if updated is not staged:
+                        fields = list(updated.fields)
+                        # assembled_json 재조립 (x-assembly-rules 있는 서식만)
+                        if isinstance(schema, dict) and schema.get("x-assembly-rules"):
+                            fields, assembled_for_rules = self._reassemble(
+                                fields, schema, region_map, fixed_values or {},
+                                warnings=vlm_result.warnings,
+                            )
+                            # 재조립 직후 Layer 3 재적용 — 재조립이 Layer 3 이전 필드
+                            # 값으로 assembled_json을 복원하므로, 한 번 더 정규화해 최종
+                            # 결과가 도메인 사전을 반영하도록 보장.
+                            if isinstance(assembled_for_rules, dict):
+                                post_json, post_logs = _DOMAIN_DICT_CORRECTOR.correct(
+                                    assembled_for_rules,
+                                )
+                                if post_logs:
+                                    vlm_result.warnings.extend(post_logs)
+                                assembled_for_rules = post_json
+                            updated = _dc.replace(
+                                updated,
+                                fields=fields,
+                                assembled_json=assembled_for_rules,
+                            )
+                            # 재조립된 assembled_json을 vlm_result에도 반영
+                            vlm_result = updated
+                        # 재검증
+                        fields, pattern_errors = _FIELD_PATTERN_VALIDATOR.validate_and_correct(fields)
+                        cross_errors = (
+                            _CROSS_FIELD_VALIDATOR.validate(
+                                assembled_for_rules, vlm_result.form_type,
+                            )
+                            if isinstance(assembled_for_rules, dict) else []
+                        )
+                        all_errors = list(pattern_errors) + list(cross_errors)
+
+            # 특수 후처리 — assembled_json rank 정규화는 Layer 2 바깥
             if form_type == "equipment_checklist":
-                payload = vlm_result.assembled_json or vlm_result.raw_json
-                all_errors.extend(_validate_equipment_checklist(payload))
                 _normalize_rank_in_assembled(vlm_result)
-            elif form_type == "bid_application":
-                payload = vlm_result.assembled_json or vlm_result.raw_json
-                all_errors.extend(_validate_bid_application(payload))
 
         # error_id 재번호 부여
         for i, err in enumerate(all_errors):
@@ -758,6 +590,34 @@ class P4Validator:
             assembled_json=getattr(vlm_result, "assembled_json", None),
             sub_confidences=sub_confidences,
         )
+
+    @staticmethod
+    def _reassemble(
+        fields: list[FieldValue],
+        schema: dict,
+        region_map: dict,
+        fixed_values: dict,
+        warnings: list[str],
+    ) -> tuple[list[FieldValue], Optional[dict]]:
+        """재추론 후 Assembler를 다시 돌려 assembled_json을 갱신."""
+        try:
+            from src.vlm.assembler import Assembler
+            region_field_key_map: dict[str, str] = {}
+            for region in region_map.values():
+                fk = getattr(region.instruction_spec, "field_key", None)
+                if fk:
+                    region_field_key_map[region.region_id] = fk
+            assembled = Assembler().assemble(
+                fields=fields,
+                schema=schema,
+                region_field_key_map=region_field_key_map,
+                fixed_values=fixed_values,
+                warnings=warnings,
+            )
+            return fields, assembled
+        except Exception as e:
+            logger.warning("[P4] 재조립 실패: %s", e)
+            return fields, None
 
     @staticmethod
     def _build_penalty_map(errors: list[ValidationError]) -> dict[str, float]:

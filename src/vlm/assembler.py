@@ -81,7 +81,7 @@ class Assembler:
 
         for field_key, path in assembly_rules.items():
             fv = field_map.get(field_key)
-            value = self._extract_value(fv, field_key, warnings)
+            value = self._extract_value(fv, field_key, warnings, path=path)
             self._set_path(result, path, value)
 
         # fixed_text 주입 — VLM 추출이 없었던 field_key에 한해 인쇄 고정값 삽입.
@@ -145,11 +145,12 @@ class Assembler:
         fv: Optional[FieldValue],
         field_key: str,
         warnings: list[str],
+        path: Optional[str] = None,
     ) -> Any:
         """FieldValue → Python 값.
 
         VLM이 sub-schema로 추출한 값은 raw_value에 JSON 문자열로 저장됨.
-        - object/array: JSON 파싱
+        - object/array: JSON 파싱 후 field_key 또는 path-tail 래퍼 제거 (_unwrap_blob)
         - 숫자 문자열: int 변환
         - 그 외: 문자열 그대로
         None이면 None 반환.
@@ -164,9 +165,11 @@ class Assembler:
 
         if raw.startswith(("{", "[")):
             try:
-                return json.loads(raw)
+                parsed = json.loads(raw)
             except json.JSONDecodeError:
-                pass
+                parsed = None
+            if parsed is not None:
+                return self._unwrap_blob(parsed, field_key=field_key, path=path)
 
         if raw.lstrip("-").isdigit():
             try:
@@ -175,6 +178,44 @@ class Assembler:
                 pass
 
         return raw
+
+    @staticmethod
+    def _unwrap_blob(
+        parsed: Any,
+        field_key: str,
+        path: Optional[str] = None,
+    ) -> Any:
+        """VLM이 sub-schema 응답을 감싼 field_key/path-tail 래퍼를 제거.
+
+        두 단계 언래핑:
+          1) {field_key: V} 단일 키 → V
+             예: {"applicant_block": {...}} → {...}
+          2) dict 값의 유일한 키가 path의 마지막 segment와 같으면 한 번 더 벗김
+             예: path="agent.seal_present", parsed={"seal_present": false} → false
+        래퍼 패턴이 아니면 원본 그대로 반환.
+        """
+        value = parsed
+
+        # Step 1: field_key 래퍼 제거
+        if (
+            isinstance(value, dict)
+            and field_key in value
+            and len(value) == 1
+        ):
+            value = value[field_key]
+
+        # Step 2: path-tail 래퍼 제거 (e.g. agent.seal_present)
+        if path:
+            tail = path.rsplit(".", 1)[-1]
+            if (
+                tail != field_key
+                and isinstance(value, dict)
+                and tail in value
+                and len(value) == 1
+            ):
+                value = value[tail]
+
+        return value
 
     def _set_path(self, target: dict, path: str, value: Any) -> None:
         """'checklist_items.0' 형식의 경로로 nested dict에 값 삽입.

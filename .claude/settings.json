@@ -30,7 +30,21 @@
       "Bash(xargs -I{} echo \"  metrics.json 생성 수: {}\")",
       "Bash(xargs -I{} echo \"  pipeline_outputs/latest -> {}\")",
       "Bash(xargs -I{} echo \"  eval_results/latest -> {}\")",
-      "Bash(export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8)"
+      "Bash(export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8)",
+      "Bash(python -c \"from src.vlm.instruction_router import InstructionRouter; r = InstructionRouter\\(\\); print\\('loaded OK'\\); print\\('common_rules:', list\\(r._common_rules.keys\\(\\)\\)\\); print\\('field_key_examples:', {k: list\\(v.keys\\(\\)\\) for k, v in r._field_key_examples.items\\(\\)}\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import json; json.load\\(open\\('/home/team_gh/mil_OCR_v2/src/domain/schemas/v1/bid_application.json'\\)\\); print\\('JSON OK'\\)\")",
+      "Bash(docker network *)",
+      "Bash(docker restart *)",
+      "Read(//home/jh32kim/ocr_vllm/models/**)",
+      "Read(//home/jh32kim/**)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/src/pipeline/orchestrator.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(nvidia-smi --query-gpu=index,name,memory.free,memory.total,utilization.gpu --format=csv,noheader)",
+      "Bash(curl -sf http://localhost:8282/health)",
+      "Bash(curl -sf http://localhost:8200/health)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/src/vlm/structured_extractor.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/scripts/run_pipeline_with_outputs.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/src/postprocess/validator.py'\\).read\\(\\)\\); ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/src/postprocess/domain_dict_corrector.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

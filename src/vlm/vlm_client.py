@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -329,6 +330,31 @@ class VLMClient:
             "logprobs": logprobs_data,
             "finish_reason": finish_reason,
         }
+
+    async def call_async(
+        self,
+        image_b64: str,
+        instruction: str,
+        system_prompt: str = "",
+        guided_json: Optional[dict] = None,
+        logprobs: bool = True,
+        pixel_budget: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """비동기 vLLM 호출 — `call()`을 스레드풀에서 실행.
+
+        vLLM HTTP 요청은 I/O 대기가 지배적이므로 GIL이 해제되어 동시 처리 이득이
+        크다. 동기 `call()`의 모든 예외 처리·monitor 통합·logprobs 파싱을 그대로
+        재사용한다.
+        """
+        return await asyncio.to_thread(
+            self.call,
+            image_b64=image_b64,
+            instruction=instruction,
+            system_prompt=system_prompt,
+            guided_json=guided_json,
+            logprobs=logprobs,
+            pixel_budget=pixel_budget,
+        )
 
 
 # ─────────────────────────────────────────────

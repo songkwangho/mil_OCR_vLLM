@@ -121,12 +121,20 @@ docker run --rm --gpus device=0 --network host \
 
 ## 3. 결과 저장 구조
 
+> **최종 OCR 결과는 각 문서 폴더 최상위의 `final_output.json`에 있습니다.**
+> trial 디렉터리 최상위의 `README.md`는 단계별 산출물과 문서별 최종 결과 링크를 안내합니다.
+
 ```
 data/pipeline_outputs/{YYYYMMDD_HHMMSS}/
+├── README.md                    ← 디렉터리 구조 + 문서별 final_output 링크
 ├── run_summary.json
+├── eval_summary.json            ← 지표 집계 + verdict (run_eval.py 실행 시)
+├── warmup_timings.json
+├── report.html                  ← delta/verdict HTML 리포트
 ├── ocr_results.db
 ├── review_queue.db
 └── {doc_id}/
+    ├── final_output.json        ← ★ 최종 OCR 결과 (assembled_json + 핵심 메타만)
     ├── summary.json              ← form_type, status, processing_path, timings
     ├── P1/
     │   ├── result.json           ← dpi, quality_score, sr_applied

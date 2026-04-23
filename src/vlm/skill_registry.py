@@ -11,6 +11,7 @@ PIPELINE.md §4-2 / §5 구현.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -194,6 +195,102 @@ class SkillRegistry:
                 results.append(sr)
         stats.total_ms = (time.time() - t_start) * 1000
         return results
+
+    # ─────────────────────────────────────────────
+    #  비동기 디스패치 — 동일 budget 그룹 내 병렬 처리
+    # ─────────────────────────────────────────────
+    MAX_CONCURRENT_REQUESTS = 16
+
+    async def dispatch_async(
+        self,
+        tasks: list[SkillTask],
+        stats: Optional[SkillDispatchStats] = None,
+    ) -> list[SkillResult]:
+        """DISPATCH_ORDER 순 그룹 처리. 같은 budget 그룹 내 region은 asyncio.gather로 병렬 실행.
+
+        그룹 간 순서(140→560→1120)는 유지해 동일 system_prompt prefix caching 이득을
+        살린다. 동시 요청 수는 `MAX_CONCURRENT_REQUESTS`로 제한.
+        """
+        stats = stats or SkillDispatchStats()
+        buckets: dict[int, list[SkillTask]] = {b: [] for b in DISPATCH_ORDER}
+        for t in tasks:
+            b = _nearest_bucket(t.pixel_budget)
+            buckets.setdefault(b, []).append(t)
+
+        # 입력 순서 복원용 index
+        task_index: dict[int, int] = {id(t): i for i, t in enumerate(tasks)}
+        indexed_results: list[Optional[SkillResult]] = [None] * len(tasks)
+
+        t_start = time.time()
+        semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_REQUESTS)
+
+        async def run_one(task: SkillTask) -> tuple[int, SkillResult, str, float]:
+            skill_name = self._resolve_skill(task)
+            async with semaphore:
+                t0 = time.time()
+                sr = await self._run_single_async(task, skill_name)
+                elapsed_ms = (time.time() - t0) * 1000
+            return task_index[id(task)], sr, skill_name, elapsed_ms
+
+        for budget in DISPATCH_ORDER:
+            bucket = buckets.get(budget, [])
+            stats.batch_sizes[budget] = len(bucket)
+            if not bucket:
+                continue
+            awaited = await asyncio.gather(
+                *[run_one(t) for t in bucket],
+                return_exceptions=True,
+            )
+            for item in awaited:
+                if isinstance(item, Exception):
+                    logger.error("[SkillRegistry] dispatch_async 중 예외: %s", item)
+                    continue
+                idx, sr, skill_name, elapsed_ms = item
+                stats.skill_counts[skill_name] = stats.skill_counts.get(skill_name, 0) + 1
+                stats.skill_time_ms[skill_name] = (
+                    stats.skill_time_ms.get(skill_name, 0.0) + elapsed_ms
+                )
+                indexed_results[idx] = sr
+
+        stats.total_ms = (time.time() - t_start) * 1000
+        # None 은 예외 발생한 슬롯 — 드물게 전체 실패만 해당.
+        return [r for r in indexed_results if r is not None]
+
+    async def _run_single_async(
+        self, task: SkillTask, skill_name: str
+    ) -> SkillResult:
+        """비동기 단일 Skill 호출. run_async 없는 skill은 to_thread 폴백."""
+        skill = self._get_skill(skill_name)
+        if skill is None:
+            logger.warning(
+                "[SkillRegistry] 미등록 skill=%s region=%s", skill_name, task.region_id
+            )
+            return SkillResult(
+                region_id=task.region_id,
+                skill_name=skill_name,
+                content="",
+                confidence=0.0,
+                content_type="error",
+                warnings=[f"skill_not_registered: {skill_name}"],
+            )
+        try:
+            run_async = getattr(skill, "run_async", None)
+            if run_async is not None:
+                return await run_async(task)
+            return await asyncio.to_thread(skill.run, task)
+        except Exception as e:
+            logger.error(
+                "[SkillRegistry] %s run_async 실패 region=%s: %s",
+                skill_name, task.region_id, e,
+            )
+            return SkillResult(
+                region_id=task.region_id,
+                skill_name=skill_name,
+                content="",
+                confidence=0.0,
+                content_type="error",
+                warnings=[f"skill_run_failed: {type(e).__name__}"],
+            )
 
     # ─────────────────────────────────────────────
     #  Table 2패스 처리 (S5)

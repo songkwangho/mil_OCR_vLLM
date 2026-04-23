@@ -8,6 +8,7 @@ PIPELINE.md §4-6 구현.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -123,6 +124,12 @@ class TableExtractor:
 
         raw = response.get("content", "") or ""
         return _parse_pass1_json(raw, region_id)
+
+    async def pass1_structure_async(
+        self, table_crop: np.ndarray, region_id: str = "table"
+    ) -> TableStructure:
+        """동기 `pass1_structure()`를 스레드풀에서 실행."""
+        return await asyncio.to_thread(self.pass1_structure, table_crop, region_id)
 
     # ─────────────────────────────────────────────
     #  패스 2: 셀 크롭 + 디스패치 태스크 반환

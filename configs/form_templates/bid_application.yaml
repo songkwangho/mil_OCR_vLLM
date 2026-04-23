@@ -6,13 +6,12 @@
 # 좌표 기준:
 #   - P1 Deskew + DPI 300 정규화 이후 이미지
 #   - A4 세로 스캔 기준: 2480×3508 px
-#   - fields: 실측값 (2026-04-20 기준)
+#   - fields: 필드별 실측 bbox (2026-04-22 기준, 블록→필드 단위 전환)
 #   - fixed_text: 인쇄 고정 텍스트 bbox + 원문 값
 #
 # 설계 원칙:
-#   - 수기 블록(fields)은 블록 단위로 지정 (sub-schema 분해 전제)
+#   - 수기 블록을 22개 field_key로 세분화하여 각 크롭에 1120 토큰 집중
 #   - 인쇄 고정 텍스트(fixed_text)는 Assembler가 assembled_json에 직접 삽입
-#     → VLM 추론 대상에서 제외하여 토큰 낭비 방지 + PP-DocLayout 탐지 영역 정리
 
 form_type: bid_application
 
@@ -24,40 +23,130 @@ versions:
     description: "입찰참가신청서 서식(국내, 국제) — 방위사업청 조달"
 
     fields:
-      - field_key: doc_number
+      # ── 신청인 섹션 ─────────────────────────────────────────
+      - field_key: company_name
         region_type: handwritten_field
-        bbox: {x1: 331, y1: 466, x2: 537, y2: 531}
-        description: "제 호 — 문서번호 수기란"
+        bbox: {x1: 697, y1: 631, x2: 1159, y2: 791}
+        description: "상호 또는 법인명칭"
 
-      - field_key: applicant_block
+      - field_key: corporate_reg_number
         region_type: handwritten_field
-        bbox: {x1: 321, y1: 626, x2: 2128, y2: 1147}
-        description: "신청인 전체 블록 (상호~사업자등록번호)"
+        bbox: {x1: 1571, y1: 631, x2: 2128, y2: 801}
+        description: "법인등록번호 NNNNN-NNNNNNN"
 
-      - field_key: bid_info_block
+      - field_key: representative
         region_type: handwritten_field
-        bbox: {x1: 321, y1: 1132, x2: 2128, y2: 1498}
-        description: "입찰개요 전체 블록 (공고번호~발행관서)"
+        bbox: {x1: 697, y1: 791, x2: 1164, y2: 912}
+        description: "대표자 성명"
 
-      - field_key: agent_block
+      - field_key: representative_dob
         region_type: handwritten_field
-        bbox: {x1: 321, y1: 1493, x2: 1169, y2: 1954}
-        description: "대리인 성명·생년월일 수기란"
+        bbox: {x1: 1571, y1: 791, x2: 2128, y2: 912}
+        description: "대표자 생년월일"
+
+      - field_key: address
+        region_type: handwritten_field
+        bbox: {x1: 697, y1: 912, x2: 1164, y2: 1033}
+        description: "주소 — 도로명 추론 금지"
+
+      - field_key: phone
+        region_type: handwritten_field
+        bbox: {x1: 1571, y1: 912, x2: 2128, y2: 1033}
+        description: "전화번호"
+
+      - field_key: business_location
+        region_type: handwritten_field
+        bbox: {x1: 697, y1: 1033, x2: 1164, y2: 1147}
+        description: "사업장소재지"
+
+      - field_key: business_reg_number
+        region_type: handwritten_field
+        bbox: {x1: 1571, y1: 1033, x2: 2128, y2: 1147}
+        description: "사업자등록번호 NNN-NN-NNNNN"
+
+      # ── 입찰개요 섹션 ───────────────────────────────────────
+      - field_key: announcement_number
+        region_type: handwritten_field
+        bbox: {x1: 697, y1: 1147, x2: 1164, y2: 1270}
+        description: "입찰공고(지명)번호"
+
+      - field_key: bid_date
+        region_type: handwritten_field
+        bbox: {x1: 1571, y1: 1147, x2: 2128, y2: 1270}
+        description: "입찰일자"
+
+      - field_key: bid_name
+        region_type: handwritten_field
+        bbox: {x1: 697, y1: 1270, x2: 1164, y2: 1380}
+        description: "입찰건명 — 이미지 글자 그대로, 추론 금지"
+
+      - field_key: item_code
+        region_type: handwritten_field
+        bbox: {x1: 1571, y1: 1270, x2: 2128, y2: 1380}
+        description: "품목코드"
+
+      - field_key: industry_class_number
+        region_type: handwritten_field
+        bbox: {x1: 697, y1: 1380, x2: 900, y2: 1498}
+        description: "해당산업분류번호"
+
+      - field_key: acquisition_date
+        region_type: handwritten_field
+        bbox: {x1: 1159, y1: 1373, x2: 1485, y2: 1498}
+        description: "취득일 — 연/월/일 모두 포함 필수"
+
+      - field_key: issuing_office
+        region_type: handwritten_field
+        bbox: {x1: 1802, y1: 1373, x2: 2118, y2: 1498}
+        description: "발행관서"
+
+      # ── 대리인 섹션 ─────────────────────────────────────────
+      - field_key: agent_name
+        region_type: handwritten_field
+        bbox: {x1: 667, y1: 1673, x2: 1149, y2: 1824}
+        description: "대리인 성명 — 받침 획 주의"
+
+      - field_key: agent_dob
+        region_type: handwritten_field
+        bbox: {x1: 657, y1: 1829, x2: 1149, y2: 1939}
+        description: "대리인 생년월일"
 
       - field_key: agent_seal
         region_type: seal
         bbox: {x1: 1164, y1: 1488, x2: 2118, y2: 1964}
         description: "사용인감 날인란"
 
-      - field_key: submission_block
+      # ── 신청 정보 섹션 ──────────────────────────────────────
+      - field_key: submission_date
         region_type: handwritten_field
-        bbox: {x1: 321, y1: 2230, x2: 2113, y2: 2580}
-        description: "신청일자 + 신청인 대표자 성명 수기란"
+        bbox: {x1: 1521, y1: 2305, x2: 2043, y2: 2425}
+        description: "신청일자"
 
-      - field_key: seal_verification_block
-        region_type: table
-        bbox: {x1: 316, y1: 2565, x2: 2118, y2: 2791}
-        description: "인감증명확인 테이블"
+      - field_key: submitter_name
+        region_type: handwritten_field
+        bbox: {x1: 1074, y1: 2370, x2: 1380, y2: 2510}
+        description: "신청인 대표자 성명"
+
+      # ── 인감증명확인 섹션 ───────────────────────────────────
+      - field_key: seal_issuing_office
+        region_type: handwritten_field
+        bbox: {x1: 612, y1: 2666, x2: 918, y2: 2781}
+        description: "인감증명 발급관서"
+
+      - field_key: seal_issue_number
+        region_type: handwritten_field
+        bbox: {x1: 918, y1: 2666, x2: 1218, y2: 2781}
+        description: "인감증명 발급번호"
+
+      - field_key: seal_issue_date
+        region_type: handwritten_field
+        bbox: {x1: 1218, y1: 2666, x2: 1518, y2: 2781}
+        description: "인감증명 발급일자"
+
+      - field_key: seal_signature
+        region_type: seal
+        bbox: {x1: 1818, y1: 2666, x2: 2118, y2: 2781}
+        description: "서명/날인"
 
     # 인쇄 고정 텍스트 — VLM 추론 대상에서 제외하고 Assembler가 값을 직접 삽입
     fixed_text:

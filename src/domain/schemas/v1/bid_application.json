@@ -5,66 +5,72 @@
   "x-mil-ocr-effective-date": "2024-01-01",
   "x-mil-ocr-deprecated": false,
   "title": "입찰참가신청서",
-  "description": "별지 제13호 서식 — 군수품조달관리규정(방위사업청) 입찰참가신청서 서식(국내/국제)",
+  "description": "별지 제13호 서식 — 군수품조달관리규정(방위사업청) 입찰참가신청서 서식(국내/국제). 필드별 크롭 기반 assemble.",
 
   "x-assembly-rules": {
-    "doc_number":              "doc_number",
-    "applicant_block":         "applicant",
-    "bid_info_block":          "bid_info",
-    "agent_block":             "agent",
-    "agent_seal":              "agent.seal_present",
-    "submission_block":        "submission",
-    "seal_verification_block": "seal_verification",
-    "form_identifier":         "form_identifier",
-    "body_text":               "fixed_content.body_text",
-    "seal_note":               "fixed_content.seal_note",
-    "form_title":              "fixed_content.form_title"
+    "company_name":          "applicant.company_name",
+    "corporate_reg_number":  "applicant.corporate_reg_number",
+    "representative":        "applicant.representative",
+    "representative_dob":    "applicant.representative_dob",
+    "address":               "applicant.address",
+    "phone":                 "applicant.phone",
+    "business_location":     "applicant.business_location",
+    "business_reg_number":   "applicant.business_reg_number",
+    "announcement_number":   "bid_info.announcement_number",
+    "bid_date":              "bid_info.bid_date",
+    "bid_name":              "bid_info.bid_name",
+    "item_code":             "bid_info.item_code",
+    "industry_class_number": "bid_info.industry_class_number",
+    "acquisition_date":      "bid_info.acquisition_date",
+    "issuing_office":        "bid_info.issuing_office",
+    "agent_name":            "agent.name",
+    "agent_dob":             "agent.dob",
+    "agent_seal":            "agent.seal_present",
+    "submission_date":       "submission.submission_date",
+    "submitter_name":        "submission.submitter_name",
+    "seal_issuing_office":   "seal_verification.issuing_office",
+    "seal_issue_number":     "seal_verification.issue_number",
+    "seal_issue_date":       "seal_verification.issue_date",
+    "seal_signature":        "seal_verification.signature_present",
+    "body_text":             "fixed_content.body_text",
+    "seal_note":             "fixed_content.seal_note",
+    "form_title":            "fixed_content.form_title"
   },
 
   "type": "object",
   "properties": {
-    "analysis": {
-      "type": "string",
-      "description": "이미지 품질, 수기 판독 난이도, 특이사항을 30~50 토큰으로 간략히 기술"
-    },
-    "doc_number": {
-      "type": "string",
-      "description": "제 호 — 문서 번호 수기 기입란"
-    },
     "applicant": {
       "type": "object",
       "description": "신청인 정보",
       "properties": {
-        "company_name":          {"type": "string", "description": "상호 또는 법인명칭"},
-        "corporate_reg_number":  {"type": "string", "description": "법인등록번호. 형식: NNNNN-NNNNNNN"},
-        "representative":        {"type": "string", "description": "대표자 성명"},
-        "representative_dob":    {"type": "string", "description": "대표자 생년월일. 예: 1976년 1월 03일"},
-        "address":               {"type": "string", "description": "주소"},
-        "phone":                 {"type": "string", "description": "전화번호"},
-        "business_location":     {"type": "string", "description": "사업장소재지"},
-        "business_reg_number":   {"type": "string", "description": "사업자등록번호. 형식: NNN-NN-NNNNN"}
-      },
-      "required": ["company_name", "representative", "business_reg_number"]
+        "company_name":         {"type": "string", "description": "상호 또는 법인명칭 — 이미지 글자 그대로 전사. 유사 상호 대체 금지"},
+        "corporate_reg_number": {"type": "string", "description": "법인등록번호 NNNNN-NNNNNNN. 숫자 획 주의: 8/3, 6/0, 4/9"},
+        "representative":       {"type": "string", "description": "대표자 성명"},
+        "representative_dob":   {"type": "string", "description": "대표자 생년월일. 예: 1976년 1월 03일"},
+        "address":              {"type": "string", "description": "주소 — 도로명 반드시 이미지에서 확인. 추론 금지. 예: 테헤란로, 판교로, 가능대로"},
+        "phone":                {"type": "string", "description": "전화번호"},
+        "business_location":    {"type": "string", "description": "사업장소재지"},
+        "business_reg_number":  {"type": "string", "description": "사업자등록번호 NNN-NN-NNNNN"}
+      }
     },
     "bid_info": {
       "type": "object",
       "description": "입찰개요",
       "properties": {
         "announcement_number":   {"type": "string", "description": "입찰공고(지명)번호"},
-        "bid_date":              {"type": "string", "description": "입찰일자"},
-        "bid_name":              {"type": "string", "description": "입찰건명"},
+        "bid_date":              {"type": "string", "description": "입찰일자. 연/월/일 누락 금지. 예: 2023년 09월 15일"},
+        "bid_name":              {"type": "string", "description": "입찰건명 — 이미지 글자 그대로. 유사 단어 대체 금지"},
         "item_code":             {"type": "string", "description": "품목코드"},
         "industry_class_number": {"type": "string", "description": "해당산업분류번호"},
-        "acquisition_date":      {"type": "string", "description": "취득일"},
+        "acquisition_date":      {"type": "string", "description": "취득일 — 연/월/일 모두 포함 필수. 예: 2023년 01월 10일"},
         "issuing_office":        {"type": "string", "description": "발행관서"}
-      },
-      "required": ["announcement_number", "bid_date", "bid_name"]
+      }
     },
     "agent": {
       "type": "object",
       "description": "대리인 및 사용인감 정보",
       "properties": {
-        "name":         {"type": "string",  "description": "대리인 성명"},
+        "name":         {"type": "string",  "description": "대리인 성명 — 받침 획 주의 (ㄱ/ㄴ/ㄹ/ㅅ 혼동 가능)"},
         "dob":          {"type": "string",  "description": "대리인 생년월일"},
         "seal_present": {"type": "boolean", "description": "사용인감 날인 존재 여부"}
       }
@@ -75,8 +81,7 @@
       "properties": {
         "submission_date": {"type": "string", "description": "신청일자. 예: 2024년 05월 15일"},
         "submitter_name":  {"type": "string", "description": "신청인 대표자 성명"}
-      },
-      "required": ["submission_date", "submitter_name"]
+      }
     },
     "seal_verification": {
       "type": "object",
@@ -85,13 +90,8 @@
         "issuing_office":    {"type": "string",  "description": "발급관서"},
         "issue_number":      {"type": "string",  "description": "발급번호"},
         "issue_date":        {"type": "string",  "description": "발급일자"},
-        "verifier":          {"type": "string",  "description": "화인자"},
         "signature_present": {"type": "boolean", "description": "서명/날인 존재 여부"}
       }
-    },
-    "form_identifier": {
-      "type": "string",
-      "description": "서식 식별자. 예: '별지 제13호 서식'"
     },
     "fixed_content": {
       "type": "object",
@@ -103,5 +103,5 @@
       }
     }
   },
-  "required": ["analysis", "applicant", "bid_info", "submission"]
+  "required": ["applicant", "bid_info", "submission"]
 }

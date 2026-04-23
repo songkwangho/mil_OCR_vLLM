@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -59,6 +60,10 @@ class HandwritingReader:
         if task.json_schema is not None:
             return self._run_with_schema(task)
         return self._run_plain_text(task)
+
+    async def run_async(self, task: SkillTask) -> SkillResult:
+        """동기 `run()`을 스레드풀에서 실행 — 동일 결과, 이벤트 루프 비차단."""
+        return await asyncio.to_thread(self.run, task)
 
     # ─────────────────────────────────────────────
     #  guided_json 분기 — 구조화 JSON 반환

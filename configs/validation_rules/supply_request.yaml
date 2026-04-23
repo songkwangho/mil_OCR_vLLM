@@ -1,0 +1,48 @@
+# Layer 2 — supply_request 전용 교차 검증 규칙
+# 기존 validator.py _validate_arithmetic / _validate_code_format / _validate_missing_fields
+# 중 supply_request 해당 부분 이관 (ARITH-001, CODE-001~002, MISS-001).
+
+rules:
+  - rule_id: arith_001
+    type: ARITHMETIC
+    result_field: total
+    operands: [quantity, unit_price]
+    operator: multiply
+    error_type: arithmetic
+    severity: high
+    penalty: -0.30
+    message: "합계 ≠ 수량 × 단가"
+
+  - rule_id: date_001
+    type: DATE_ORDER
+    fields: [request_date]
+    error_type: date_logic
+    severity: medium
+    penalty: -0.10
+    message: "날짜 순서 논리 위반"
+
+  - rule_id: code_001
+    type: REGEX_MATCH
+    field: nsn
+    pattern: '^\d{4}-\d{2}-\d{3}-\d{4}$'
+    error_type: code_format
+    severity: medium
+    penalty: -0.15
+    message: "NSN 형식 불일치 (NNNN-NN-NNN-NNNN)"
+
+  - rule_id: code_002
+    type: REGEX_MATCH
+    field: k_nsn
+    pattern: '^KN-\d{5}-\d{4}$'
+    error_type: code_format
+    severity: medium
+    penalty: -0.15
+    message: "K-NSN 형식 불일치 (KN-NNNNN-NNNN)"
+
+  - rule_id: miss_001
+    type: NOT_EMPTY
+    field: unit_code
+    error_type: missing_field
+    severity: high
+    penalty: -0.20
+    message: "필수 필드 누락: unit_code"

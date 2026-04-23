@@ -1,0 +1,64 @@
+# team_gh 전용 override — 기존 ocr_vllm(jh32kim) stack과 공존.
+# 사용법:
+#   docker compose -p team_gh -f docker-compose.yml -f docker-compose.team-gh.yml up -d vllm-server layout
+#
+# 포트/이름/GPU 디바이스만 격리. 이미지 빌드 정의와 volumes/env는 원본 그대로 재사용.
+
+services:
+  vllm-server:
+    container_name: team-gh-vllm
+    ports: !reset
+      - "8200:8000"
+    deploy: !reset
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["3"]
+              capabilities: [gpu]
+
+  layout:
+    container_name: team-gh-layout
+    ports: !reset
+      - "8282:8082"
+    deploy: !reset
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
+  pipeline:
+    container_name: team-gh-pipeline
+    ports: !reset
+      - "8180:8080"
+    environment:
+      - VLLM_BASE_URL=http://vllm-server:8000/v1
+      - VLLM_HEALTH_URL=http://vllm-server:8000/health
+      - LAYOUT_SERVICE_URL=http://layout:8082
+      - FALLBACK_BASE_URL=http://fallback:8081
+      - HF_HUB_OFFLINE=1
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+      - REVIEW_QUEUE_ENABLED=true
+      - REVIEW_QUEUE_DB_PATH=/data/review_queue.db
+      - FALLBACK_ENABLED=true
+    deploy: !reset
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
+  fallback:
+    container_name: team-gh-fallback
+    ports: !reset
+      - "8181:8081"
+    deploy: !reset
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]

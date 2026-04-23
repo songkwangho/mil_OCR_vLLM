@@ -10,6 +10,7 @@ guided_json 없이 순수 텍스트 추출 — 스키마 강제보다 정확한 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from src.interfaces.types import SkillResult, SkillTask
@@ -89,3 +90,7 @@ class PrintedTextReader:
             raw_response=raw,
             warnings=warnings,
         )
+
+    async def run_async(self, task: SkillTask) -> SkillResult:
+        """동기 `run()`을 스레드풀에서 실행 — 동일 결과, 이벤트 루프 비차단."""
+        return await asyncio.to_thread(self.run, task)

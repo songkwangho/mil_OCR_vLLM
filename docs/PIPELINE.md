@@ -716,14 +716,27 @@ class StructuredExtractor:
     RETRY_THRESHOLD = 0.60
     MAX_RETRIES = 1
     RETRY_BUDGET_MAP = {140: 280, 280: 560, 560: 1120, 1120: 1120}
+    MAX_CONCURRENT_REQUESTS = 16   # 그룹 내 동시 요청 상한
 
     def extract(self, groups, doc_id, form_type, ...) -> VLMResult:
         """DISPATCH_ORDER 순서로 pixel_budget 배치 전송.
-        template 출처 영역도 동일 흐름으로 처리.
-        저신뢰 필드 감지 시 pixel_budget 상향 + OCR 힌트 재시도.
+        그룹 간 순서(140→560→1120) 유지 + 그룹 내 region은 asyncio.gather로 병렬.
+        저신뢰 필드 재시도도 asyncio.gather로 병렬 처리.
         seal/signature 영역은 S4/S6 Skill로 위임.
         """
 ```
+
+**병렬 처리 설계 (2026-04-22)**: 필드별 크롭 전환으로 bid_application이 22개 region이 되면서 순차 처리 시간이 선형 증가. 동일 `pixel_budget` 그룹 내 region을 `asyncio.gather`로 동시에 vLLM에 전송하면 vLLM의 continuous batching이 한번에 처리한다.
+
+- **그룹 간 순서 유지**: prefix caching 효율을 살리기 위해 140→560→1120 순서는 고정. 동일 `system_prompt`를 쓰는 요청들이 연속으로 들어올 때 KV 블록이 재사용됨.
+- **그룹 내 병렬**: `asyncio.Semaphore(MAX_CONCURRENT_REQUESTS=16)` + `asyncio.gather(*[_process_single_async(r) for r in bucket])`. 16은 vLLM `--max-num-seqs=64` 기준 여유 있는 상한.
+- **구현 방식**: 동기 `_process_single`을 `asyncio.to_thread`로 감싸 스레드풀에서 실행. vLLM HTTP 호출은 I/O 대기가 지배적이라 GIL이 해제되어 동시 처리 이득이 크다. 기존 동기 `call()`/`run()` 메서드를 그대로 재사용 — 단위 테스트 호환성 유지.
+- **단일 region 실패**: `asyncio.gather(..., return_exceptions=True)` 로 수집하여 해당 region만 warning 처리, 나머지 그룹은 계속 진행.
+- **재시도 병렬**: `_retry_low_confidence_fields`도 동일 패턴으로 모든 재시도 대상을 `gather`로 동시 처리.
+
+**VLMClient.call_async**: 동기 `call()`을 `asyncio.to_thread`로 래핑. monitor/logprobs/에러 처리 로직을 그대로 공유.
+
+**Skill Registry (other 경로)**: `dispatch_async` 도 동일 패턴 — 버킷별 `asyncio.gather` + 세마포어 제한. `run_async` 메서드가 있는 Skill은 직접 호출, 없으면 `asyncio.to_thread` 폴백.
 
 **field_key blob 보존**: `spec.field_key`가 있으면 VLM 출력 dict/list/스칼라 **전체를 단일 FieldValue로 저장**(`field_key=spec.field_key, region_id=cropped.region_id`)합니다. JSON 키 단위로 분해하지 않으므로 sub-schema 응답이 그대로 Assembler로 전달됩니다. 재시도 시 `field_key`를 신규 InstructionSpec에 그대로 전파합니다.
 
@@ -1009,11 +1022,76 @@ def _process_other_document(self, layout, preprocessed, doc_id, ...):
 > **재시도 임계값**: 0.60 이하 → pixel_budget 상향 + 1회 재시도
 > **template 출처 영역**: 동일 임계값 적용. 낮은 신뢰도가 반복되면 템플릿 좌표 재검토 신호.
 
-### 6-2. P4 룰 검증 보정 (military 경로만)
+### 6-2. P4 룰 검증 보정 (military 경로만) — Layer 1/2 범용 엔진
 
-- `합계 ≠ 수량 × 단가` → 관련 필드 신뢰도 **-0.30**
-- NSN 형식 불일치 → 신뢰도 **-0.15**
-- 날짜 순서 위반 → 신뢰도 **-0.10**
+검증 로직은 Python 코드에서 **분리**되어 YAML 규칙 파일로 선언된다. 새 서식
+추가 시 `configs/validation_rules/{form_type}.yaml`만 작성하면 되며 Python
+수정 불요.
+
+**Layer 1 — 공통 필드 패턴** (`FieldPatternValidator` + `common.yaml`)
+  - form_type 무관. data_type / field_key 두 축으로 패턴 검증.
+  - 매칭 실패 시 `normalize` 규칙으로 자동 교정 시도 (예: "2024년5월20일" → "2024년 05월 20일").
+  - 교정 실패한 값만 ValidationError로 기록 → P4 penalty_map 반영.
+
+**Layer 2 — 서식별 교차 검증** (`CrossFieldValidator` + `{form_type}.yaml`)
+  - assembled_json 기반. 9가지 규칙 타입 지원:
+    `REGEX_MATCH`, `NOT_EMPTY`, `DATE_ORDER`, `ARITHMETIC`,
+    `NAME_MATCH`, `ADDR_CONTAINS`, `ARRAY_LENGTH`, `ARRAY_SEQUENCE`, `ARRAY_ENUM`.
+  - 각 규칙은 `rule_id`/`error_type`/`severity`/`penalty`/`message`를 포함해
+    ValidationError로 그대로 매핑.
+  - 기존 BID-001~004/CHK-001~004/ARITH-001이 `bid_application.yaml` /
+    `equipment_checklist.yaml` / `supply_request.yaml`으로 이관됨.
+  - 신규 확장: `bid_date_001`(인감발급일≤신청일), `bid_person_001`(대표자↔신청인
+    성명일치), `bid_addr_001`(사업장소재지↔주소 포함) 등.
+
+**기존 하드코딩 규칙의 페널티** (필드별 신뢰도 감점)
+  - `합계 ≠ 수량 × 단가` → 관련 필드 신뢰도 **-0.30**
+  - NSN 형식 불일치 → 신뢰도 **-0.15**
+  - 날짜 순서 위반 → 신뢰도 **-0.10**
+
+페널티는 YAML `penalty` 필드로도 선언되나, 현재 실제 적용은 `_build_penalty_map`이
+ValidationError의 `error_type`을 `logprobs_scorer` 상수로 매핑하는 방식 유지(하위호환).
+
+### 6-2-1. 일관성 재추론 루프 (ConsistencyReasoningLoop)
+
+**파일**: `src/postprocess/consistency_reasoning_loop.py`
+
+P4 validate() 내부에서 Layer 2 검증 실패 또는 저신뢰 필드 존재 시 **1회** 실행.
+학습 없이 추론 단계에서 인식 품질을 올리는 경량 교정.
+
+```
+Layer 1 + Layer 2 검증
+    ↓
+cross_errors OR any(conf < 0.60) ?
+    ↓ YES
+ConsistencyReasoningLoop.run()
+    ├── 방법 1: 일관성 기반 재추론
+    │     Layer 2 실패 필드 → 제약 문장("날짜 순서가 맞아야 함") 주입
+    └── 방법 2: 컨텍스트 주입 재추론
+          저신뢰 필드 → 고신뢰(≥0.70) 관련 필드 값 힌트 주입
+    ↓
+Assembler 재조립 (assembled_json 갱신)
+    ↓
+Layer 1 + Layer 2 재검증
+```
+
+**안전장치**:
+- 한 문서당 최대 **MAX_REREASON_FIELDS=5** 필드 (우선순위: consistency > low_confidence, confidence 낮은 순)
+- 재추론 후 `new_confidence > current_confidence`인 경우에만 교체, 미개선이면 원본 유지
+- `was_retried=True` 필드는 스킵 (P3-B의 logprobs 기반 재시도와 중복 방지)
+- 단일 VLM 호출 실패 시 해당 필드만 스킵 (전체 파이프라인 중단 없음)
+- `form_type == OTHER`는 스킵
+
+**RELEVANCE_MAP** — field_key별 연관 필드 선언:
+- `address ← [phone, business_location, business_reg_number]`
+- `agent_name ← [agent_dob]`
+- `submitter_name ← [representative]`
+- `bid_name ← [announcement_number, bid_date]`
+- 기타 입찰/인감 섹션 매핑 포함
+
+새 서식 추가 시 `_RELEVANCE_MAP`에 필드 관계를 정의하면 자동으로 컨텍스트 주입 대상에 포함됨.
+
+**전달 경로**: Orchestrator가 `p2_5c_groups`에서 `region_id → CroppedRegion` 맵을 만들고 `p3b_fixed_values`/`p3b_schema`를 result에 저장해 P4 validate()에 전달. 재추론 후 Assembler가 `{x-assembly-rules}` 기반으로 재조립.
 
 ### 6-3. NSN 패턴 강제 전략
 

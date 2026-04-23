@@ -116,6 +116,8 @@ class PipelineResult:
     p2_5b_instructions: Optional[dict] = None         # P2.5-B InstructionRouter (region_id → InstructionSpec)
     p2_5c_groups: Optional[dict] = None               # P2.5-C ResolutionRouter (pixel_budget → [CroppedRegion])
     p3b_trace: list = field(default_factory=list)     # P3-B 영역별 vLLM 호출 trace
+    p3b_fixed_values: dict = field(default_factory=dict)  # TemplateAugmentor fixed_text (P4 재추론 시 재조립에 사용)
+    p3b_schema: Optional[dict] = None                 # P3-B에 전달한 스키마 (P4 재추론 시 재조립에 사용)
     p3_result: Optional[VLMResult] = None              # P3-B 추출 결과
     p4_result: Optional[ValidatedResult] = None
     output: Optional[PipelineOutput] = None
@@ -330,8 +332,29 @@ class PipelineOrchestrator:
     def _get_p4(self):
         if "p4" not in self._components:
             from src.postprocess.validator import P4Validator
-            self._components["p4"] = P4Validator()
-            logger.info("오케스트레이터: P4 초기화 완료")
+            # ConsistencyReasoningLoop에 필요한 VLMClient를 StructuredExtractor와 공유.
+            # P3-B가 먼저 초기화되므로 _vlm_client 속성 재사용. 미초기화면 직접 생성.
+            vlm_client = None
+            try:
+                p3b = self._components.get("p3b")
+                if p3b is not None:
+                    vlm_client = getattr(p3b, "_vlm_client", None)
+                if vlm_client is None:
+                    from src.vlm.vlm_client import VLMClient
+                    vlm_client = VLMClient(
+                        base_url=self.cfg.vllm_base_url,
+                        model_name="/models/gemma4/gemma-4-26b-a4b-it/",
+                    )
+            except Exception as e:
+                logger.warning(
+                    "오케스트레이터: P4용 VLMClient 준비 실패 → 재추론 비활성화: %s", e,
+                )
+                vlm_client = None
+            self._components["p4"] = P4Validator(vlm_client=vlm_client)
+            logger.info(
+                "오케스트레이터: P4 초기화 완료 (재추론 %s)",
+                "활성" if vlm_client is not None else "비활성",
+            )
         return self._components["p4"]
 
     def _get_p5(self):
@@ -429,9 +452,16 @@ class PipelineOrchestrator:
             layout=layout, preprocessed=preprocessed, stats=stats,
         )
 
-        # 2) 비-표 영역 태스크
+        # 2) 비-표 영역 태스크 — 그룹 간 순서 유지, 그룹 내 region은 asyncio.gather로 병렬
         non_table_tasks = registry.build_tasks(layout=layout, preprocessed=preprocessed)
-        general_results = registry.dispatch(non_table_tasks, stats=stats)
+        import asyncio as _asyncio
+        try:
+            general_results = _asyncio.run(
+                registry.dispatch_async(non_table_tasks, stats=stats)
+            )
+        except RuntimeError:
+            # 이미 이벤트 루프가 돌고 있으면 동기 폴백
+            general_results = registry.dispatch(non_table_tasks, stats=stats)
 
         skill_results = general_results + cell_results
         result.skill_results = skill_results
@@ -810,6 +840,9 @@ class PipelineOrchestrator:
                         if aug_layout is not None:
                             p2_out = aug_layout
                             result.p2_result = aug_layout
+                    # P4 재추론 단계에서 Assembler 재조립 시 필요 — result에 보관
+                    result.p3b_fixed_values = fixed_values
+                    result.p3b_schema = schema
 
                     # P2.5-B: InstructionRouter
                     instructions = self._run_step(
@@ -872,10 +905,23 @@ class PipelineOrchestrator:
             result.status = PipelineStatus.FAILED
             return self._finalize(result)
 
-        # ─── P4: 룰 검증 + 신뢰도 보정 ───
+        # ─── P4: 룰 검증 + 신뢰도 보정 + (가능 시) 재추론 ───
+        # P2.5-C groups → region_id 기반 map (재추론 시 크롭 이미지·instruction_spec 재사용)
+        region_map_for_p4: dict = {}
+        if result.p2_5c_groups:
+            for group in result.p2_5c_groups.values():
+                for cr in group:
+                    region_map_for_p4[cr.region_id] = cr
+
         p4_out = self._run_step(
             "P4", result,
-            lambda: self._get_p4().validate(p3_out, result.processing_path),
+            lambda: self._get_p4().validate(
+                p3_out,
+                result.processing_path,
+                region_map=region_map_for_p4,
+                schema=result.p3b_schema,
+                fixed_values=result.p3b_fixed_values,
+            ),
         )
         result.p4_result = p4_out
         if p4_out is None:

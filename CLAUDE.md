@@ -152,6 +152,10 @@ PP-DocLayout Fine-tuning과 상호 보완:
 - **TableExtractor 2패스**: 패스1(구조 추출) → 패스2(셀별 Skill 라우팅)
 - **SignatureDetector**: 서명 존재 여부 이진 분류 (OCR 아님)
 - **저신뢰 재시도**: logprobs 임계값 미달 → pixel_budget 상향 후 재호출 (field_key 보존)
+- **그룹 내 병렬 처리** (2026-04-22): StructuredExtractor와 SkillRegistry가 동일 pixel_budget 그룹 내 region을 `asyncio.gather`로 병렬 vLLM 호출. 그룹 간 순서(140→560→1120)는 prefix caching 유지를 위해 고정, 동시 요청 상한 16. 동기 `call()`/`run()`은 `asyncio.to_thread`로 감싸 재사용 → 단위 테스트 호환.
+- **Layer 1/2 검증 엔진** (2026-04-22): P4 Validator를 범용 엔진 + YAML 규칙 파일로 분리. Layer 1(`FieldPatternValidator` + `configs/validation_rules/common.yaml`)은 form_type 무관하게 data_type/field_key 패턴 검증 + 날짜 등 자동 정규화. Layer 2(`CrossFieldValidator` + `{form_type}.yaml`)는 REGEX/NOT_EMPTY/DATE_ORDER/ARITHMETIC/NAME_MATCH/ADDR_CONTAINS/ARRAY_*를 YAML로 선언. 새 서식은 YAML만 추가. 기존 BID-001~004/CHK-001~004/ARITH-001 등 하드코딩 전면 이관 + bid_date_001/bid_person_001/bid_addr_001 등 신규 규칙 확장.
+- **일관성 재추론 루프** (2026-04-23): Layer 2 실패 또는 저신뢰 필드(<0.60) 발견 시 P4가 `ConsistencyReasoningLoop`를 1회 실행해 VLM 재추론. (1) 일관성 제약 주입 — NAME_MATCH/DATE_ORDER/ADDR_CONTAINS/ARITHMETIC 위반 필드에 제약 문장 동봉, (2) 컨텍스트 주입 — 저신뢰 필드에 고신뢰(≥0.70) 관련 필드 값을 힌트로 전달. 신뢰도 개선된 경우에만 교체, 미개선이면 원본 유지. 한 문서당 최대 5개 필드 / `was_retried` 이미 True면 스킵. 재추론 후 Assembler 재조립 + Layer 1/2 재검증.
+- **Layer 3 도메인 사전 교정** (2026-04-23): `DomainDictCorrector` + `configs/domain_dict/*.yaml` 폐쇄집합 정규화/교정. (1) business_location 별칭 정규화 ("서울시"→"서울특별시"), (2) address의 시/도로 business_location 덮어쓰기, (3) industry_class_number Levenshtein 최근접, (4) issuing_office Levenshtein 최근접. Layer 2 직후 + (재추론 발생 시) 재조립 직후 2단계 적용으로 재조립이 교정 결과를 덮어쓰지 않도록 보장. 교정 로그는 warnings에 누적.
 - **SPOF 대비**: 수준A(헬스체크) + 수준B(fallback) + 수준C(검토 큐)
 
 ---
@@ -235,7 +239,7 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | P2.5-A.5 | TemplateAugmentor | `src/vlm/template_augmentor.py` | ✅ v4: 포함도 기반 다중 PP 흡수 + field_key 부여 + fixed_text 처리 (반환값 `(layout, fixed_values)`) |
 | P2.5-B | InstructionRouter | `src/vlm/instruction_router.py` | ✅ 1-shot + OCR 힌트 + sub-schema 분해(`_extract_sub_schema`) |
 | P2.5-C | ResolutionRouter | `src/vlm/resolution_router.py` | ✅ 48px 정렬 + DISPATCH_ORDER + 패딩 절대 상한 |
-| P3-B | StructuredExtractor | `src/vlm/structured_extractor.py` | ✅ 저신뢰 재시도 + field_key blob 보존 + Assembler 호출 |
+| P3-B | StructuredExtractor | `src/vlm/structured_extractor.py` | ✅ 저신뢰 재시도 + field_key blob 보존 + Assembler 호출 + **asyncio.gather 병렬(MAX_CONCURRENT_REQUESTS=16)** |
 | — | Assembler | `src/vlm/assembler.py` | ✅ x-assembly-rules 기반 region→full dict 조립, 누락 자동 보완 |
 | — | Budget Config | `src/vlm/budget_config.py` | ✅ PIXEL_BUDGETS/FALLBACK_PIXEL_BUDGET/DISPATCH_ORDER 중앙화 |
 | — | OCR 힌트 제공자 | `src/vlm/ocr_hint_provider.py` | 🟡 구현 완료, 폐쇄망 가중치 배치 필요 |
@@ -248,7 +252,12 @@ PP-DocLayout Fine-tuning과 상호 보완:
 | — | S6 SignatureDetector | `src/vlm/skills/signature_detector.py` | ✅ |
 | — | S7 StructuredAggregator | `src/vlm/skills/aggregator.py` | ✅ S2~S6 결과 컨텍스트 주입 → official_document.json guided_json 집계 (VLM 실패 시 region 평탄화 폴백) |
 | — | VLM 공용 클라이언트 | `src/vlm/vlm_client.py` | ✅ |
-| P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ✅ 경로별 임계값 + region_id/was_retried 보존 |
+| P4 | 룰 검증 + 신뢰도 보정 | `src/postprocess/validator.py` | ✅ 경로별 임계값 + region_id/was_retried 보존 + **Layer 1/2 YAML 엔진 호출** |
+| — | Layer 1 공통 패턴 | `src/postprocess/field_pattern_validator.py` + `configs/validation_rules/common.yaml` | ✅ data_type/field_key 패턴 + 자동 정규화 |
+| — | Layer 2 교차 검증 | `src/postprocess/cross_field_validator.py` + `configs/validation_rules/{form_type}.yaml` | ✅ REGEX/NOT_EMPTY/DATE_ORDER/ARITHMETIC/NAME_MATCH/ADDR_CONTAINS/ARRAY_* 9가지 규칙 타입 |
+| — | 일관성 재추론 | `src/postprocess/consistency_reasoning_loop.py` | ✅ Layer 2 실패/저신뢰 필드에 대해 제약·컨텍스트 주입 재추론 1회, 개선 시만 교체 |
+| — | Layer 3 도메인 사전 | `src/postprocess/domain_dict_corrector.py` + `configs/domain_dict/*.yaml` | ✅ 행정구역 별칭 정규화 + Levenshtein 최근접 교정 (business_location/industry_class_number/issuing_office) |
+| — | 최종 결과 저장 | `scripts/run_pipeline_with_outputs.py` `save_final_output` + `save_trial_readme` | ✅ 문서 폴더 최상위에 `final_output.json` (최종 OCR 결과 단일 파일), trial 최상위에 `README.md` (디렉터리 구조 + 문서별 링크) |
 | — | 계급 정규화 | `src/postprocess/rank_normalizer.py` | ✅ 한국군 계급 Levenshtein 최근접 매칭 |
 | — | bbox 유틸 | `src/preprocess/bbox_utils.py` | ✅ compute_iou 공용화 (layout_postprocessor/template_augmentor 사용) |
 | P5 | 직렬화 | `src/postprocess/serializer.py` | ✅ assembled_json 있는 서식에 `document_title` 정적 주입 + fields[] 중복 제거 (조건부) |
@@ -397,3 +406,48 @@ mil_OCR_v2/
 | Real-ESRGAN SR | 2GB | GPU | 타일 기반 |
 | PaddleOCR (OCR 힌트) | 1GB | GPU (선택) | 경량 mobile 모델 |
 | Gemma4 Fine-tuning (LoRA) | 16~24GB | GPU | PEFT |
+
+## 코드 리뷰
+
+코드 리뷰는 `backend-code-reviewer` 서브에이전트가 담당합니다 (`.claude/agents/backend-code-reviewer.md`).
+
+### 자동 호출 트리거
+
+Claude Code가 아래 상황을 감지하면 자동으로 에이전트를 호출합니다.
+별도 명령 불필요.
+
+| 트리거 | 예시 |
+|--------|------|
+| 새 컴포넌트 구현 완료 | "structured_extractor.py 구현했어" |
+| 기존 컴포넌트 수정 완료 | "assembler.py 수정 완료" |
+| 신규 FormType 추가 완료 | "bid_application 추가 완료" |
+| 리뷰 요청 키워드 | "리뷰해줘", "코드 검토", "review" |
+
+### 리뷰 범위
+
+에이전트는 아래 항목을 순서대로 점검합니다.
+
+1. **아키텍처** — 파이프라인 책임 경계, DDD 원칙, 의존성 방향
+2. **인터페이스** — dataclass 사용, 타입 힌트, 반환 타입
+3. **VLM 호출** — temperature=0.0, guided_json, budget_config 사용
+4. **TemplateAugmentor** — field_key, fixed_text, 보호 region
+5. **Assembler** — blob 언래핑, x-assembly-rules, 유령 필드 방지
+6. **P4 Validator** — 하드코딩 금지, 신뢰도 산출, fixed_content 제외
+7. **재추론 루프** — 안전장치, MAX_REREASON_FIELDS, 미개선 시 원본 유지
+8. **도메인 사전** — 범용성, YAML 분리, Levenshtein 임계값 상수화
+9. **폐쇄망 보안** — 외부 API 호출 금지, HF_HUB_OFFLINE 준수
+10. **코딩 컨벤션** — docstring, 타입 힌트, 매직 넘버 금지
+
+신규 FormType 추가 시 8개 파일 체크리스트(enum → label → classifier → schema → template → examples → validation_rules → tests)도 함께 확인합니다.
+
+### 보고 형식
+
+| 심각도 | 의미 |
+|--------|------|
+| 🔴 CRITICAL | 즉시 수정 — 파이프라인 장애·데이터 오염·보안 위반 가능 |
+| 🟡 WARNING | 수정 권장 — 설계 원칙 위반·성능 저하·유지보수성 문제 |
+| 🟢 SUGGESTION | 개선 제안 — 더 나은 구현·일관성·코드 품질 향상 |
+| ✅ PASS | 문제 없음 |
+
+**자동 수정 가능** 이슈는 에이전트가 직접 파일을 수정합니다.
+**수동 확인 필요** 이슈(bbox 좌표, 비즈니스 로직 판단 등)는 별도 표시됩니다.

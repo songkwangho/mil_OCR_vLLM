@@ -10,6 +10,7 @@ PIPELINE.md §4-5 구현.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -109,6 +110,9 @@ class SealReader:
             warnings=warnings,
         )
 
+    async def run_async(self, task: SkillTask) -> SkillResult:
+        """동기 `run()`을 스레드풀에서 실행 — 동일 결과, 이벤트 루프 비차단."""
+        return await asyncio.to_thread(self.run, task)
 
 
 def _parse_seal_json(raw: str) -> tuple[str, float]:

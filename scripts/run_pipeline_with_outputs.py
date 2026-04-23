@@ -534,6 +534,182 @@ def save_p6(out_dir: Path, result: PipelineResult):
     })
 
 
+def save_final_output(out_dir: Path, result: PipelineResult) -> None:
+    """문서 폴더 최상위에 `final_output.json` 저장.
+
+    모든 단계 산출물을 종합한 **최종 OCR 결과** — 검토자/후속 시스템이 이 파일만
+    읽으면 문서 전체 결과를 파악할 수 있도록 한다.
+    단계별 상세(`P1/` ~ `P6/`)는 디버깅·추적용이며 여기선 중복 저장하지 않는다.
+    """
+    status_value = (
+        result.status.value if hasattr(result.status, "value") else str(result.status)
+    )
+    processing_path_value = (
+        result.processing_path.value
+        if hasattr(result.processing_path, "value")
+        else str(result.processing_path)
+    )
+
+    p3 = result.p3_result
+    p4 = result.p4_result
+    p6 = result.output
+
+    form_type = None
+    form_confidence = None
+    if p3 is not None:
+        form_type = (
+            p3.form_type.value if hasattr(p3.form_type, "value") else str(p3.form_type)
+        )
+        form_confidence = round(p3.form_confidence, 4)
+
+    assembled = getattr(p4, "assembled_json", None) if p4 is not None else None
+
+    fields_summary = []
+    if p4 is not None:
+        for fv in p4.fields:
+            fields_summary.append({
+                "field_key": fv.field_key,
+                "value": fv.corrected_value,
+                "confidence": round(fv.confidence, 4),
+                "is_flagged": fv.is_flagged,
+                "region_id": fv.region_id,
+            })
+
+    validation_errors = []
+    if p4 is not None:
+        for err in p4.validation_errors:
+            validation_errors.append({
+                "error_id": err.error_id,
+                "rule": err.error_type.value if hasattr(err.error_type, "value") else str(err.error_type),
+                "severity": err.severity.value if hasattr(err.severity, "value") else str(err.severity),
+                "field": err.field_ref,
+                "message": err.message,
+            })
+
+    final = {
+        "doc_id": result.doc_id,
+        "status": status_value,
+        "processing_path": processing_path_value,
+        "form_type": form_type,
+        "form_confidence": form_confidence,
+        "overall_confidence": round(p4.overall_confidence, 4) if p4 else None,
+        "review_required": p4.review_required if p4 else None,
+        "review_queue_id": p6.review_queue_id if p6 else None,
+        "total_ms": round(result.total_ms, 1),
+        "validation_error_count": len(validation_errors),
+        "validation_errors": validation_errors,
+        # 최종 구조화 결과 — assembled_json이 있으면 그것이 진짜 결과, 없으면 fields 평탄 리스트
+        "result": assembled if assembled is not None else {"fields": fields_summary},
+        "fields": fields_summary,   # region 단위 디버그용 — raw/ corrected/ confidence
+    }
+    _save_json(out_dir / "final_output.json", final)
+
+
+def _collect_final_outputs(run_dir: Path) -> list[dict]:
+    """run_dir 하위에서 final_output.json을 전부 스캔해 핵심 메타만 반환.
+
+    PDF 문서의 페이지별 final_output.json(예: `<doc>/p01/final_output.json`)도
+    포함한다. 경로는 run_dir 기준 상대경로로 기록한다.
+    """
+    entries: list[dict] = []
+    if not run_dir.exists():
+        return entries
+    for fn in sorted(run_dir.rglob("final_output.json")):
+        try:
+            data = json.loads(fn.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        try:
+            rel = fn.relative_to(run_dir).as_posix()
+        except ValueError:
+            rel = fn.name
+        entries.append({
+            "doc_id": data.get("doc_id"),
+            "form_type": data.get("form_type"),
+            "overall_confidence": data.get("overall_confidence"),
+            "review_required": data.get("review_required"),
+            "final_output_rel": rel,
+        })
+    return entries
+
+
+def save_trial_readme(run_dir: Path, doc_results: list) -> None:
+    """trial 최상위에 README.md 자동 생성 — 디렉터리 구조와 문서별 최종 링크 안내."""
+    try:
+        trial_name = run_dir.name
+        lines = [
+            f"# mil_OCR_v2 파이프라인 출력 — {trial_name}",
+            "",
+            f"처리 문서: **{len(doc_results)}건**",
+            "",
+            "## 어디서 최종 OCR 결과를 볼 수 있는가",
+            "",
+            "각 문서 폴더의 **`final_output.json`** 파일이 최종 결과입니다.",
+            "이 파일 하나만 보면 문서 전체 처리 결과를 파악할 수 있습니다.",
+            "",
+            "## 디렉터리 구조",
+            "",
+            "```",
+            "{trial}/",
+            "├── README.md                 ← 이 파일",
+            "├── eval_summary.json         ← 5건 집계 + verdict",
+            "├── run_summary.json          ← 실행 요약 + 단계별 타이밍",
+            "├── warmup_timings.json       ← 모델 로딩 시간 (warm-start 기준점)",
+            "├── report.html               ← delta/verdict HTML 리포트",
+            "├── ocr_results.db            ← SQLite 구조화 DB",
+            "├── review_queue.db           ← 검토 큐 SQLite",
+            "└── <문서명>/",
+            "    ├── final_output.json     ← ★ 최종 OCR 결과 (여기만 보면 됨)",
+            "    ├── summary.json          ← 처리 상태 + 단계별 타이밍",
+            "    ├── metrics.json          ← eval 지표",
+            "    ├── P1/ (화질 보정)",
+            "    │   ├── preprocessed.png / binary.png / result.json",
+            "    ├── P2/ (레이아웃 탐지)",
+            "    │   ├── layout_visualization.png / result.json",
+            "    ├── P2.5A/ (Layout 정제 + TemplateAugmentor)",
+            "    │   ├── layout_visualization.png / result.json",
+            "    ├── P3A/ (FormClassifier)",
+            "    │   └── result.json",
+            "    ├── P2.5B/ (InstructionRouter)",
+            "    │   └── result.json",
+            "    ├── P2.5C/ (ResolutionRouter + 크롭 이미지)",
+            "    │   ├── crops/*.png / result.json",
+            "    ├── P3/ (VLM StructuredExtractor)",
+            "    │   ├── region_traces.json / result.json",
+            "    ├── P4/ (룰 검증 + 신뢰도)",
+            "    │   └── result.json",
+            "    ├── P5/ (직렬화)",
+            "    │   ├── output.json / output.xml / output.csv",
+            "    └── P6/ (DB 적재)",
+            "        └── result.json",
+            "```",
+            "",
+            "## 문서별 최종 결과",
+            "",
+            "| 문서 | form_type | 신뢰도 | 검토필요 | final_output |",
+            "|------|-----------|--------|---------|--------------|",
+        ]
+        for dr in doc_results:
+            dn = dr.get("doc_id", "?")
+            ft = dr.get("form_type") or "-"
+            oc = dr.get("overall_confidence")
+            oc_str = f"{oc:.3f}" if isinstance(oc, (int, float)) else "-"
+            rr = "YES" if dr.get("review_required") else "-"
+            final_rel = "./" + dr.get("final_output_rel", f"{dn}/final_output.json")
+            lines.append(
+                f"| `{dn}` | {ft} | {oc_str} | {rr} | [{final_rel}]({final_rel}) |"
+            )
+        lines.extend([
+            "",
+            "## 단계별 파이프라인 설명",
+            "",
+            "자세한 설계는 [docs/PIPELINE.md](../../../docs/PIPELINE.md)를 참조하세요.",
+        ])
+        (run_dir / "README.md").write_text("\n".join(lines), encoding="utf-8")
+    except Exception as e:
+        logger.warning("README.md 생성 실패: %s", e)
+
+
 def save_summary(out_dir: Path, result: PipelineResult):
     """전체 요약 저장: summary.json"""
     summary = {
@@ -619,6 +795,7 @@ def _handle_pdf_result(pdf_result, doc_id: str, run_dir: Path):
         save_p5(page_dir, page_result)
         save_p6(page_dir, page_result)
         save_summary(page_dir, page_result)
+        save_final_output(page_dir, page_result)
 
     # pdf_summary.json
     pdf_summary = {
@@ -718,6 +895,7 @@ def run_single(pipeline: PipelineOrchestrator, image_path: Path, run_dir: Path):
     save_p5(doc_dir, result)
     save_p6(doc_dir, result)
     save_summary(doc_dir, result)
+    save_final_output(doc_dir, result)
 
     # ── 콘솔 상세 보고 (BACKEND.md §9-7 준수) ──
     print(f"\n{'─' * 80}")
@@ -903,6 +1081,11 @@ def main():
         total_summary["documents"].append(entry)
 
     _save_json(run_dir / "run_summary.json", total_summary)
+
+    # ── trial 최상위 README.md 자동 생성 ──
+    # final_output.json을 직접 스캔해 PDF 페이지별 결과까지 일관되게 수집.
+    readme_entries = _collect_final_outputs(run_dir)
+    save_trial_readme(run_dir, readme_entries)
 
     # ── 콘솔 상세 보고 (BACKEND.md §9-7 준수) ──
     print("\n" + "=" * 80)

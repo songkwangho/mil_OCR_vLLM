@@ -272,3 +272,153 @@ class TestPathExists:
         a = Assembler()
         assert a._path_exists({"a": 1}, "a") is True
         assert a._path_exists({"a": 1}, "b") is False
+
+
+# ─────────────────────────────────────────────
+#  Assembler — _unwrap_blob / sub-schema 응답 래퍼 제거
+# ─────────────────────────────────────────────
+
+class TestAssemblerUnwrap:
+
+    def test_unwrap_field_key_wrapper_dict(self):
+        """VLM이 {'applicant_block': {...}}로 감싸 반환한 것을 벗겨냄."""
+        result = Assembler._unwrap_blob(
+            parsed={"applicant_block": {"company_name": "(주) 인피닉"}},
+            field_key="applicant_block",
+        )
+        assert result == {"company_name": "(주) 인피닉"}
+
+    def test_unwrap_field_key_wrapper_scalar(self):
+        """스칼라 래퍼: {'doc_number': '제 호'} → '제 호'."""
+        result = Assembler._unwrap_blob(
+            parsed={"doc_number": "제 호"},
+            field_key="doc_number",
+        )
+        assert result == "제 호"
+
+    def test_no_unwrap_when_key_absent(self):
+        """field_key가 parsed에 없으면 원본 반환."""
+        p = {"company_name": "A", "representative": "B"}
+        result = Assembler._unwrap_blob(parsed=p, field_key="applicant_block")
+        assert result == p
+
+    def test_no_unwrap_when_multiple_keys(self):
+        """키가 여러 개면 래핑이 아니므로 그대로 반환."""
+        p = {"applicant_block": "A", "other": "B"}
+        result = Assembler._unwrap_blob(parsed=p, field_key="applicant_block")
+        assert result == p
+
+    def test_unwrap_path_tail_for_seal_present(self):
+        """path='agent.seal_present', parsed={'seal_present': false} → false."""
+        result = Assembler._unwrap_blob(
+            parsed={"seal_present": False},
+            field_key="agent_seal",
+            path="agent.seal_present",
+        )
+        assert result is False
+
+    def test_unwrap_double_wrapper(self):
+        """{'agent_seal': {'seal_present': true}} + path='agent.seal_present' → true."""
+        result = Assembler._unwrap_blob(
+            parsed={"agent_seal": {"seal_present": True}},
+            field_key="agent_seal",
+            path="agent.seal_present",
+        )
+        assert result is True
+
+    def test_passthrough_non_dict(self):
+        """dict이 아닌 경우 그대로 반환."""
+        assert Assembler._unwrap_blob(parsed="string value", field_key="doc_number") == "string value"
+        assert Assembler._unwrap_blob(parsed=42, field_key="x") == 42
+        assert Assembler._unwrap_blob(parsed=[1, 2], field_key="x") == [1, 2]
+
+
+class TestAssembledJsonStructure:
+    """assemble() 최종 구조 검증 — 래퍼 없는 flat 매핑."""
+
+    def _schema(self) -> dict:
+        return {
+            "x-assembly-rules": {
+                "applicant_block": "applicant",
+                "agent_seal": "agent.seal_present",
+                "seal_verification_block": "seal_verification",
+            },
+            "type": "object",
+            "properties": {
+                "applicant": {
+                    "type": "object",
+                    "properties": {
+                        "company_name": {"type": "string"},
+                        "representative": {"type": "string"},
+                    },
+                },
+                "agent": {
+                    "type": "object",
+                    "properties": {
+                        "seal_present": {"type": "boolean"},
+                    },
+                },
+                "seal_verification": {
+                    "type": "object",
+                    "properties": {
+                        "issuing_office": {"type": "string"},
+                        "signature_present": {"type": "boolean"},
+                    },
+                },
+            },
+        }
+
+    def _mk_field(self, field_key: str, value) -> FieldValue:
+        import json as _json
+        raw = _json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+        return FieldValue(
+            field_key=field_key,
+            raw_value=raw,
+            corrected_value=raw,
+            data_type="text",
+            confidence=0.9,
+            token_logprobs=[],
+        )
+
+    def test_applicant_no_wrapper(self):
+        """applicant_block 응답이 {'applicant_block': {...}}로 감싸도 flat하게 매핑."""
+        fields = [
+            self._mk_field(
+                "applicant_block",
+                {"applicant_block": {"company_name": "(주) 인피닉", "representative": "박 준형"}},
+            ),
+        ]
+        result = Assembler().assemble(fields=fields, schema=self._schema())
+        assert result["applicant"] == {"company_name": "(주) 인피닉", "representative": "박 준형"}
+        assert "applicant_block" not in result["applicant"]
+
+    def test_agent_seal_unwraps_to_boolean(self):
+        """agent_seal이 {'seal_present': false} 반환 → agent.seal_present = false."""
+        fields = [self._mk_field("agent_seal", {"seal_present": False})]
+        result = Assembler().assemble(fields=fields, schema=self._schema())
+        assert result["agent"]["seal_present"] is False
+
+    def test_agent_seal_double_wrapper(self):
+        """agent_seal이 {'agent_seal': {'seal_present': true}}로 감싸도 boolean 추출."""
+        fields = [
+            self._mk_field("agent_seal", {"agent_seal": {"seal_present": True}}),
+        ]
+        result = Assembler().assemble(fields=fields, schema=self._schema())
+        assert result["agent"]["seal_present"] is True
+
+    def test_table_region_field_connected(self):
+        """table region field_key(seal_verification_block)가 assembled_json.seal_verification에 연결됨."""
+        fields = [
+            self._mk_field(
+                "seal_verification_block",
+                {
+                    "seal_verification_block": {
+                        "issuing_office": "서울특별시 강남구",
+                        "signature_present": True,
+                    }
+                },
+            ),
+        ]
+        result = Assembler().assemble(fields=fields, schema=self._schema())
+        assert result["seal_verification"]["issuing_office"] == "서울특별시 강남구"
+        assert result["seal_verification"]["signature_present"] is True

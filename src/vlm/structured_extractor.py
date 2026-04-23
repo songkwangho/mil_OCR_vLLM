@@ -16,6 +16,7 @@ Output: VLMResult
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -216,6 +217,10 @@ RETRY_BUDGET_MAP: dict[int, int] = {
     1120: 1120,  # 이미 최대 — 동일 budget 유지
 }
 
+# 동시 처리 제한 — vLLM --max-num-seqs=64 기준 여유 있는 상한.
+# 동일 이벤트 루프에서 벡터화된 I/O만 대기하므로 CPU 부담은 미미.
+MAX_CONCURRENT_REQUESTS: int = 16
+
 
 class StructuredExtractor:
     """P3-B — 배치 병렬 VLM 구조화 추출.
@@ -291,85 +296,113 @@ class StructuredExtractor:
         all_domain_codes: list[DomainCode] = []
         raw_json_parts: list[str] = []
 
-        # pixel_budget별 순차 처리 (각 그룹 내에서는 순차 호출)
-        for budget, regions in sorted(groups.items(), reverse=True):
-            logger.info(
-                "[P3-B][%s] 배치 처리: budget=%d, regions=%d",
-                doc_id, budget, len(regions),
-            )
+        # pixel_budget별 그룹 처리 — 그룹 간 순서 유지(prefix caching),
+        # 그룹 내 region은 asyncio.gather로 병렬 처리 (MAX_CONCURRENT_REQUESTS 상한).
+        async def _gather_group(
+            regions: list[CroppedRegion],
+            semaphore: asyncio.Semaphore,
+        ) -> list[tuple[CroppedRegion, float, Any]]:
+            async def _one(cr: CroppedRegion):
+                async with semaphore:
+                    t0 = time.time()
+                    try:
+                        res = await asyncio.to_thread(
+                            self._process_single, cr, schema, warnings, form_type
+                        )
+                        return cr, (time.time() - t0) * 1000, res
+                    except Exception as e:
+                        return cr, (time.time() - t0) * 1000, e
+            return await asyncio.gather(*[_one(c) for c in regions])
 
-            for cropped in regions:
-                region_t0 = time.time()
-                try:
-                    result = self._process_single(cropped, schema, warnings, form_type)
-                    region_ms = (time.time() - region_t0) * 1000
-                    if result is None:
-                        if trace is not None:
-                            trace.append({
-                                "region_id": cropped.region_id,
-                                "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
-                                "pixel_budget": cropped.pixel_budget,
-                                "elapsed_ms": round(region_ms, 1),
-                                "status": "skipped",
-                                "field_count": 0,
-                                "table_count": 0,
-                                "domain_code_count": 0,
-                                "raw_response": "",
-                            })
-                        continue
+        sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
-                    fields, tables, codes, raw = result
-                    all_fields.extend(fields)
-                    all_tables.extend(tables)
-                    all_domain_codes.extend(codes)
-                    if raw:
-                        raw_json_parts.append(raw)
+        async def _run_all_groups():
+            out: list[tuple[CroppedRegion, float, Any]] = []
+            for budget, regions in sorted(groups.items(), reverse=True):
+                logger.info(
+                    "[P3-B][%s] 배치 처리(병렬): budget=%d, regions=%d",
+                    doc_id, budget, len(regions),
+                )
+                out.extend(await _gather_group(regions, sem))
+            return out
 
-                    if trace is not None:
-                        trace.append({
-                            "region_id": cropped.region_id,
-                            "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
-                            "pixel_budget": cropped.pixel_budget,
-                            "elapsed_ms": round(region_ms, 1),
-                            "status": "ok",
-                            "field_count": len(fields),
-                            "table_count": len(tables),
-                            "domain_code_count": len(codes),
-                            "instruction": cropped.instruction_spec.user_instruction,
-                            "system_prompt": cropped.instruction_spec.system_prompt,
-                            "raw_response": raw,
-                            "fields": [
-                                {
-                                    "field_key": f.field_key,
-                                    "raw_value": f.raw_value,
-                                    "data_type": f.data_type,
-                                    "confidence": round(f.confidence, 4),
-                                    "is_flagged": f.is_flagged,
-                                }
-                                for f in fields
-                            ],
-                        })
+        try:
+            gathered = asyncio.run(_run_all_groups())
+        except RuntimeError:
+            # 이미 이벤트 루프가 동작 중인 드문 상황: nested 실행 폴백
+            loop = asyncio.new_event_loop()
+            try:
+                gathered = loop.run_until_complete(_run_all_groups())
+            finally:
+                loop.close()
 
-                except Exception as e:
-                    region_ms = (time.time() - region_t0) * 1000
-                    warnings.append(
-                        f"Region {cropped.region_id} failed: {e}"
+        for cropped, region_ms, outcome in gathered:
+            if isinstance(outcome, Exception):
+                warnings.append(f"Region {cropped.region_id} failed: {outcome}")
+                logger.warning(
+                    "[P3-B] 영역 처리 실패 (%s): %s", cropped.region_id, outcome
+                )
+                if self.cfg.monitor is not None:
+                    self.cfg.monitor.record_failure(
+                        f"structured_extractor:{type(outcome).__name__}"
                     )
-                    logger.warning(
-                        "[P3-B] 영역 처리 실패 (%s): %s",
-                        cropped.region_id, e,
-                    )
-                    if self.cfg.monitor is not None:
-                        self.cfg.monitor.record_failure(f"structured_extractor:{type(e).__name__}")
-                    if trace is not None:
-                        trace.append({
-                            "region_id": cropped.region_id,
-                            "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
-                            "pixel_budget": cropped.pixel_budget,
-                            "elapsed_ms": round(region_ms, 1),
-                            "status": "error",
-                            "error": f"{type(e).__name__}: {e}",
-                        })
+                if trace is not None:
+                    trace.append({
+                        "region_id": cropped.region_id,
+                        "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
+                        "pixel_budget": cropped.pixel_budget,
+                        "elapsed_ms": round(region_ms, 1),
+                        "status": "error",
+                        "error": f"{type(outcome).__name__}: {outcome}",
+                    })
+                continue
+
+            if outcome is None:
+                if trace is not None:
+                    trace.append({
+                        "region_id": cropped.region_id,
+                        "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
+                        "pixel_budget": cropped.pixel_budget,
+                        "elapsed_ms": round(region_ms, 1),
+                        "status": "skipped",
+                        "field_count": 0,
+                        "table_count": 0,
+                        "domain_code_count": 0,
+                        "raw_response": "",
+                    })
+                continue
+
+            fields, tables, codes, raw = outcome
+            all_fields.extend(fields)
+            all_tables.extend(tables)
+            all_domain_codes.extend(codes)
+            if raw:
+                raw_json_parts.append(raw)
+
+            if trace is not None:
+                trace.append({
+                    "region_id": cropped.region_id,
+                    "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
+                    "pixel_budget": cropped.pixel_budget,
+                    "elapsed_ms": round(region_ms, 1),
+                    "status": "ok",
+                    "field_count": len(fields),
+                    "table_count": len(tables),
+                    "domain_code_count": len(codes),
+                    "instruction": cropped.instruction_spec.user_instruction,
+                    "system_prompt": cropped.instruction_spec.system_prompt,
+                    "raw_response": raw,
+                    "fields": [
+                        {
+                            "field_key": f.field_key,
+                            "raw_value": f.raw_value,
+                            "data_type": f.data_type,
+                            "confidence": round(f.confidence, 4),
+                            "is_flagged": f.is_flagged,
+                        }
+                        for f in fields
+                    ],
+                })
 
         # ─── 저신뢰 필드 재시도 (OCR-augmented 강화) ───
         retry_count = 0
@@ -381,6 +414,29 @@ class StructuredExtractor:
                 warnings=warnings,
                 trace=trace,
             )
+
+        # ─── 유령 필드 필터 (x-assembly-rules 있는 서식 전용) ───
+        # field_key 없는 region(header/figure 등)에 full schema가 전달되면 VLM이
+        # 스키마 외 필드(date/author/unit_code/fields/tables 등)까지 생성해 fields[]를
+        # 오염시킴. 여기서 x-assembly-rules 키 집합 + fixed_values 키만 유지한다.
+        if schema and schema.get("x-assembly-rules"):
+            valid_keys = set(schema["x-assembly-rules"].keys())
+            if fixed_values:
+                valid_keys.update(fixed_values.keys())
+            filtered = [f for f in all_fields if f.field_key in valid_keys]
+            ghost_keys = sorted({
+                f.field_key for f in all_fields if f.field_key not in valid_keys
+            })
+            removed = len(all_fields) - len(filtered)
+            if removed:
+                warnings.append(
+                    f"[StructuredExtractor] x-assembly-rules 외 field_key {removed}개 제거: {ghost_keys}"
+                )
+                logger.info(
+                    "[P3-B][%s] 유령 필드 %d개 제거 → %d fields 유지",
+                    doc_id, removed, len(filtered),
+                )
+            all_fields = filtered
 
         # ─── Assembler: x-assembly-rules 있는 스키마는 region별 결과를 full dict로 조립 ───
         assembled_json = None
@@ -473,14 +529,27 @@ class StructuredExtractor:
         if not retry_targets:
             return 0
 
-        retry_count = 0
+        # 재시도 대상들을 병렬 처리 (동시성 상한 MAX_CONCURRENT_REQUESTS)
+        # 각 target은 독립적인 region이며 all_fields에 대한 동시 쓰기는
+        # 서로 다른 인덱스라 단일 이벤트 루프에서 순서 없이도 안전하다.
+
+        @dataclass
+        class _RetryPlan:
+            region_id: str
+            field_indices: list[int]
+            retry_cropped: CroppedRegion
+            retry_spec: InstructionSpec
+            hint: str
+            old_budget: int
+            new_budget: int
+
+        plans: list[_RetryPlan] = []
         for region_id, field_indices in retry_targets.items():
             cropped = region_map[region_id]
             spec = cropped.instruction_spec
             old_budget = cropped.pixel_budget
             new_budget = RETRY_BUDGET_MAP.get(old_budget, old_budget)
 
-            # OCR 힌트 생성 (가용 시)
             hint = ""
             if self._ocr_hint_provider is not None and self._ocr_hint_provider.enabled:
                 try:
@@ -490,7 +559,6 @@ class StructuredExtractor:
                         "[P3-B] OCR 힌트 생성 실패 (%s): %s", region_id, e
                     )
 
-            # 새 InstructionSpec — pixel_budget 상향 + OCR 힌트 + is_retry 표시
             retry_spec = InstructionSpec(
                 region_id=spec.region_id,
                 region_type=spec.region_type,
@@ -518,92 +586,126 @@ class StructuredExtractor:
                 region_id, old_budget, new_budget, len(field_indices),
                 "Y" if hint else "N",
             )
+            plans.append(_RetryPlan(
+                region_id=region_id,
+                field_indices=field_indices,
+                retry_cropped=retry_cropped,
+                retry_spec=retry_spec,
+                hint=hint,
+                old_budget=old_budget,
+                new_budget=new_budget,
+            ))
 
-            region_t0 = time.time()
+        if not plans:
+            return 0
+
+        async def _run_one(plan: "_RetryPlan"):
+            t0 = time.time()
             try:
-                result = self._process_single(retry_cropped, schema, warnings)
-                region_ms = (time.time() - region_t0) * 1000
-                retry_count += 1
-
-                if result is None:
-                    if trace is not None:
-                        trace.append({
-                            "region_id": region_id,
-                            "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
-                            "pixel_budget": new_budget,
-                            "elapsed_ms": round(region_ms, 1),
-                            "status": "retry_skipped",
-                            "is_retry": True,
-                            "ocr_hint_used": bool(hint),
-                        })
-                    continue
-
-                new_fields, _new_tables, _new_codes, new_raw = result
-
-                # 필드 갱신: 재시도 결과가 더 높은 신뢰도면 교체, 아니면 was_retried만 표시
-                new_field_map = {f.field_key: f for f in new_fields}
-                for idx in field_indices:
-                    old_field = all_fields[idx]
-                    new_field = new_field_map.get(old_field.field_key)
-                    if new_field is not None and new_field.confidence > old_field.confidence:
-                        # 신뢰도 상승 — 교체 + was_retried 표시
-                        all_fields[idx] = FieldValue(
-                            field_key=new_field.field_key,
-                            raw_value=new_field.raw_value,
-                            corrected_value=new_field.corrected_value,
-                            data_type=new_field.data_type,
-                            confidence=new_field.confidence,
-                            token_logprobs=new_field.token_logprobs,
-                            is_flagged=new_field.is_flagged,
-                            region_id=new_field.region_id,
-                            was_retried=True,
-                        )
-                    else:
-                        # 재시도해도 개선 없음 — 표시만
-                        all_fields[idx] = FieldValue(
-                            field_key=old_field.field_key,
-                            raw_value=old_field.raw_value,
-                            corrected_value=old_field.corrected_value,
-                            data_type=old_field.data_type,
-                            confidence=old_field.confidence,
-                            token_logprobs=old_field.token_logprobs,
-                            is_flagged=old_field.is_flagged,
-                            region_id=old_field.region_id,
-                            was_retried=True,
-                        )
-
-                if trace is not None:
-                    trace.append({
-                        "region_id": region_id,
-                        "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
-                        "pixel_budget": new_budget,
-                        "elapsed_ms": round(region_ms, 1),
-                        "status": "retry_ok",
-                        "is_retry": True,
-                        "ocr_hint_used": bool(hint),
-                        "ocr_hint_chars": len(hint),
-                        "field_count": len(new_fields),
-                        "instruction": retry_spec.user_instruction,
-                        "raw_response": new_raw,
-                    })
-
+                res = await asyncio.to_thread(
+                    self._process_single, plan.retry_cropped, schema, warnings
+                )
+                return plan, (time.time() - t0) * 1000, res
             except Exception as e:
-                region_ms = (time.time() - region_t0) * 1000
+                return plan, (time.time() - t0) * 1000, e
+
+        async def _run_all():
+            sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+            async def _wrap(p):
+                async with sem:
+                    return await _run_one(p)
+            return await asyncio.gather(*[_wrap(p) for p in plans])
+
+        try:
+            gathered = asyncio.run(_run_all())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                gathered = loop.run_until_complete(_run_all())
+            finally:
+                loop.close()
+
+        retry_count = 0
+        for plan, region_ms, outcome in gathered:
+            if isinstance(outcome, Exception):
                 warnings.append(
-                    f"Region {region_id} retry failed: {e}"
+                    f"Region {plan.region_id} retry failed: {outcome}"
                 )
                 logger.warning(
-                    "[P3-B] 재시도 실패 (%s): %s", region_id, e
+                    "[P3-B] 재시도 실패 (%s): %s", plan.region_id, outcome
                 )
                 if trace is not None:
                     trace.append({
-                        "region_id": region_id,
-                        "pixel_budget": new_budget,
+                        "region_id": plan.region_id,
+                        "pixel_budget": plan.new_budget,
                         "elapsed_ms": round(region_ms, 1),
                         "status": "retry_error",
                         "is_retry": True,
-                        "error": f"{type(e).__name__}: {e}",
+                        "error": f"{type(outcome).__name__}: {outcome}",
                     })
+                continue
+
+            retry_count += 1
+
+            cropped = plan.retry_cropped
+            if outcome is None:
+                if trace is not None:
+                    trace.append({
+                        "region_id": plan.region_id,
+                        "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
+                        "pixel_budget": plan.new_budget,
+                        "elapsed_ms": round(region_ms, 1),
+                        "status": "retry_skipped",
+                        "is_retry": True,
+                        "ocr_hint_used": bool(plan.hint),
+                    })
+                continue
+
+            new_fields, _new_tables, _new_codes, new_raw = outcome
+
+            new_field_map = {f.field_key: f for f in new_fields}
+            for idx in plan.field_indices:
+                old_field = all_fields[idx]
+                new_field = new_field_map.get(old_field.field_key)
+                if new_field is not None and new_field.confidence > old_field.confidence:
+                    all_fields[idx] = FieldValue(
+                        field_key=new_field.field_key,
+                        raw_value=new_field.raw_value,
+                        corrected_value=new_field.corrected_value,
+                        data_type=new_field.data_type,
+                        confidence=new_field.confidence,
+                        token_logprobs=new_field.token_logprobs,
+                        is_flagged=new_field.is_flagged,
+                        region_id=new_field.region_id,
+                        was_retried=True,
+                    )
+                else:
+                    all_fields[idx] = FieldValue(
+                        field_key=old_field.field_key,
+                        raw_value=old_field.raw_value,
+                        corrected_value=old_field.corrected_value,
+                        data_type=old_field.data_type,
+                        confidence=old_field.confidence,
+                        token_logprobs=old_field.token_logprobs,
+                        is_flagged=old_field.is_flagged,
+                        region_id=old_field.region_id,
+                        was_retried=True,
+                    )
+
+            if trace is not None:
+                trace.append({
+                    "region_id": plan.region_id,
+                    "region_type": cropped.region_type.value if hasattr(cropped.region_type, "value") else str(cropped.region_type),
+                    "pixel_budget": plan.new_budget,
+                    "elapsed_ms": round(region_ms, 1),
+                    "status": "retry_ok",
+                    "is_retry": True,
+                    "ocr_hint_used": bool(plan.hint),
+                    "ocr_hint_chars": len(plan.hint),
+                    "field_count": len(new_fields),
+                    "instruction": plan.retry_spec.user_instruction,
+                    "raw_response": new_raw,
+                })
 
         return retry_count
 
@@ -632,12 +734,13 @@ class StructuredExtractor:
         skill,
         skill_name: str,
         form_type: Optional[FormType],
+        schema: Optional[dict] = None,
     ) -> tuple[list[FieldValue], list[RecognizedTable], list[DomainCode], str]:
         """S2/S3에 위임 실행 후 SkillResult → FieldValue 변환.
 
-        S3 구조화 응답(content_type="structured")은 이미 JSON 문자열이므로
-        raw_value에 그대로 보존 → Assembler가 blob으로 복원한다. field_key가 있으면
-        Assembler의 x-assembly-rules 매칭 대상이 된다.
+        구조화 응답은 SkillResult.content가 JSON 문자열이다. field_key가 있고
+        schema에 x-assembly-rules가 정의된 경우 여기서 sub-schema 래퍼를 벗겨
+        corrected_value에는 순수 값만 저장한다 (raw_value는 디버깅용 원본 유지).
         """
         spec_field_key = getattr(spec, "field_key", None) if spec else None
         spec_schema = getattr(spec, "json_schema", None) if spec else None
@@ -653,17 +756,40 @@ class StructuredExtractor:
         )
         result: SkillResult = skill.run(task)
         field_key = spec_field_key or f"{skill_name.lower()}_{cropped.region_id}"
+
+        raw_content = result.content
+        corrected_content = raw_content
+        # field_key + x-assembly-rules path 기반 blob 언래핑
+        if spec_field_key and raw_content and isinstance(schema, dict):
+            rules = schema.get("x-assembly-rules")
+            if isinstance(rules, dict):
+                path = rules.get(spec_field_key)
+                try:
+                    parsed = json.loads(raw_content)
+                except (json.JSONDecodeError, TypeError):
+                    parsed = None
+                if parsed is not None:
+                    from src.vlm.assembler import Assembler
+                    unwrapped = Assembler._unwrap_blob(
+                        parsed, field_key=spec_field_key, path=path,
+                    )
+                    corrected_content = (
+                        json.dumps(unwrapped, ensure_ascii=False)
+                        if isinstance(unwrapped, (list, dict))
+                        else ("" if unwrapped is None else str(unwrapped))
+                    )
+
         field = FieldValue(
             field_key=field_key,
-            raw_value=result.content,
-            corrected_value=result.content,
+            raw_value=raw_content,
+            corrected_value=corrected_content,
             data_type="text",
             confidence=result.confidence,
             token_logprobs=[],
             is_flagged=(result.confidence < 0.70 or not result.content),
             region_id=cropped.region_id,
         )
-        return [field], [], [], result.content
+        return [field], [], [], raw_content
 
     def _process_single(
         self,
@@ -693,10 +819,29 @@ class StructuredExtractor:
             else str(region_type_enum)
         )
 
+        # ─── x-assembly-rules 서식에서 field_key 없는 region 스킵 ───
+        # 필드 단위 크롭 서식(bid_application 등)은 모든 유효 region이 TemplateAugmentor를
+        # 통해 field_key를 부여받는다. 여전히 field_key가 없는 region은 PP-DocLayout이
+        # 전체 서식을 통째로 잡은 full-page bbox(header/figure/table)이므로 처리해도
+        # 의미 있는 값이 나오지 않고, full schema 전달 시 VLM이 스키마 외 필드까지
+        # 생성해 fields[]를 오염시킨다.
+        template_field_key = getattr(spec, "field_key", None)
+        if (
+            schema
+            and isinstance(schema.get("x-assembly-rules"), dict)
+            and not template_field_key
+        ):
+            logger.info(
+                "[P3-B] 스킵 — field_key 없는 region (%s/%s)",
+                cropped.region_id, region_type,
+            )
+            return None
+
         # ─── S3 위임: handwritten_field (모든 form_type) ───
         if region_type_enum == RegionType.HANDWRITTEN_FIELD:
             return self._delegate_to_skill(
                 cropped, spec, self._get_s2_s3("S3"), "S3", form_type,
+                schema=schema,
             )
 
         # ─── S2 위임: text/header/footer + unknown form_type ───
@@ -706,6 +851,7 @@ class StructuredExtractor:
         ):
             return self._delegate_to_skill(
                 cropped, spec, self._get_s2_s3("S2"), "S2", form_type,
+                schema=schema,
             )
 
         # 이미지 인코딩 (pixel_budget 기반 최대 크기)
@@ -724,8 +870,12 @@ class StructuredExtractor:
         text = response.get("text", "").strip()
         logprobs = response.get("logprobs", [])
 
-        # 표 영역 처리
-        if region_type == "table":
+        template_field_key = getattr(spec, "field_key", None)
+
+        # 표 영역 처리 — field_key가 부여된 table region(예: seal_verification_block)은
+        # HTML 파서 경로 대신 guided_json blob 경로로 흘려 FieldValue를 생성해야
+        # Assembler가 field_map에서 찾아 assembled_json에 연결할 수 있다.
+        if region_type == "table" and not template_field_key:
             tables = self._process_table(cropped.region_id, text, logprobs, warnings)
             return [], tables, [], text
 
@@ -734,7 +884,6 @@ class StructuredExtractor:
         domain_codes: list[DomainCode] = []
 
         parsed = _safe_json_loads(text) if text else None
-        template_field_key = getattr(spec, "field_key", None)
 
         # sub-schema 분해 경로에서는 top-level이 dict가 아닐 수 있음 (예: document_date는 문자열 리터럴).
         # dict 파서가 실패해도 template_field_key가 있으면 _loads_any로 재시도하여
@@ -752,12 +901,26 @@ class StructuredExtractor:
             return [], [], [], text
 
         # region에 template field_key가 지정된 경우:
-        # VLM 출력 전체(dict/list/스칼라)를 단일 FieldValue로 보존 → Assembler가 온전히 복원
+        # sub-schema 래퍼를 여기서 해제해 corrected_value에 순수 값만 보존.
+        # (raw_value는 VLM 원본 JSON 그대로 — 디버깅/trace용)
         if template_field_key:
-            val_str = (
+            from src.vlm.assembler import Assembler
+            raw_str = (
                 json.dumps(parsed, ensure_ascii=False)
                 if isinstance(parsed, (list, dict))
                 else str(parsed)
+            )
+            # x-assembly-rules에서 path를 얻어 path-tail 래퍼도 제거
+            path = None
+            if schema and isinstance(schema.get("x-assembly-rules"), dict):
+                path = schema["x-assembly-rules"].get(template_field_key)
+            unwrapped = Assembler._unwrap_blob(
+                parsed, field_key=template_field_key, path=path,
+            )
+            corrected_str = (
+                json.dumps(unwrapped, ensure_ascii=False)
+                if isinstance(unwrapped, (list, dict))
+                else ("" if unwrapped is None else str(unwrapped))
             )
             # logprobs 전체 평균으로 신뢰도 산출
             all_lps = [
@@ -767,8 +930,8 @@ class StructuredExtractor:
             confidence = calc_field_confidence(all_lps, "text")
             fields.append(FieldValue(
                 field_key=template_field_key,
-                raw_value=val_str,
-                corrected_value=val_str,
+                raw_value=raw_str,
+                corrected_value=corrected_str,
                 data_type="text",
                 confidence=confidence,
                 token_logprobs=all_lps,

@@ -1,10 +1,13 @@
 """입찰참가신청서 (bid_application) 신규 FormType 단위 테스트.
 
+필드별 크롭 전환(2026-04-22) 반영 — block-level 대신 22개 field_key 기반.
+
 검증 대상:
   - FormType.BID_APPLICATION enum 존재
   - FORM_TYPE_LABELS 한국어 매핑
-  - bid_application.json 스키마 로드 가능 + x-assembly-rules 구조
-  - bid_application.yaml 템플릿 파싱 + 필수 field_key 존재
+  - bid_application.json 스키마 로드 가능 + 22개 1:1 x-assembly-rules
+  - bid_application.yaml 템플릿 파싱 + 22개 field_key 전수 존재
+  - 템플릿 field_key ∪ fixed_text.field_key == x-assembly-rules keys
   - _validate_bid_application: BID-001~004 검증
 """
 
@@ -25,6 +28,19 @@ from src.domain.form_type_labels import FORM_TYPE_LABELS, get_document_title
 from src.domain.schema_registry import SchemaRegistry
 from src.interfaces.enums import FormType, Severity, ValidationErrorType
 from src.postprocess.validator import _validate_bid_application
+
+
+# 22개 수기 field_key + 3개 fixed_text field_key = 25개 x-assembly-rules 키
+_EXPECTED_HANDWRITTEN_FIELDS = {
+    "company_name", "corporate_reg_number", "representative", "representative_dob",
+    "address", "phone", "business_location", "business_reg_number",
+    "announcement_number", "bid_date", "bid_name", "item_code",
+    "industry_class_number", "acquisition_date", "issuing_office",
+    "agent_name", "agent_dob", "agent_seal",
+    "submission_date", "submitter_name",
+    "seal_issuing_office", "seal_issue_number", "seal_issue_date", "seal_signature",
+}
+_EXPECTED_FIXED_TEXT_FIELDS = {"body_text", "seal_note", "form_title"}
 
 
 # ─────────────────────────────────────────────
@@ -58,23 +74,33 @@ class TestSchema:
         schema = SchemaRegistry().get("bid_application", "v1")
         rules = schema.get("x-assembly-rules")
         assert isinstance(rules, dict)
-        # 핵심 field_key → path 매핑
-        assert rules["applicant_block"] == "applicant"
-        assert rules["bid_info_block"] == "bid_info"
-        assert rules["submission_block"] == "submission"
+        # 필드 단위 1:1 매핑 확인
+        assert rules["company_name"] == "applicant.company_name"
+        assert rules["bid_name"] == "bid_info.bid_name"
         assert rules["agent_seal"] == "agent.seal_present"
-        assert rules["seal_verification_block"] == "seal_verification"
+        assert rules["submission_date"] == "submission.submission_date"
+        assert rules["seal_signature"] == "seal_verification.signature_present"
+        assert rules["form_title"] == "fixed_content.form_title"
+
+    def test_assembly_rules_covers_all_expected_keys(self):
+        schema = SchemaRegistry().get("bid_application", "v1")
+        rules_keys = set(schema["x-assembly-rules"].keys())
+        expected = _EXPECTED_HANDWRITTEN_FIELDS | _EXPECTED_FIXED_TEXT_FIELDS
+        assert expected == rules_keys, (
+            f"missing: {expected - rules_keys}, unexpected: {rules_keys - expected}"
+        )
 
     def test_required_top_level(self):
         schema = SchemaRegistry().get("bid_application", "v1")
         required = set(schema.get("required", []))
-        assert {"analysis", "applicant", "bid_info", "submission"} <= required
+        assert {"applicant", "bid_info", "submission"} <= required
 
-    def test_applicant_required_fields(self):
+    def test_applicant_properties_present(self):
         schema = SchemaRegistry().get("bid_application", "v1")
         applicant = schema["properties"]["applicant"]
-        required = set(applicant.get("required", []))
-        assert {"company_name", "representative", "business_reg_number"} <= required
+        assert applicant["type"] == "object"
+        props = set(applicant.get("properties", {}).keys())
+        assert {"company_name", "representative", "business_reg_number"} <= props
 
 
 # ─────────────────────────────────────────────
@@ -92,32 +118,48 @@ class TestTemplate:
         assert tpl["form_type"] == "bid_application"
         assert isinstance(tpl.get("versions"), list) and tpl["versions"]
 
-    def test_version_1_0_fields(self):
+    def test_version_1_0_has_all_field_keys(self):
         tpl = self._load()
         v1 = tpl["versions"][0]
         assert v1["version"] == "1.0"
         assert v1["form_identifier"] == "별지 제13호 서식"
         field_keys = {f["field_key"] for f in v1["fields"]}
-        # x-assembly-rules와 일치해야 함 (키들)
-        expected = {
-            "doc_number", "applicant_block", "bid_info_block",
-            "agent_block", "agent_seal",
-            "submission_block", "seal_verification_block",
-        }
-        assert expected <= field_keys, f"missing: {expected - field_keys}"
+        assert _EXPECTED_HANDWRITTEN_FIELDS == field_keys, (
+            f"missing: {_EXPECTED_HANDWRITTEN_FIELDS - field_keys}, "
+            f"unexpected: {field_keys - _EXPECTED_HANDWRITTEN_FIELDS}"
+        )
+
+    def test_fixed_text_keys_present(self):
+        tpl = self._load()
+        v1 = tpl["versions"][0]
+        fixed_keys = {f["field_key"] for f in v1.get("fixed_text", [])}
+        assert _EXPECTED_FIXED_TEXT_FIELDS == fixed_keys
 
     def test_field_keys_match_assembly_rules(self):
-        """템플릿 fields ∪ fixed_text ∪ {form_identifier} ⊇ x-assembly-rules keys."""
+        """템플릿 fields ∪ fixed_text == x-assembly-rules keys."""
         tpl = self._load()
         v1 = tpl["versions"][0]
         field_keys = {f["field_key"] for f in v1.get("fields", [])}
         field_keys |= {f["field_key"] for f in v1.get("fixed_text", [])}
-        field_keys.add("form_identifier")  # P3-A에서 추출되어 assemble됨
 
         schema = SchemaRegistry().get("bid_application", "v1")
         rules_keys = set(schema["x-assembly-rules"].keys())
         missing = rules_keys - field_keys
-        assert not missing, f"x-assembly-rules에 있으나 template에 없는 field_key: {missing}"
+        unexpected = field_keys - rules_keys
+        assert not missing and not unexpected, (
+            f"missing in template: {missing}, "
+            f"missing in x-assembly-rules: {unexpected}"
+        )
+
+    def test_every_field_has_bbox(self):
+        """fields 엔트리는 bbox 필수 (fixed_text는 form_title 제외 허용)."""
+        tpl = self._load()
+        v1 = tpl["versions"][0]
+        for f in v1["fields"]:
+            bbox = f.get("bbox")
+            assert isinstance(bbox, dict) and {"x1", "y1", "x2", "y2"} <= bbox.keys(), (
+                f"{f['field_key']}: bbox missing or malformed"
+            )
 
 
 # ─────────────────────────────────────────────
