@@ -29,7 +29,11 @@ from src.interfaces.types import (
     SkillResult,
     SkillTask,
 )
-from src.vlm.budget_config import DISPATCH_ORDER, PIXEL_BUDGETS as PIXEL_BUDGET
+from src.vlm.budget_config import (
+    DISPATCH_ORDER,
+    MAX_CONCURRENT_REQUESTS,
+    PIXEL_BUDGETS as PIXEL_BUDGET,
+)
 from src.vlm.skills.handwriting_reader import HandwritingReader
 from src.vlm.skills.printed_text_reader import PrintedTextReader
 from src.vlm.skills.seal_reader import SealReader
@@ -199,7 +203,7 @@ class SkillRegistry:
     # ─────────────────────────────────────────────
     #  비동기 디스패치 — 동일 budget 그룹 내 병렬 처리
     # ─────────────────────────────────────────────
-    MAX_CONCURRENT_REQUESTS = 16
+    # (MAX_CONCURRENT_REQUESTS는 budget_config에서 공용 import — 위 클래스 밖)
 
     async def dispatch_async(
         self,
@@ -222,7 +226,7 @@ class SkillRegistry:
         indexed_results: list[Optional[SkillResult]] = [None] * len(tasks)
 
         t_start = time.time()
-        semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_REQUESTS)
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
         async def run_one(task: SkillTask) -> tuple[int, SkillResult, str, float]:
             skill_name = self._resolve_skill(task)

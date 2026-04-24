@@ -32,6 +32,12 @@ from src.interfaces.types import ValidationError
 logger = logging.getLogger(__name__)
 
 
+# ARITHMETIC 허용 오차 — 수량×단가 같은 정수 연산 결과에서 부동소수/반올림
+# 노이즈를 흡수하기 위한 절대 허용 오차(원 단위). yaml 규칙에 `tolerance`가
+# 명시되면 그 값을 우선 사용한다.
+DEFAULT_ARITHMETIC_TOLERANCE: float = 1.0
+
+
 def _default_rules_dir() -> Path:
     here = Path(__file__).resolve()
     for candidate in (here.parent.parent.parent, Path.cwd()):
@@ -268,7 +274,11 @@ class CrossFieldValidator:
                 expected = sum(operands)  # type: ignore[arg-type]
             else:
                 return True
-            return abs(result - expected) < 1
+            try:
+                tolerance = float(rule.get("tolerance", DEFAULT_ARITHMETIC_TOLERANCE))
+            except (TypeError, ValueError):
+                tolerance = DEFAULT_ARITHMETIC_TOLERANCE
+            return abs(result - expected) < tolerance
         except Exception:
             return True
 

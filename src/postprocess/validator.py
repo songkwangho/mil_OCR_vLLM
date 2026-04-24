@@ -621,7 +621,17 @@ class P4Validator:
 
     @staticmethod
     def _build_penalty_map(errors: list[ValidationError]) -> dict[str, float]:
-        """검증 오류에서 필드별 감점 맵 생성."""
+        """검증 오류에서 필드별 감점 맵 생성.
+
+        field_ref 형태:
+          - "applicant.corporate_reg_number"     → 단일 dotted path
+          - "items[0].total"                     → 배열 index 포함
+          - "writer.name,writer.rank"            → 복수 필드 (NAME_MATCH 등)
+          - "addr,business_location"             → ADDR_CONTAINS
+
+        FieldValue.field_key는 dotted path 전체일 수도, 리프 세그먼트일
+        수도 있어 후보 키를 전부 발행해 어느 쪽이든 매칭되도록 한다.
+        """
         penalty_map: dict[str, float] = {}
 
         penalty_by_type = {
@@ -632,12 +642,26 @@ class P4Validator:
             ValidationErrorType.FORMAT: PENALTY_FORMAT,
         }
 
+        def _candidate_keys(field_ref: str) -> list[str]:
+            keys: list[str] = []
+            for part in field_ref.split(","):
+                p = part.strip()
+                if not p:
+                    continue
+                # 배열 index 제거: items[0].total → items.total
+                p_clean = re.sub(r"\[\d+\]", "", p)
+                # 전체 dotted path (스키마에 dotted field_key를 쓰는 경우)
+                keys.append(p_clean)
+                # 리프 세그먼트 (FieldValue.field_key가 리프만 담는 경우)
+                if "." in p_clean:
+                    keys.append(p_clean.rsplit(".", 1)[-1])
+            return keys
+
         for err in errors:
             penalty = penalty_by_type.get(err.error_type, 0.05)
-            # field_ref에서 필드 키 추출 (items[0].total → items)
-            field_key = err.field_ref.split("[")[0].split(",")[0].strip()
-            if field_key:
-                current = penalty_map.get(field_key, 0.0)
-                penalty_map[field_key] = current + penalty
+            for field_key in _candidate_keys(err.field_ref or ""):
+                if not field_key:
+                    continue
+                penalty_map[field_key] = penalty_map.get(field_key, 0.0) + penalty
 
         return penalty_map

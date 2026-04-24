@@ -29,7 +29,7 @@ from src.interfaces.enums import FormType
 from src.interfaces.types import (
     CroppedRegion, FieldValue, ValidationError, VLMResult,
 )
-from src.vlm.logprobs_scorer import calc_field_confidence
+from src.vlm.logprobs_scorer import calc_field_confidence, is_flagged
 from src.vlm.vlm_client import VLMClient, encode_image_base64
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,7 @@ class ReasoningTarget:
     current_confidence: float
     cropped_region: CroppedRegion
     reason: str                                       # "consistency" | "low_confidence"
+    original_data_type: str = "text"                  # 원본 FieldValue.data_type 승계용
     constraint: Optional[str] = None                  # 일관성 제약 문장
     context_hints: Optional[dict[str, str]] = None    # 힌트 {field_key: value}
 
@@ -214,6 +215,7 @@ class ConsistencyReasoningLoop:
                     current_confidence=fv.confidence,
                     cropped_region=region,
                     reason="consistency",
+                    original_data_type=fv.data_type or "text",
                     constraint=constraint,
                     context_hints=self._select_relevant_context(key, high_conf),
                 ))
@@ -246,6 +248,7 @@ class ConsistencyReasoningLoop:
                 current_confidence=fv.confidence,
                 cropped_region=region,
                 reason="low_confidence",
+                original_data_type=fv.data_type or "text",
                 context_hints=relevant,
             ))
         return targets
@@ -287,7 +290,10 @@ class ConsistencyReasoningLoop:
             lp.get("logprob", 0.0) if isinstance(lp, dict) else float(lp)
             for lp in logprobs
         ]
-        new_confidence = calc_field_confidence(token_lps, "text") if token_lps else 0.0
+        data_type = target.original_data_type or "text"
+        new_confidence = (
+            calc_field_confidence(token_lps, data_type) if token_lps else 0.0
+        )
 
         if new_confidence <= target.current_confidence:
             # 개선 없으면 원본 유지
@@ -299,10 +305,10 @@ class ConsistencyReasoningLoop:
             field_key=target.field_key,
             raw_value=text,
             corrected_value=new_value,
-            data_type="text",
+            data_type=data_type,
             confidence=round(new_confidence, 4),
             token_logprobs=token_lps,
-            is_flagged=new_confidence < CONSISTENCY_CONFIDENCE_THRESHOLD,
+            is_flagged=is_flagged(new_confidence, data_type),
             region_id=target.cropped_region.region_id,
             was_retried=True,
         )

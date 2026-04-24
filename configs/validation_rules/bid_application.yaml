@@ -1,25 +1,12 @@
 # Layer 2 — bid_application 전용 교차 검증 규칙
-# 기존 validator.py _validate_bid_application (BID-001~004) 이관 + 추가.
+# 기존 validator.py _validate_bid_application (BID-003~004 + 교차 검증) 이관 + 추가.
+#
+# NOTE: business_reg_number / corporate_reg_number 형식 검증은 Layer 1
+# (configs/validation_rules/common.yaml field_key_patterns)에서 이미 담당.
+# Layer 2에서 중복 REGEX_MATCH를 넣으면 동일 오류가 이중 감점되므로 여기에는
+# 싣지 않는다.
 
 rules:
-  - rule_id: bid_001
-    type: REGEX_MATCH
-    field: applicant.business_reg_number
-    pattern: '^\d{3}-\d{2}-\d{5}$'
-    error_type: code_format
-    severity: high
-    penalty: -0.15
-    message: "사업자등록번호 형식 불일치 (NNN-NN-NNNNN)"
-
-  - rule_id: bid_002
-    type: REGEX_MATCH
-    field: applicant.corporate_reg_number
-    pattern: '^\d{5}-\d{7}$'
-    error_type: code_format
-    severity: high
-    penalty: -0.15
-    message: "법인등록번호 형식 불일치 (NNNNN-NNNNNNN)"
-
   - rule_id: bid_003
     type: NOT_EMPTY
     field: submission.submission_date

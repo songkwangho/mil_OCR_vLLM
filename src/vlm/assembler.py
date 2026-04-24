@@ -160,8 +160,15 @@ class Assembler:
             return None
 
         raw = (fv.corrected_value or fv.raw_value or "").strip()
-        if not raw or raw.lower() == "none":
+        if not raw or raw.lower() in ("none", "null"):
             return None
+
+        # JSON 리터럴 bool — structured_extractor가 scalar bool을
+        # json.dumps로 저장하므로 역변환 필요.
+        if raw == "true":
+            return True
+        if raw == "false":
+            return False
 
         if raw.startswith(("{", "[")):
             try:

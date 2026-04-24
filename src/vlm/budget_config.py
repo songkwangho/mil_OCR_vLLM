@@ -28,3 +28,7 @@ PIXEL_BUDGETS: dict[str, int] = {
 FALLBACK_PIXEL_BUDGET: int = 560
 
 DISPATCH_ORDER: list[int] = [140, 560, 1120]
+
+# 동시 vLLM 요청 상한 — StructuredExtractor + SkillRegistry 공용.
+# 두 컴포넌트가 같은 루프에 묶일 경우 서로 경쟁하므로 동일 상수를 참조한다.
+MAX_CONCURRENT_REQUESTS: int = 16

@@ -182,36 +182,10 @@ class TestBidValidator:
         errors = _validate_bid_application(data)
         assert errors == []
 
-    def test_bid_001_business_reg_format_violation(self):
-        data = {
-            "applicant": {"business_reg_number": "1376312345"},  # 하이픈 누락
-            "submission": {"submission_date": "2024년 05월 15일", "submitter_name": "홍길동"},
-        }
-        errors = _validate_bid_application(data)
-        assert any(e.error_id == "bid_001" for e in errors)
-        e = next(e for e in errors if e.error_id == "bid_001")
-        assert e.error_type == ValidationErrorType.CODE_FORMAT
-        assert e.severity == Severity.HIGH
-
-    def test_bid_002_corporate_reg_format_violation(self):
-        data = {
-            "applicant": {
-                "business_reg_number": "137-63-12345",
-                "corporate_reg_number": "INVALID",
-            },
-            "submission": {"submission_date": "2024-05-15", "submitter_name": "홍길동"},
-        }
-        errors = _validate_bid_application(data)
-        assert any(e.error_id == "bid_002" for e in errors)
-
-    def test_bid_002_skip_when_empty(self):
-        """법인등록번호는 있을 때만 검증 (개인사업자는 없음)."""
-        data = {
-            "applicant": {"business_reg_number": "137-63-12345"},  # corp_reg 없음
-            "submission": {"submission_date": "2024-05-15", "submitter_name": "홍길동"},
-        }
-        errors = _validate_bid_application(data)
-        assert not any(e.error_id == "bid_002" for e in errors)
+    # NOTE: business_reg_number / corporate_reg_number 형식 검증은
+    # Layer 1 (FieldPatternValidator + common.yaml)에서 담당하므로
+    # Layer 2 전용 shim인 _validate_bid_application 테스트에서는 제외.
+    # 관련 커버리지는 tests/test_field_pattern_validator.py 참조.
 
     def test_bid_003_missing_submission_date(self):
         data = {
@@ -232,13 +206,17 @@ class TestBidValidator:
         assert any(e.error_id == "bid_004" for e in errors)
 
     def test_accepts_raw_json_string(self):
-        """assembled_json이 없고 raw_json만 있는 폴백 경로."""
+        """assembled_json이 없고 raw_json만 있는 폴백 경로.
+
+        Layer 2가 raw_json 문자열도 파싱해서 받아들이는지 확인.
+        (bid_003 — submission_date 누락으로 오류 발생)
+        """
         raw = json.dumps({
-            "applicant": {"business_reg_number": "WRONG"},
-            "submission": {"submission_date": "2024-05-15", "submitter_name": "홍길동"},
+            "applicant": {"business_reg_number": "137-63-12345"},
+            "submission": {"submitter_name": "홍길동"},  # submission_date 누락
         })
         errors = _validate_bid_application(raw)
-        assert any(e.error_id == "bid_001" for e in errors)
+        assert any(e.error_id == "bid_003" for e in errors)
 
     def test_none_input_returns_empty(self):
         assert _validate_bid_application(None) == []

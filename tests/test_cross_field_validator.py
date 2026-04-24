@@ -29,32 +29,22 @@ def validator():
 # ─────────────────────────────────────────────
 
 class TestBidApplicationRules:
-    def test_regex_match_pass(self, validator):
+    # NOTE: bid_001/bid_002 (사업자·법인등록번호 형식)은 Layer 1
+    # (FieldPatternValidator + common.yaml)에서 담당하므로 Layer 2
+    # CrossFieldValidator 테스트에서는 제외. 관련 커버리지는
+    # tests/test_field_pattern_validator.py 참조.
+
+    def test_no_format_rules_on_layer2(self, validator):
+        """잘못된 등록번호 형식이 있어도 Layer 2는 REGEX 규칙을 발행하지 않음."""
         data = {
-            "applicant": {"business_reg_number": "137-63-12345"},
+            "applicant": {
+                "business_reg_number": "1376312345",
+                "corporate_reg_number": "INVALID",
+            },
             "submission": {"submission_date": "2024년 05월 15일", "submitter_name": "홍길동"},
         }
         errors = validator.validate(data, FormType.BID_APPLICATION)
-        assert not any(e.error_id == "bid_001" for e in errors)
-
-    def test_bid_001_business_reg_format_fail(self, validator):
-        data = {
-            "applicant": {"business_reg_number": "1376312345"},
-            "submission": {"submission_date": "2024-05-15", "submitter_name": "홍길동"},
-        }
-        errors = validator.validate(data, FormType.BID_APPLICATION)
-        assert any(e.error_id == "bid_001" for e in errors)
-
-    def test_bid_002_corporate_reg_format_fail(self, validator):
-        data = {
-            "applicant": {
-                "business_reg_number": "137-63-12345",
-                "corporate_reg_number": "INVALID",
-            },
-            "submission": {"submission_date": "2024-05-15", "submitter_name": "홍길동"},
-        }
-        errors = validator.validate(data, FormType.BID_APPLICATION)
-        assert any(e.error_id == "bid_002" for e in errors)
+        assert not any(e.error_id in {"bid_001", "bid_002"} for e in errors)
 
     def test_bid_003_submission_date_missing(self, validator):
         data = {

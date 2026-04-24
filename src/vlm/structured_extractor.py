@@ -219,7 +219,9 @@ RETRY_BUDGET_MAP: dict[int, int] = {
 
 # 동시 처리 제한 — vLLM --max-num-seqs=64 기준 여유 있는 상한.
 # 동일 이벤트 루프에서 벡터화된 I/O만 대기하므로 CPU 부담은 미미.
-MAX_CONCURRENT_REQUESTS: int = 16
+# 공용 상수(budget_config.MAX_CONCURRENT_REQUESTS)를 재export 해 기존
+# `from src.vlm.structured_extractor import MAX_CONCURRENT_REQUESTS` 경로 호환.
+from src.vlm.budget_config import MAX_CONCURRENT_REQUESTS  # noqa: F401,E402
 
 
 class StructuredExtractor:
@@ -917,11 +919,16 @@ class StructuredExtractor:
             unwrapped = Assembler._unwrap_blob(
                 parsed, field_key=template_field_key, path=path,
             )
-            corrected_str = (
-                json.dumps(unwrapped, ensure_ascii=False)
-                if isinstance(unwrapped, (list, dict))
-                else ("" if unwrapped is None else str(unwrapped))
-            )
+            # bool/None은 JSON literal ("true"/"false"/"null")로 저장해
+            # Assembler가 Python bool/None으로 복원할 수 있게 한다.
+            # str()을 쓰면 Python repr("True"/"False"/"None")이 되어
+            # JSON 스키마 (bool/null) 위반이 된다.
+            if isinstance(unwrapped, (list, dict)):
+                corrected_str = json.dumps(unwrapped, ensure_ascii=False)
+            elif isinstance(unwrapped, bool) or unwrapped is None:
+                corrected_str = json.dumps(unwrapped)
+            else:
+                corrected_str = str(unwrapped)
             # logprobs 전체 평균으로 신뢰도 산출
             all_lps = [
                 lp.get("logprob", 0.0) if isinstance(lp, dict) else float(lp)

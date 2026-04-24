@@ -44,7 +44,12 @@
       "Bash(curl -sf http://localhost:8200/health)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/src/vlm/structured_extractor.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/scripts/run_pipeline_with_outputs.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/src/postprocess/validator.py'\\).read\\(\\)\\); ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/src/postprocess/domain_dict_corrector.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/src/postprocess/validator.py'\\).read\\(\\)\\); ast.parse\\(open\\('/home/team_gh/mil_OCR_v2/src/postprocess/domain_dict_corrector.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(grep -n \"except:\\\\|except\\\\s*$\\\\|except Exception:\\\\|except.*pass\" /home/team_gh/mil_OCR_v2/src/vlm/structured_extractor.py /home/team_gh/mil_OCR_v2/src/vlm/assembler.py /home/team_gh/mil_OCR_v2/src/postprocess/validator.py /home/team_gh/mil_OCR_v2/src/postprocess/consistency_reasoning_loop.py /home/team_gh/mil_OCR_v2/src/postprocess/cross_field_validator.py /home/team_gh/mil_OCR_v2/src/postprocess/field_pattern_validator.py)",
+      "Bash(python -m pytest tests/test_cross_field_validator.py tests/test_field_pattern_validator.py tests/test_bid_application.py tests/test_consistency_reasoning.py -x --tb=short)",
+      "Bash(/home/team_gh/toy_dev/miniforge3/envs/dl/bin/python -m pytest tests/test_cross_field_validator.py tests/test_field_pattern_validator.py tests/test_bid_application.py tests/test_consistency_reasoning.py -x --tb=short)",
+      "Bash(/home/team_gh/toy_dev/miniforge3/envs/dl/bin/python -m pytest tests/test_domain_dict_corrector.py tests/test_fixed_text.py tests/test_skills_unit.py -x --tb=short)",
+      "Bash(/home/team_gh/toy_dev/miniforge3/envs/dl/bin/python -c ' *)"
     ]
   }
 }
